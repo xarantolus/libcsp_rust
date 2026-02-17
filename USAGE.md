@@ -22,11 +22,28 @@ fn main() -> libcsp::Result<()> {
     // When dropped, it calls `csp_free_resources()`.
     
     // Start the background router task (optional but recommended)
+    // Note: This spawns a thread/task using the C library's arch layer.
     node.route_start_task(4096, 0)?;
 
     Ok(())
 }
 ```
+
+### Manual Routing (For RTOS/Embassy)
+If you are in an environment where you want to manage tasks yourself (like `embassy` or a custom RTOS), do **not** call `route_start_task`. Instead, call `route_work` in your own task:
+
+```rust
+// Dedicated router task
+loop {
+    // This call is BLOCKING. It will put your task to sleep 
+    // and wake up instantly when a packet is pumped via handle.rx(pkt).
+    node.route_work(libcsp::MAX_TIMEOUT).unwrap();
+}
+```
+
+**Note on Latency:** Because `handle.rx(pkt)` signals the internal router queue, the handoff from your hardware RX interrupt/task to the CSP router is immediate. You do not need to poll.
+
+**Note on RDP:** The router must run periodically even if no hardware traffic exists to handle RDP retransmissions and connection timeouts.
 
 ## 2. Packet Management (The `Packet` Struct)
 
@@ -161,7 +178,38 @@ while let Some(pkt) = sniffer.read(1000) {
 }
 ```
 
-## 6. Summary of Ownership
+## 6. Custom Arch and Time (RTOS/Bare-Metal)
+
+In a `no_std` or custom RTOS environment (like `embassy` on STM32), libcsp needs primitives for time, mutexes, and queues. 
+
+### Providing Time
+Libcsp does not have a built-in clock for `no_std`. You **must** provide the following C symbols. You can implement them directly in Rust using `#[no_mangle]`:
+
+```rust
+#[no_mangle]
+pub extern "C" fn csp_get_ms() -> u32 {
+    // Return system time in milliseconds
+    // E.g. embassy_time::Instant::now().as_millis() as u32
+    0 
+}
+
+#[no_mangle]
+pub extern "C" fn csp_get_s() -> u32 {
+    // Return system time in seconds
+    0
+}
+```
+
+### Providing OS Primitives
+If you enable the `external-arch` feature, the library will not compile its own POSIX/FreeRTOS arch files. You must then provide implementation for:
+*   **Queues**: `csp_queue_create`, `csp_queue_enqueue`, `csp_queue_dequeue`, etc.
+*   **Semaphores**: `csp_bin_sem_create`, `csp_bin_sem_wait`, `csp_bin_sem_post`.
+*   **Malloc**: `csp_malloc`, `csp_free` (can bridge to your Rust global allocator).
+*   **System**: `csp_sys_memfree`, `csp_sys_reboot`, `csp_sys_shutdown`.
+
+See `libcsp/include/csp/arch/` for the exact C signatures required.
+
+## 7. Summary of Ownership
 
 | Action | Ownership |
 |--------|-----------|

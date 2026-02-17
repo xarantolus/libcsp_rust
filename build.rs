@@ -324,56 +324,63 @@ fn compile_libcsp(
     build.file(src_dir.join("arch/csp_time.c"));
 
     // OS-specific arch files
-    match target_os.as_str() {
-        "windows" => {
-            build.define("CSP_WINDOWS", "1");
-            let win_src = src_dir.join("arch/windows");
-            for f in &[
-                "csp_clock.c",
-                "csp_malloc.c",
-                "csp_queue.c",
-                "csp_semaphore.c",
-                "csp_system.c",
-                "csp_thread.c",
-                "csp_time.c",
-                "windows_queue.c",
-            ] {
-                build.file(win_src.join(f));
+    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_err() {
+        match target_os.as_str() {
+            "windows" => {
+                build.define("CSP_WINDOWS", "1");
+                let win_src = src_dir.join("arch/windows");
+                for f in &[
+                    "csp_clock.c",
+                    "csp_malloc.c",
+                    "csp_queue.c",
+                    "csp_semaphore.c",
+                    "csp_system.c",
+                    "csp_thread.c",
+                    "csp_time.c",
+                    "windows_queue.c",
+                ] {
+                    build.file(win_src.join(f));
+                }
+            }
+            "macos" => {
+                build.define("CSP_MACOSX", "1");
+                let mac_src = src_dir.join("arch/macosx");
+                for f in &[
+                    "csp_clock.c",
+                    "csp_malloc.c",
+                    "csp_queue.c",
+                    "csp_semaphore.c",
+                    "csp_system.c",
+                    "csp_thread.c",
+                    "csp_time.c",
+                    "pthread_queue.c",
+                ] {
+                    build.file(mac_src.join(f));
+                }
+            }
+            _ => {
+                // Default: POSIX (Linux, etc.)
+                build.define("CSP_POSIX", "1");
+                let posix_src = src_dir.join("arch/posix");
+                for f in &[
+                    "csp_clock.c",
+                    "csp_malloc.c",
+                    "csp_queue.c",
+                    "csp_semaphore.c",
+                    "csp_system.c",
+                    "csp_thread.c",
+                    "csp_time.c",
+                    "pthread_queue.c",
+                ] {
+                    build.file(posix_src.join(f));
+                }
             }
         }
-        "macos" => {
-            build.define("CSP_MACOSX", "1");
-            let mac_src = src_dir.join("arch/macosx");
-            for f in &[
-                "csp_clock.c",
-                "csp_malloc.c",
-                "csp_queue.c",
-                "csp_semaphore.c",
-                "csp_system.c",
-                "csp_thread.c",
-                "csp_time.c",
-                "pthread_queue.c",
-            ] {
-                build.file(mac_src.join(f));
-            }
-        }
-        _ => {
-            // Default: POSIX (Linux, etc.)
-            build.define("CSP_POSIX", "1");
-            let posix_src = src_dir.join("arch/posix");
-            for f in &[
-                "csp_clock.c",
-                "csp_malloc.c",
-                "csp_queue.c",
-                "csp_semaphore.c",
-                "csp_system.c",
-                "csp_thread.c",
-                "csp_time.c",
-                "pthread_queue.c",
-            ] {
-                build.file(posix_src.join(f));
-            }
-        }
+    } else {
+        // When using external-arch, the user must provide these symbols.
+        // We define CSP_POSIX as a sensible fallback for shared headers,
+        // but no arch-specific C files are compiled.
+        build.define("CSP_POSIX", "1");
     }
 
     // Optional: SocketCAN driver
