@@ -49,6 +49,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         // Poll both sockets
         if let Some(conn) = sock_data.accept(100) {
+            let src_addr = conn.src_addr();
+            let src_port = conn.src_port();
+            
             while let Some(pkt) = conn.read(100) {
                 let data = pkt.data();
                 if data.len() < 8 {
@@ -65,15 +68,21 @@ fn main() -> anyhow::Result<()> {
                 packet_prng.fill(&mut expected[8..]);
 
                 if data != expected {
-                    eprintln!("[RX] DATA ERROR at pkt_count {}! Got {} bytes", pkt_count, data.len());
+                    eprintln!("[RX] DATA ERROR from {}:{} at count {}! Got {} bytes", src_addr, src_port, pkt_count, data.len());
                     errors += 1;
                 }
                 bytes_recv += data.len() as u64;
                 count += 1;
+
+                if count % 100 == 0 {
+                    println!("[RX] Received 100 packets (latest count={}, from {}:{})", pkt_count, src_addr, src_port);
+                }
             }
         }
 
         if let Some(conn) = sock_sfp.accept(100) {
+            let src_addr = conn.src_addr();
+            println!("[RX] Incoming SFP transfer from {}...", src_addr);
             match conn.sfp_recv(1000) {
                 Ok(data) => {
                     if data.len() < 8 {
@@ -90,15 +99,15 @@ fn main() -> anyhow::Result<()> {
                     blob_prng.fill(&mut expected[8..]);
 
                     if data != expected {
-                        eprintln!("[RX] SFP DATA ERROR at count {}! Got {} bytes", pkt_count, data.len());
+                        eprintln!("[RX] SFP DATA ERROR from {} at count {}! Got {} bytes", src_addr, pkt_count, data.len());
                         errors += 1;
                     }
                     bytes_recv += data.len() as u64;
                     count += 100;
-                    println!("[RX] SFP received {} bytes (count={})", data.len(), pkt_count);
+                    println!("[RX] SFP complete: received {} bytes from {} (count={})", data.len(), src_addr, pkt_count);
                 }
                 Err(e) => {
-                    eprintln!("[RX] SFP Receive Failed: {:?}", e);
+                    eprintln!("[RX] SFP Receive Failed from {}: {:?}", src_addr, e);
                     errors += 1;
                 }
             }

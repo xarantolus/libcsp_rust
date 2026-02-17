@@ -207,16 +207,31 @@ async fn main(spawner: Spawner) {
     let mut server = libcsp::Dispatcher::new().unwrap();
     
     // 1. Normal/RDP data port
-    server.register(DATA_PORT, move |_conn, pkt| {
+    server.register(DATA_PORT, move |conn, pkt| {
+        let src_addr = conn.src_addr();
+        let src_port = conn.src_port();
         let data = pkt.data();
         let mut expected = vec![0u8; data.len()];
-        prng.fill(&mut expected);
+        
+        if data.len() >= 8 {
+            let mut count_buf = [0u8; 8];
+            count_buf.copy_from_slice(&data[0..8]);
+            let pkt_count = u64::from_le_bytes(count_buf);
+            
+            let mut packet_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+            expected[0..8].copy_from_slice(&count_buf);
+            packet_prng.fill(&mut expected[8..]);
 
-        if data != expected {
-            rprintln!("[RX] ERR count {}", count);
+            if data != expected {
+                rprintln!("[RX] ERR count {} from {}:{}", pkt_count, src_addr, src_port);
+            }
+            bytes_recv += data.len() as u64;
+            count += 1;
+            
+            if count % 100 == 0 {
+                rprintln!("[RX] Pkt 100 ok (latest count={}, from {}:{})", pkt_count, src_addr, src_port);
+            }
         }
-        bytes_recv += data.len() as u64;
-        count += 1;
         None
     }).unwrap();
 
@@ -232,12 +247,14 @@ async fn main(spawner: Spawner) {
         
         // Check for SFP connections manually as Dispatcher doesn't do SFP blobs yet
         if let Some(conn) = sfp_sock.accept(0) {
+            let src_addr = conn.src_addr();
+            rprintln!("[RX] SFP start from {}...", src_addr);
             match conn.sfp_recv(1000) {
                 Ok(data) => {
-                    rprintln!("[RX] SFP received {} bytes", data.len());
-                    // Verification would need another PRNG state or similar
+                    rprintln!("[RX] SFP ok: received {} bytes from {}", data.len(), src_addr);
+                    bytes_recv += data.len() as u64;
                 }
-                Err(_) => rprintln!("[RX] SFP FAIL"),
+                Err(e) => rprintln!("[RX] SFP FAIL from {}: {:?}", src_addr, e),
             }
         }
 
