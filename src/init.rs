@@ -254,6 +254,7 @@ impl CspNode {
     // ── One-shot transactions ─────────────────────────────────────────────
 
     /// Perform a full request/reply transaction (new connection each call).
+    #[allow(clippy::too_many_arguments)]
     ///
     /// Creates a connection, sends `out_buf`, waits for a reply into `in_buf`,
     /// then closes the connection.
@@ -322,7 +323,7 @@ impl CspNode {
 
     /// Send a ping to `node` and return the echo time in ms, or -1 on error.
     pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> i32 {
-        unsafe { sys::csp_ping(node, timeout, payload_size as u32, opts) }
+        unsafe { sys::csp_ping(node, timeout, payload_size, opts) }
     }
 
     /// Request and return free memory on `node`.

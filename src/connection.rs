@@ -87,7 +87,7 @@ impl Connection {
     /// by the caller and will be freed when dropped.
     pub fn read(&self, timeout: u32) -> Option<Packet> {
         let ptr =
-            unsafe { sys::csp_read(self.inner, timeout) as *mut sys::csp_packet_t };
+            unsafe { sys::csp_read(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {

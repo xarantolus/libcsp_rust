@@ -32,6 +32,8 @@ extern crate alloc;
 
 use alloc::ffi::CString;
 use alloc::vec::Vec;
+#[allow(unused_imports)]
+use alloc::vec; // bring vec! macro into scope for no_std
 
 use crate::error::csp_result;
 use crate::sys;
@@ -119,9 +121,7 @@ pub fn check(table: &str) -> Result<i32> {
 /// the internal buffer was too small (increase `buf_size` or use the default
 /// of 256).
 pub fn save(buf_size: usize) -> Result<alloc::string::String> {
-    let mut buf: Vec<u8> = Vec::with_capacity(buf_size);
-    // Ensure the vector has the right len so the C function can write into it.
-    buf.resize(buf_size, 0u8);
+    let mut buf: Vec<u8> = vec![0u8; buf_size];
 
     let ret = unsafe {
         sys::csp_rtable_save(buf.as_mut_ptr() as *mut core::ffi::c_char, buf_size)

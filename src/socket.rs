@@ -88,7 +88,7 @@ impl Socket {
     /// Returns `None` on timeout or error.
     pub fn recvfrom(&self, timeout: u32) -> Option<Packet> {
         let ptr =
-            unsafe { sys::csp_recvfrom(self.inner, timeout) as *mut sys::csp_packet_t };
+            unsafe { sys::csp_recvfrom(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {

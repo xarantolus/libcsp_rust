@@ -12,6 +12,7 @@ version 2.1 of the License, or (at your option) any later version.
 //! RAII wrapper for `csp_packet_t`.
 
 use crate::sys;
+use core::ffi::c_void;
 use core::slice;
 
 /// The byte offset at which the data payload begins inside `csp_packet_t`.
@@ -142,7 +143,7 @@ impl Packet {
     #[inline]
     pub(crate) fn into_raw(self) -> *mut sys::csp_packet_t {
         let ptr = self.inner;
-        std::mem::forget(self);
+        core::mem::forget(self);
         ptr
     }
 
@@ -160,7 +161,7 @@ impl Packet {
 impl Drop for Packet {
     fn drop(&mut self) {
         // Safety: `inner` is a valid pointer obtained from csp_buffer_get.
-        unsafe { sys::csp_buffer_free(self.inner as *mut std::ffi::c_void) }
+        unsafe { sys::csp_buffer_free(self.inner as *mut c_void) }
     }
 }
 

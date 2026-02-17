@@ -394,6 +394,25 @@ fn compile_libcsp(
     build.compile("csp");
 }
 
+/// Return the GCC/clang built-in include directory so bindgen can find
+/// `stddef.h`, `stdint.h`, etc. when libclang doesn't locate them by itself.
+fn gcc_builtin_include() -> Option<String> {
+    // `cc -print-file-name=include` prints the compiler's internal include dir.
+    let output = std::process::Command::new("cc")
+        .arg("-print-file-name=include")
+        .output()
+        .ok()?;
+    let path = std::str::from_utf8(&output.stdout).ok()?.trim().to_owned();
+    if path.is_empty() || path == "include" {
+        // Fallback: try the standard system location
+        if std::path::Path::new("/usr/include").exists() {
+            return Some("/usr/include".into());
+        }
+        return None;
+    }
+    Some(path)
+}
+
 /// Use bindgen to generate Rust FFI bindings from `libcsp/include/csp/csp.h`.
 fn generate_bindings(
     include_dir: &std::path::Path,
@@ -437,7 +456,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         "CSP_LITTLE_ENDIAN=1"
     };
 
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header(
             include_dir
                 .join("csp/csp.h")
@@ -450,7 +469,16 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         // OS + endian defines so bindgen sees the correct conditional branches
         .clang_arg(format!("-D{os_define}"))
         .clang_arg(format!("-D{endian_define}"))
-        .clang_arg("-DCSP_USE_RTABLE=1")
+        .clang_arg("-DCSP_USE_RTABLE=1");
+
+    // On some Linux systems libclang cannot locate GCC's built-in headers
+    // (stddef.h, stdint.h …) on its own.  Ask the C compiler where they live
+    // and forward that as a -isystem path to clang.
+    if let Some(gcc_include) = gcc_builtin_include() {
+        builder = builder.clang_arg(format!("-isystem{gcc_include}"));
+    }
+
+    let bindings = builder
         // Inject the LGPL header into the generated file
         .raw_line(license_header)
         // Allow-list: only emit CSP symbols
@@ -463,7 +491,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         .derive_default(true)
         // Use core:: types instead of std:: so the generated bindings compile
         // in no_std environments (requires Rust 1.64+ for core::ffi::c_*).
-        .use_core(true)
+        .use_core()
         .generate()
         .expect("bindgen failed to generate bindings");
 
