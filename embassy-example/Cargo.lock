@@ -243,6 +243,7 @@ dependencies = [
  "embassy-time",
  "embedded-alloc",
  "libcsp",
+ "panic-probe",
  "rtt-target",
  "static_cell",
 ]
@@ -699,6 +700,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "panic-probe"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4047d9235d1423d66cc97da7d07eddb54d4f154d6c13805c6d0793956f4f25b0"
+dependencies = [
+ "cortex-m",
 ]
 
 [[package]]

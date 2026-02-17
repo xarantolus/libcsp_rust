@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 embassy-stm32 = { version = "0.1", features = ["stm32l4r5zi", "unstable-pac", "memory-x", "time-driver-any"] }
-embassy-executor = { version = "0.5", features = ["arch-cortex-m", "executor-thread"] }
-embassy-time = { version = "0.3" }
+embassy-executor = { version = "0.5", features = ["arch-cortex-m", "executor-thread", "task-arena-size-4096"] }
+embassy-time = { version = "0.3", features = ["tick-hz-32_768"] }
 embassy-sync = { version = "0.6" }
 embassy-futures = { version = "0.1" }
 
@@ -14,6 +14,7 @@ cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single
 cortex-m-rt = "0.7"
 rtt-target = "0.5"
 static_cell = "2.1"
+panic-probe = "0.3"
 
 embedded-alloc = "0.5"
 libcsp = { path = "..", default-features = false, features = ["external-arch", "rdp", "crc32"] }
