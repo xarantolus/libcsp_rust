@@ -141,7 +141,7 @@ impl Packet {
     /// by reconstructing a `Packet` via [`Packet::from_raw`] or passing the
     /// pointer to a function that takes ownership (e.g. `csp_send`).
     #[inline]
-    pub(crate) fn into_raw(self) -> *mut sys::csp_packet_t {
+    pub fn into_raw(self) -> *mut sys::csp_packet_t {
         let ptr = self.inner;
         core::mem::forget(self);
         ptr
@@ -153,7 +153,7 @@ impl Packet {
     /// `ptr` must have been obtained from `csp_buffer_get` (or equivalent) and
     /// must not be freed or used elsewhere after this call.
     #[inline]
-    pub(crate) unsafe fn from_raw(ptr: *mut sys::csp_packet_t) -> Self {
+    pub unsafe fn from_raw(ptr: *mut sys::csp_packet_t) -> Self {
         Packet { inner: ptr }
     }
 }

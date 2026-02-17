@@ -147,6 +147,7 @@ pub fn free_all() {
 }
 
 /// Print the routing table to stdout (requires `debug` feature / `CSP_DEBUG`).
+#[cfg(feature = "debug")]
 pub fn print() {
     unsafe { sys::csp_rtable_print() }
 }

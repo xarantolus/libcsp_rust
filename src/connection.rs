@@ -35,7 +35,7 @@ impl Connection {
     /// `ptr` must be a valid, open `csp_conn_t *` obtained from libcsp and
     /// must not be closed or freed elsewhere.
     #[inline]
-    pub(crate) unsafe fn from_raw(ptr: *mut sys::csp_conn_t) -> Self {
+    pub unsafe fn from_raw(ptr: *mut sys::csp_conn_t) -> Self {
         Connection { inner: ptr }
     }
 
