@@ -46,7 +46,9 @@ fn main() -> anyhow::Result<()> {
                 // Connectionless / UDP-like
                 if let Some(mut pkt) = Packet::get(200) {
                     let mut data = [0u8; 200];
-                    prng.fill(&mut data);
+                    data[0..8].copy_from_slice(&count.to_le_bytes());
+                    let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                    packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
                     
                     // Connect (connectionless)
@@ -63,7 +65,9 @@ fn main() -> anyhow::Result<()> {
                     for _ in 0..50 {
                         if let Some(mut pkt) = Packet::get(200) {
                             let mut data = [0u8; 200];
-                            prng.fill(&mut data);
+                            data[0..8].copy_from_slice(&count.to_le_bytes());
+                            let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                            packet_prng.fill(&mut data[8..]);
                             pkt.write(&data).unwrap();
                             
                             if conn.send_discard(pkt, 500).is_ok() {
@@ -90,12 +94,14 @@ fn main() -> anyhow::Result<()> {
                 if let Some(conn) = node.connect(Priority::Norm as u8, 2, SFP_PORT, 1000, opts) {
                     let size = (prng.next() % 4000) + 1000;
                     let mut data = vec![0u8; size as usize];
-                    prng.fill(&mut data);
+                    data[0..8].copy_from_slice(&count.to_le_bytes());
+                    let mut blob_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                    blob_prng.fill(&mut data[8..]);
 
                     if conn.sfp_send(&data, 200, 1000).is_ok() {
                         bytes_sent += size as u64;
                         count += 100;
-                        println!("[TX] SFP sent {} bytes", size);
+                        println!("[TX] SFP sent {} bytes (count={})", size, count - 100);
                     }
                 } else {
                     count += 1;

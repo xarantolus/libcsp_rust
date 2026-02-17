@@ -24,6 +24,14 @@ impl Prng {
         x
     }
 
+    pub fn next_with_seed(seed: u32) -> u32 {
+        let mut x = if seed == 0 { 1 } else { seed };
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    }
+
     pub fn fill(&mut self, buf: &mut [u8]) {
         for chunk in buf.chunks_exact_mut(4) {
             let val = self.next();

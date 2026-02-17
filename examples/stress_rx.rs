@@ -51,11 +51,21 @@ fn main() -> anyhow::Result<()> {
         if let Some(conn) = sock_data.accept(100) {
             while let Some(pkt) = conn.read(100) {
                 let data = pkt.data();
+                if data.len() < 8 {
+                    errors += 1;
+                    continue;
+                }
+                let mut count_buf = [0u8; 8];
+                count_buf.copy_from_slice(&data[0..8]);
+                let pkt_count = u64::from_le_bytes(count_buf);
+
                 let mut expected = vec![0u8; data.len()];
-                prng.fill(&mut expected);
+                expected[0..8].copy_from_slice(&count_buf);
+                let mut packet_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+                packet_prng.fill(&mut expected[8..]);
 
                 if data != expected {
-                    eprintln!("[RX] DATA ERROR at count {}! Got {} bytes", count, data.len());
+                    eprintln!("[RX] DATA ERROR at pkt_count {}! Got {} bytes", pkt_count, data.len());
                     errors += 1;
                 }
                 bytes_recv += data.len() as u64;
@@ -66,16 +76,26 @@ fn main() -> anyhow::Result<()> {
         if let Some(conn) = sock_sfp.accept(100) {
             match conn.sfp_recv(1000) {
                 Ok(data) => {
+                    if data.len() < 8 {
+                        errors += 1;
+                        continue;
+                    }
+                    let mut count_buf = [0u8; 8];
+                    count_buf.copy_from_slice(&data[0..8]);
+                    let pkt_count = u64::from_le_bytes(count_buf);
+
                     let mut expected = vec![0u8; data.len()];
-                    prng.fill(&mut expected);
+                    expected[0..8].copy_from_slice(&count_buf);
+                    let mut blob_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+                    blob_prng.fill(&mut expected[8..]);
 
                     if data != expected {
-                        eprintln!("[RX] SFP ERROR at count {}! Got {} bytes", count, data.len());
+                        eprintln!("[RX] SFP DATA ERROR at count {}! Got {} bytes", pkt_count, data.len());
                         errors += 1;
                     }
                     bytes_recv += data.len() as u64;
                     count += 100;
-                    println!("[RX] SFP received {} bytes", data.len());
+                    println!("[RX] SFP received {} bytes (count={})", data.len(), pkt_count);
                 }
                 Err(e) => {
                     eprintln!("[RX] SFP Receive Failed: {:?}", e);
