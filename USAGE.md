@@ -6,7 +6,7 @@ This guide explains how to use the `libcsp` Rust bindings, focusing on memory sa
 
 ## 1. Initialisation
 
-CSP is a global singleton. You must initialise it once at the start of your application using the `CspConfig` builder.
+CSP is a global singleton. Initialise it once at the start of your application.
 
 ```rust
 use libcsp::CspConfig;
@@ -16,10 +16,10 @@ fn main() -> libcsp::Result<()> {
         .address(1)            // Set local CSP address (0-31)
         .hostname("my-sat")
         .buffers(20, 256)      // 20 buffers of 256 bytes each
-        .init()?;              // Returns a CspNode handle
+        .init()?;              // Returns a CspNode handle (RAII)
 
     // The CspNode handle keeps the CSP runtime alive.
-    // When it is dropped, csp_free_resources() is called.
+    // When dropped, it calls `csp_free_resources()`.
     
     // Start the background router task (optional but recommended)
     node.route_start_task(4096, 0)?;
@@ -30,98 +30,135 @@ fn main() -> libcsp::Result<()> {
 
 ## 2. Packet Management (The `Packet` Struct)
 
-The `Packet` struct is an RAII wrapper around `csp_packet_t`. 
+The `Packet` struct is an RAII wrapper around `csp_packet_t`.
 
 ### Allocation and Ownership
 *   **Get:** `Packet::get(size)` allocates from the CSP pool.
-*   **Drop:** When a `Packet` goes out of scope, it is **automatically freed** back to the CSP pool via `csp_buffer_free`.
+*   **Drop:** When a `Packet` goes out of scope, it is **automatically freed** back to the pool.
 *   **Transfer:** When you `send` a packet, ownership is transferred to the CSP stack.
 
 ```rust
 use libcsp::Packet;
 
-// Allocate
 if let Some(mut pkt) = Packet::get(32) {
-    // Write data
-    pkt.write(b"hello world").unwrap();
-    
-    // The packet will be freed here if not moved elsewhere.
+    pkt.write(b"hello").unwrap();
+    // Packet will be freed here if not moved (e.g. into conn.send())
 }
 ```
 
-### Writing Data
+### Decoding Headers
+`Packet` provides safe methods to inspect the CSP header without bit-shifting:
 ```rust
-pkt.write(b"data").unwrap(); // Sets length automatically
-// OR manually:
-let buf = pkt.data_buf_mut();
-buf[..4].copy_from_slice(b"data");
-pkt.set_length(4);
+let src = pkt.src_addr();
+let dst = pkt.dst_addr();
+let port = pkt.dst_port();
+if pkt.is_rdp() { /* ... */ }
 ```
 
-## 3. Client/Server Communication
+## 3. High-Level Networking
 
-### Sending (Client)
-When sending, if `send` returns `Ok(())`, the packet is consumed. If it returns `Err`, you get the packet back.
-
+### The `Port` Enum
+Avoid magic numbers by using the `Port` enum for standard services and custom ports.
 ```rust
-match conn.send(pkt, 100) {
-    Ok(()) => println!("Sent!"),
-    Err((err, pkt)) => {
-        eprintln!("Failed: {}", err);
-        // pkt is still here, you can retry or let it drop (free)
-    }
-}
+use libcsp::Port;
+
+let port_ping = Port::Ping;
+let port_custom = Port::Custom(10);
 ```
 
-### Receiving (Server)
-`Socket::accept` returns a `Connection`. `Connection::read` returns an `Option<Packet>`.
+### Server-Side: The `Dispatcher`
+The `Dispatcher` allows you to register closures for specific ports, avoiding manual `accept`/`read` loops.
 
 ```rust
-let sock = libcsp::Socket::new(libcsp::socket_opts::NONE).unwrap();
-sock.bind(10).unwrap();
-sock.listen(5).unwrap();
+use libcsp::{Dispatcher, Port, MAX_TIMEOUT};
 
-while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
-    while let Some(pkt) = conn.read(100) {
-        println!("Received: {:?}", pkt.data());
-        // pkt is freed here
-    }
-    // conn is closed here
-}
+let mut server = Dispatcher::new().unwrap();
+
+// Bind standard service handlers (Ping, Uptime, etc.)
+server.bind_service(Port::Ping)?;
+
+// Register custom port logic
+server.register(Port::Custom(10), |conn, pkt| {
+    println!("Received {} bytes", pkt.length());
+    Some(pkt) // Return packet to send as a reply, or None to consume
+})?;
+
+// Run the dispatcher (blocks or run in thread)
+server.run(MAX_TIMEOUT);
+```
+
+### Client-Side: CMP Services
+Safe wrappers for the CSP Management Protocol (CMP) return high-level Rust types.
+
+```rust
+// Get remote node identification
+let info = node.ident(address, 1000)?;
+println!("Remote node is {} running {}", info.hostname, info.model);
+
+// Read/Write remote memory (Peek/Poke)
+let data = node.peek(address, 0x20000000, 4, 1000)?;
+node.poke(address, 0x20000000, &[0xDE, 0xAD, 0xBE, 0xEF], 1000)?;
 ```
 
 ## 4. Custom Interfaces (Transports)
 
-To implement a custom transport (e.g. for an STM32/Embassy CAN driver):
-
-1.  **Implement `nexthop`**: A C-compatible callback that handles outgoing packets.
-2.  **Register Interface**: Add your `csp_iface_t` to the `iflist`.
-3.  **Feed RX**: Use `sys::csp_qfifo_write` to inject received packets into the router.
-
-### Lifecycle of a Packet in `nexthop`
-In libcsp, the `nexthop` function is responsible for freeing the packet. In Rust, you should:
-1.  Take ownership via `Packet::from_raw(packet)`.
-2.  Do your hardware TX.
-3.  Let the `Packet` drop (which frees it).
+Implement the `CspInterface` trait to bridge CSP to custom hardware (e.g., STM32 CAN via `embassy`).
 
 ```rust
-unsafe extern "C" fn my_nexthop(route: *const sys::csp_route_t, packet: *mut sys::csp_packet_t) -> i32 {
-    let pkt = Packet::from_raw(packet); // Take ownership
-    // hardware_tx(pkt.data());
-    0 // Packet drops and is freed here
+use libcsp::{CspInterface, Packet, interface};
+
+struct MyCanDriver { /* ... */ }
+
+impl CspInterface for MyCanDriver {
+    fn name(&self) -> &str { "MY_CAN" }
+
+    fn nexthop(&mut self, via: u8, pkt: Packet) {
+        // 1. Hardware TX
+        // self.hw.send(pkt.id_raw(), pkt.data());
+        
+        // 2. Packet pkt is dropped and freed here automatically.
+    }
+}
+
+// Registration returns an InterfaceHandle
+let my_iface = MyCanDriver { ... };
+let handle = interface::register(my_iface);
+```
+
+### The RX Flow (Pumping packets into CSP)
+
+When receiving data from hardware, you must manually feed it into the CSP router.
+
+```rust
+// 1. You receive data from your hardware
+let raw_data = [0u8; 10]; 
+let can_id = 0x12345678;
+
+// 2. Allocate a packet from the CSP pool
+if let Some(mut pkt) = Packet::get(raw_data.len()) {
+    // 3. Fill the packet
+    pkt.set_id_raw(can_id);
+    pkt.write(&raw_data).unwrap();
+
+    // 4. "Pump" it into the router
+    // This transfers ownership to the CSP stack.
+    handle.rx(pkt);
 }
 ```
 
-## 5. `no_std` Usage
+Internal mechanism: `handle.rx()` calls `csp_qfifo_write()`, which wakes up the background router task to process the packet.
 
-For `no_std` targets (like `embassy` on STM32):
-*   Disable default features: `default-features = false`.
-*   Ensure an allocator is available (required for `CspConfig`'s CStrings).
-*   Use `node.route_work(0)` in your main loop if you aren't using threads.
+## 5. Sniffing Traffic
 
-```toml
-[dependencies]
-libcsp = { version = "1.6", default-features = false, features = ["rdp", "crc32"] }
+Use the RAII `Sniffer` handle to enable promiscuous mode. It disables automatically when dropped.
+
+```rust
+use libcsp::promisc;
+
+let sniffer = promisc::Sniffer::open(10).expect("Promisc failed");
+while let Some(pkt) = sniffer.read(1000) {
+    println!("Sniffed: {} -> {}", pkt.src_addr(), pkt.dst_addr());
+}
 ```
 
 ## 6. Summary of Ownership
@@ -129,8 +166,8 @@ libcsp = { version = "1.6", default-features = false, features = ["rdp", "crc32"
 | Action | Ownership |
 |--------|-----------|
 | `Packet::get()` | Caller owns the packet. |
-| `conn.send(pkt)` | If Success: CSP owns it. If Fail: Caller owns it. |
-| `conn.read()` | Caller owns the returned packet. |
-| `sock.recvfrom()` | Caller owns the returned packet. |
-| `Packet::from_raw(ptr)` | Caller takes ownership of raw pointer. |
-| `pkt.into_raw()` | Caller loses ownership; must free manually or pass to C. |
+| `conn.send(pkt)` | If Success: CSP takes ownership. If Fail: Returned to caller in `Err`. |
+| `conn.read()` / `sniffer.read()` | Caller owns the returned packet. |
+| `Dispatcher` handler | Closure takes ownership of `Packet`. Return `Some(pkt)` to pass back to CSP for reply. |
+| `CspInterface::nexthop` | Trait method takes ownership of `Packet`. |
+| `handle.rx(pkt)` | Ownership transferred to CSP router. |
