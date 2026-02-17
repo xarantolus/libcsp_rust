@@ -186,6 +186,37 @@ impl RouteEntry {
     }
 }
 
+/// Iterate over all entries in the routing table.
+///
+/// The closure `f` is called for each entry with:
+/// 1. Destination address (u8)
+/// 2. Mask (u8)
+/// 3. The route entry details
+///
+/// Return `true` to continue iterating, or `false` to stop.
+pub fn iterate<F>(f: F)
+where
+    F: FnMut(u8, u8, RouteEntry) -> bool,
+{
+    unsafe extern "C" fn shim<F>(
+        ctx: *mut core::ffi::c_void,
+        address: u8,
+        mask: u8,
+        route: *const sys::csp_route_t,
+    ) -> bool
+    where
+        F: FnMut(u8, u8, RouteEntry) -> bool,
+    {
+        let f = &mut *(ctx as *mut F);
+        f(address, mask, RouteEntry { inner: route })
+    }
+
+    let mut f_ref = f;
+    unsafe {
+        sys::csp_rtable_iterate(Some(shim::<F>), &mut f_ref as *mut F as *mut core::ffi::c_void);
+    }
+}
+
 impl core::fmt::Debug for RouteEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let via = self.via();

@@ -122,3 +122,24 @@ pub fn csp_result(code: i32) -> crate::Result<()> {
         Err(CspError::from_code(code))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_mapping() {
+        assert_eq!(CspError::from_code(-1), CspError::NoMemory);
+        assert_eq!(CspError::from_code(-2), CspError::InvalidArgument);
+        assert_eq!(CspError::from_code(-3), CspError::TimedOut);
+        assert_eq!(CspError::from_code(-100), CspError::HmacFailed);
+        assert_eq!(CspError::from_code(-103), CspError::SfpError);
+        assert_eq!(CspError::from_code(-999), CspError::Other(-999));
+    }
+
+    #[test]
+    fn test_csp_result() {
+        assert!(csp_result(0).is_ok());
+        assert_eq!(csp_result(-1).unwrap_err(), CspError::NoMemory);
+    }
+}

@@ -183,3 +183,41 @@ impl fmt::Debug for Connection {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CspConfig, Packet};
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn ensure_init() {
+        INIT.call_once(|| {
+            let node = CspConfig::new()
+                .address(1)
+                .buffers(10, 256)
+                .init()
+                .expect("failed to init CSP for tests");
+            core::mem::forget(node);
+        });
+    }
+
+    #[test]
+    fn test_connection_send_to_nowhere() {
+        ensure_init();
+        // Trying to connect to a node that isn't there (and we don't have a route for except LOOP)
+        // If we connect to address 1 port 10 (loopback), we can test send.
+        let node_addr = 1;
+        let ptr = unsafe { sys::csp_connect(2, node_addr, 10, 100, 0) };
+        assert!(!ptr.is_null());
+        let conn = unsafe { Connection::from_raw(ptr) };
+
+        let mut pkt = Packet::get(16).unwrap();
+        pkt.write(b"hello").unwrap();
+
+        // On loopback, send usually succeeds immediately because it just goes into a queue.
+        let res = conn.send(pkt, 0);
+        assert!(res.is_ok());
+    }
+}

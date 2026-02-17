@@ -177,3 +177,57 @@ impl core::fmt::Debug for Packet {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::CspConfig;
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+
+    fn ensure_init() {
+        INIT.call_once(|| {
+            let node = CspConfig::new()
+                .address(1)
+                .buffers(10, 256)
+                .init()
+                .expect("failed to init CSP for tests");
+            // Leak the node so it stays alive and doesn't call csp_free_resources
+            core::mem::forget(node);
+        });
+    }
+
+    #[test]
+    fn test_packet_get_write_read() {
+        ensure_init();
+        let mut pkt = Packet::get(32).expect("should get packet");
+        assert_eq!(pkt.length(), 0);
+
+        let data = b"test data";
+        pkt.write(data).expect("should write data");
+        assert_eq!(pkt.length(), data.len() as u16);
+        assert_eq!(pkt.data(), data);
+
+        // Check data_mut
+        pkt.data_mut()[0] = b'X';
+        assert_eq!(&pkt.data()[..1], b"X");
+    }
+
+    #[test]
+    fn test_packet_overflow() {
+        ensure_init();
+        let mut pkt = Packet::get(10).expect("should get packet");
+        let big_data = vec![0u8; 1024];
+        assert!(pkt.write(&big_data).is_err());
+    }
+
+    #[test]
+    fn test_data_offset() {
+        ensure_init();
+        let mut pkt = Packet::get(1).expect("should get packet");
+        let base = pkt.inner as usize;
+        let data_ptr = pkt.data_buf_mut().as_ptr() as usize;
+        assert_eq!(data_ptr - base, DATA_OFFSET, "DATA_OFFSET mismatch!");
+    }
+}
