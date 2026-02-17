@@ -354,7 +354,37 @@ impl CspNode {
 
     /// Send a shutdown request to `node`.
     pub fn shutdown(&self, node: u8) {
-        unsafe { sys::csp_shutdown(node) }
+        unsafe { sys::shutdown(node) }
+    }
+
+    // ── Drivers ───────────────────────────────────────────────────────────────
+
+    /// Open a Linux SocketCAN interface and add it to CSP.
+    ///
+    /// `device` — Linux device name (e.g., "can0", "vcan0").
+    /// `bitrate` — bitrate in bps (0 to keep current OS setting).
+    /// `promisc` — if true, receive all CAN frames; if false, filter for local address.
+    #[cfg(feature = "socketcan")]
+    pub fn add_interface_socketcan(
+        &self,
+        device: &str,
+        bitrate: i32,
+        promisc: bool,
+    ) -> Result<*mut sys::csp_iface_t> {
+        let c_device = CString::new(device).map_err(|_| crate::CspError::InvalidArgument)?;
+        let mut iface_ptr: *mut sys::csp_iface_t = core::ptr::null_mut();
+        
+        csp_result(unsafe {
+            sys::csp_can_socketcan_open_and_add_interface(
+                c_device.as_ptr(),
+                sys::CSP_IF_CAN_DEFAULT_NAME.as_ptr() as *const c_char,
+                bitrate,
+                promisc,
+                &mut iface_ptr,
+            )
+        })?;
+        
+        Ok(iface_ptr)
     }
 }
 

@@ -81,6 +81,67 @@ impl Packet {
         unsafe { (*self.inner).id.ext }
     }
 
+    /// Set the raw 32-bit CSP header.
+    #[inline]
+    pub fn set_id_raw(&mut self, id: u32) {
+        unsafe { (*self.inner).id.ext = id; }
+    }
+
+    /// Return the message priority (0-3).
+    pub fn priority(&self) -> u8 {
+        ((self.id_raw() & 0xC0000000) >> 30) as u8
+    }
+
+    /// Return the source address (0-31).
+    pub fn src_addr(&self) -> u8 {
+        ((self.id_raw() & 0x3E000000) >> 25) as u8
+    }
+
+    /// Return the destination address (0-31).
+    pub fn dst_addr(&self) -> u8 {
+        ((self.id_raw() & 0x01F00000) >> 20) as u8
+    }
+
+    /// Return the destination port (0-63).
+    pub fn dst_port(&self) -> u8 {
+        ((self.id_raw() & 0x000FC000) >> 14) as u8
+    }
+
+    /// Return the source port (0-63).
+    pub fn src_port(&self) -> u8 {
+        ((self.id_raw() & 0x00003F00) >> 8) as u8
+    }
+
+    /// Return the CSP header flags (8 bits).
+    pub fn flags(&self) -> u8 {
+        (self.id_raw() & 0x000000FF) as u8
+    }
+
+    /// Check if the RDP flag is set.
+    pub fn is_rdp(&self) -> bool {
+        (self.flags() & 0x02) != 0
+    }
+
+    /// Check if the XTEA flag is set.
+    pub fn is_xtea(&self) -> bool {
+        (self.flags() & 0x04) != 0
+    }
+
+    /// Check if the HMAC flag is set.
+    pub fn is_hmac(&self) -> bool {
+        (self.flags() & 0x08) != 0
+    }
+
+    /// Check if the CRC32 flag is set.
+    pub fn is_crc32(&self) -> bool {
+        (self.flags() & 0x01) != 0
+    }
+
+    /// Check if the Fragmentation flag is set.
+    pub fn is_frag(&self) -> bool {
+        (self.flags() & 0x10) != 0
+    }
+
     /// Immutable view of the **used** payload (`[0..length()]`).
     ///
     /// # Panics

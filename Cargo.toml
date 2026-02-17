@@ -40,6 +40,10 @@ debug-timestamp = [] # Add timestamps to debug output
 [dependencies]
 bitflags = "2"
 
+[dev-dependencies]
+socketcan = "3.3"
+anyhow = "1.0"
+
 [build-dependencies]
 cc = "1"
 bindgen = "0.70"
