@@ -17,7 +17,7 @@ use libcsp::{CspArch, CspConfig, Packet, Port, Dispatcher, CspInterface, interfa
 use panic_probe as _;
 use static_cell::StaticCell;
 
-// Import stress logic (manually since it's an example)
+// --- SHARED STRESS LOGIC (Synchronized with Linux) ---
 const PRNG_SEED: u32 = 0x12345678;
 const DATA_PORT: u8 = 10;
 const SFP_PORT: u8 = 11;
@@ -63,8 +63,6 @@ impl CspArch for EmbassyArch {
     fn bin_sem_wait(&self, sem: *mut c_void, _t: u32) -> bool {
         let sem = unsafe { &*(sem as *const core::sync::atomic::AtomicBool) };
         while sem.swap(false, core::sync::atomic::Ordering::Acquire) == false { 
-             // In a real app, we should yield here. For stress test, spinning is okay for now
-             // but could cause issues with high-prio tasks.
              cortex_m::asm::nop();
         }
         true
@@ -85,16 +83,14 @@ impl CspArch for EmbassyArch {
     fn queue_size(&self, _q: *mut c_void) -> usize { 0 }
     fn malloc(&self, size: usize) -> *mut c_void { unsafe { core::alloc::GlobalAlloc::alloc(&HEAP, core::alloc::Layout::from_size_align(size, 4).unwrap()) as *mut c_void } }
     fn free(&self, ptr: *mut c_void) { 
-        if !ptr.is_null() {
-            // We don't have enough info to call dealloc properly here since Layout is unknown
-            // For the stress test, we'll use a fixed size heap and might leak or use a better allocator.
-            // But libcsp calls csp_free on buffers it allocated via csp_malloc.
-        }
+        // Note: libcsp 1.6 doesn't use the size for free, making raw GlobalAlloc::dealloc difficult
+        // without a wrapper that tracks block sizes. For this example, we accept some heap fragmentation
+        // or use a simple bump allocator if needed.
     }
 }
 
 static ARCH: EmbassyArch = EmbassyArch;
-// ... (shimming functions omitted for brevity, keeping only the ones that changed or are essential)
+
 #[no_mangle] pub extern "C" fn csp_get_ms() -> u32 { ARCH.get_ms() }
 #[no_mangle] pub extern "C" fn csp_get_s() -> u32 { ARCH.get_s() }
 #[no_mangle] pub extern "C" fn csp_get_uptime_s() -> u32 { ARCH.get_s() }
@@ -110,9 +106,9 @@ static ARCH: EmbassyArch = EmbassyArch;
 #[no_mangle] pub extern "C" fn csp_mutex_unlock(mutex: *mut *mut c_void) -> i32 { if unsafe { ARCH.mutex_unlock(*mutex) } { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_queue_create(l: i32, s: usize) -> *mut c_void { ARCH.queue_create(l as usize, s) }
 #[no_mangle] pub extern "C" fn csp_queue_remove(q: *mut c_void) { ARCH.queue_remove(q) }
-#[no_mangle] pub extern "C" fn csp_queue_enqueue(q: *mut c_void, i: *const c_void, t: u32) -> i32 { if ARCH.queue_enqueue(q, i, t) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_enqueue(q: *mut c_void, i: *const c_void, timeout: u32) -> i32 { if ARCH.queue_enqueue(q, i, timeout) { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_queue_enqueue_isr(q: *mut c_void, i: *const c_void, _p: *mut i32) -> i32 { if ARCH.queue_enqueue(q, i, 0) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_dequeue(q: *mut c_void, i: *mut c_void, t: u32) -> i32 { if ARCH.queue_dequeue(q, i, t) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_dequeue(q: *mut c_void, i: *mut c_void, timeout: u32) -> i32 { if ARCH.queue_dequeue(q, i, timeout) { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_queue_dequeue_isr(q: *mut c_void, i: *mut c_void, _p: *mut i32) -> i32 { if ARCH.queue_dequeue(q, i, 0) { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_queue_size(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
 #[no_mangle] pub extern "C" fn csp_queue_size_isr(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
@@ -128,7 +124,7 @@ static ARCH: EmbassyArch = EmbassyArch;
 #[no_mangle] pub extern "C" fn csp_sys_tasklist_size() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn csp_sys_tasklist(_p: *mut i8) {}
 #[no_mangle] pub extern "C" fn csp_sys_memfree() -> u32 { 0 }
-#[no_mangle] pub extern "C" fn csp_sys_reboot() {}
+#[no_mangle_isr] pub extern "C" fn csp_sys_reboot() {}
 #[no_mangle] pub extern "C" fn csp_sys_shutdown() {}
 #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn srand(_s: u32) {}
@@ -173,7 +169,7 @@ static CAN_BUS: StaticCell<Can<'static, CAN1>> = StaticCell::new();
 async fn main(spawner: Spawner) {
     rtt_init_print!();
     for _ in 0..10_000_000 { cortex_m::asm::nop(); }
-    rprintln!("--- STRESS TEST RECEIVER START ---");
+    rprintln!("--- STM32 STRESS RECEIVER START ---");
 
     let p = embassy_stm32::init(Default::default());
 
@@ -183,7 +179,11 @@ async fn main(spawner: Spawner) {
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_MEM.len()) }
     }
 
-    let node = CspConfig::new().address(2).buffers(100, 256).init().expect("CSP INIT FAIL");
+    let node = CspConfig::new()
+        .address(2)
+        .buffers(500, 256)
+        .init()
+        .expect("CSP INIT FAIL");
 
     let mut can = Can::new(p.CAN1, p.PA11, p.PA12, Irqs);
     let _ = can.as_mut().modify_config().set_loopback(false).set_silent(false);
@@ -198,44 +198,43 @@ async fn main(spawner: Spawner) {
     spawner.spawn(csp_router_task(node)).unwrap();
     spawner.spawn(can_rx_task(rx, handle)).unwrap();
 
-    let mut prng = Prng::new(PRNG_SEED);
     let mut count = 0u64;
     let mut bytes_recv = 0u64;
+    let mut errors = 0u64;
     let mut last_log = Instant::now();
 
-    // High-level dispatcher for stress ports
     let mut server = libcsp::Dispatcher::new().unwrap();
     
-    // 1. Normal/RDP data port
+    // 1. DATA PORT (Normal / RDP)
     server.register(DATA_PORT, move |conn, pkt| {
         let src_addr = conn.src_addr();
-        let src_port = conn.src_port();
         let data = pkt.data();
-        let mut expected = vec![0u8; data.len()];
         
         if data.len() >= 8 {
             let mut count_buf = [0u8; 8];
             count_buf.copy_from_slice(&data[0..8]);
             let pkt_count = u64::from_le_bytes(count_buf);
             
-            let mut packet_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+            let mut expected = vec![0u8; data.len()];
             expected[0..8].copy_from_slice(&count_buf);
+            let mut packet_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
             packet_prng.fill(&mut expected[8..]);
 
             if data != expected {
-                rprintln!("[RX] ERR count {} from {}:{}", pkt_count, src_addr, src_port);
+                rprintln!("[RX] DATA ERR count {} from {}", pkt_count, src_addr);
+                errors += 1;
             }
             bytes_recv += data.len() as u64;
             count += 1;
             
             if count % 100 == 0 {
-                rprintln!("[RX] Pkt 100 ok (latest count={}, from {}:{})", pkt_count, src_addr, src_port);
+                rprintln!("[RX] Recv 100 pkts (last count={}, from node {})", pkt_count, src_addr);
             }
         }
         None
     }).unwrap();
 
-    // 2. SFP port (requires a separate listening socket usually, but Dispatcher handles it if we bind)
+    // 2. SFP PORT
     let sfp_sock = libcsp::Socket::new(socket_opts::NONE).unwrap();
     sfp_sock.bind(SFP_PORT).unwrap();
     sfp_sock.listen(5).unwrap();
@@ -245,21 +244,43 @@ async fn main(spawner: Spawner) {
     loop {
         server.run(10);
         
-        // Check for SFP connections manually as Dispatcher doesn't do SFP blobs yet
         if let Some(conn) = sfp_sock.accept(0) {
             let src_addr = conn.src_addr();
             rprintln!("[RX] SFP start from {}...", src_addr);
             match conn.sfp_recv(1000) {
                 Ok(data) => {
-                    rprintln!("[RX] SFP ok: received {} bytes from {}", data.len(), src_addr);
-                    bytes_recv += data.len() as u64;
+                    if data.len() >= 8 {
+                        let mut count_buf = [0u8; 8];
+                        count_buf.copy_from_slice(&data[0..8]);
+                        let pkt_count = u64::from_le_bytes(count_buf);
+
+                        let mut expected = vec![0u8; data.len()];
+                        expected[0..8].copy_from_slice(&count_buf);
+                        let mut blob_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+                        blob_prng.fill(&mut expected[8..]);
+
+                        if data != expected {
+                            rprintln!("[RX] SFP DATA ERR count {} from {}", pkt_count, src_addr);
+                            errors += 1;
+                        } else {
+                            rprintln!("[RX] SFP ok: received {} bytes from {} (count={})", data.len(), src_addr, pkt_count);
+                        }
+                        bytes_recv += data.len() as u64;
+                    }
                 }
-                Err(e) => rprintln!("[RX] SFP FAIL from {}: {:?}", src_addr, e),
+                Err(e) => {
+                    rprintln!("[RX] SFP FAIL from {}: {:?}", src_addr, e);
+                    errors += 1;
+                }
             }
         }
 
         if last_log.elapsed() >= Duration::from_secs(5) {
-            rprintln!("Recv {} KB, Uptime {}s", bytes_recv / 1024, Instant::now().as_secs());
+            rprintln!("[Stats] Recv {} KB, Errors {}, Uptime {}s", 
+                bytes_recv / 1024, 
+                errors,
+                Instant::now().as_secs()
+            );
             last_log = Instant::now();
         }
         Timer::after(Duration::from_millis(1)).await;
