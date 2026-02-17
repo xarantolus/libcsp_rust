@@ -36,3 +36,5 @@ libcsp/include/csp/csp_autoconfig.h
 # ── Environment / secrets ─────────────────────────────────────────────────────
 .env
 *.key
+target/
+embassy-example/target/
