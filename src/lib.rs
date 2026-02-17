@@ -112,6 +112,7 @@ mod socket;
 pub mod route;
 pub mod promisc;
 pub mod interface;
+pub mod service;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
@@ -121,6 +122,7 @@ pub use packet::Packet;
 pub use connection::Connection;
 pub use socket::Socket;
 pub use interface::{CspInterface, InterfaceHandle};
+pub use service::{Ident, IfStats, Dispatcher};
 
 /// Convenience `Result` type with [`CspError`] as the error variant.
 pub type Result<T> = core::result::Result<T, CspError>;
@@ -194,6 +196,71 @@ pub const ANY_PORT: u8 = 255; // CSP_ANY
 /// Infinite timeout (block until event occurs).
 pub const MAX_TIMEOUT: u32 = 0xFFFF_FFFF;
 
+// ── Port enum ─────────────────────────────────────────────────────────────────
+
+/// CSP port numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Port {
+    /// CSP Management Protocol (0).
+    Cmp,
+    /// Ping / echo (1).
+    Ping,
+    /// Process list (2).
+    Ps,
+    /// Free memory query (3).
+    MemFree,
+    /// Reboot / shutdown (4).
+    Reboot,
+    /// Free buffer count (5).
+    BufFree,
+    /// Uptime query (6).
+    Uptime,
+    /// Accept packets on any port (255).
+    Any,
+    /// Custom user-defined port.
+    Custom(u8),
+}
+
+impl From<u8> for Port {
+    fn from(p: u8) -> Self {
+        match p {
+            0 => Port::Cmp,
+            1 => Port::Ping,
+            2 => Port::Ps,
+            3 => Port::MemFree,
+            4 => Port::Reboot,
+            5 => Port::BufFree,
+            6 => Port::Uptime,
+            255 => Port::Any,
+            p => Port::Custom(p),
+        }
+    }
+}
+
+impl From<Port> for u8 {
+    fn from(p: Port) -> u8 {
+        match p {
+            Port::Cmp => 0,
+            Port::Ping => 1,
+            Port::Ps => 2,
+            Port::MemFree => 3,
+            Port::Reboot => 4,
+            Port::BufFree => 5,
+            Port::Uptime => 6,
+            Port::Any => 255,
+            Port::Custom(p) => p,
+        }
+    }
+}
+
+impl Port {
+    /// Return true if this is a reserved libcsp service port (0-6).
+    pub fn is_service_port(&self) -> bool {
+        let p: u8 = (*self).into();
+        p <= 6
+    }
+}
+
 // ── Standard ports ────────────────────────────────────────────────────────────
 
 /// Reserved CSP service port numbers (`csp_service_port_t`).
@@ -212,4 +279,22 @@ pub mod ports {
     pub const BUF_FREE: u8 = 5;
     /// Uptime query.
     pub const UPTIME:  u8 = 6;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_mapping() {
+        assert_eq!(u8::from(Port::Cmp), 0);
+        assert_eq!(u8::from(Port::Ping), 1);
+        assert_eq!(u8::from(Port::Any), 255);
+        assert_eq!(u8::from(Port::Custom(10)), 10);
+        
+        assert_eq!(Port::from(0), Port::Cmp);
+        assert_eq!(Port::from(1), Port::Ping);
+        assert_eq!(Port::from(255), Port::Any);
+        assert_eq!(Port::from(10), Port::Custom(10));
+    }
 }
