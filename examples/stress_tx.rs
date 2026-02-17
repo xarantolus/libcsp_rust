@@ -5,7 +5,7 @@
 mod stress;
 use stress::{Prng, ProtocolMode, PRNG_SEED, DATA_PORT, SFP_PORT};
 
-use libcsp::{CspConfig, Packet, Priority, socket_opts, conn_opts};
+use libcsp::{CspConfig, Packet, Priority, socket_opts, conn_opts, Connection};
 use std::time::{Instant, Duration};
 use std::thread;
 
@@ -35,15 +35,48 @@ fn main() -> anyhow::Result<()> {
     let mut last_log = Instant::now();
     let mut bytes_sent = 0u64;
 
+    let mut current_mode = ProtocolMode::Normal;
+    let mut active_conn: Option<Connection> = None;
+
+    println!(">>> Starting in Mode: {}", current_mode.to_str());
+
     loop {
-        let mode = ProtocolMode::from_count(count);
-        if count % 1000 == 0 {
-            println!(">>> Mode: {} (count={})", mode.to_str(), count);
+        let next_mode = ProtocolMode::from_count(count);
+        if next_mode != current_mode {
+            println!("[TX] Mode Switch: {} -> {} (count={})", current_mode.to_str(), next_mode.to_str(), count);
+            // Drop old connection to trigger close/reset
+            if let Some(conn) = active_conn.take() {
+                if (conn.flags() & libcsp::sys::CSP_FRDP as i32) != 0 {
+                    thread::sleep(Duration::from_millis(50)); // Flush RDP
+                }
+                drop(conn);
+            }
+            current_mode = next_mode;
         }
 
-        match mode {
-            ProtocolMode::Normal => {
-                // Connectionless / UDP-like
+        // Ensure we have a connection for the current mode
+        if active_conn.is_none() {
+            let opts = match current_mode {
+                ProtocolMode::Normal => socket_opts::CONN_LESS,
+                ProtocolMode::Rdp => conn_opts::RDP,
+                ProtocolMode::SFP => conn_opts::NONE,
+                ProtocolMode::RdpSfp => conn_opts::RDP,
+            };
+            let port = if matches!(current_mode, ProtocolMode::SFP | ProtocolMode::RdpSfp) { SFP_PORT } else { DATA_PORT };
+            
+            active_conn = node.connect(Priority::Norm as u8, 2, port, 1000, opts);
+            if active_conn.is_none() {
+                eprintln!("[TX] Failed to establish connection for {}, retrying...", current_mode.to_str());
+                thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            println!("[TX] Established connection for {}", current_mode.to_str());
+        }
+
+        let conn = active_conn.as_ref().unwrap();
+
+        match current_mode {
+            ProtocolMode::Normal | ProtocolMode::Rdp => {
                 if let Some(mut pkt) = Packet::get(200) {
                     let mut data = [0u8; 200];
                     data[0..8].copy_from_slice(&count.to_le_bytes());
@@ -51,64 +84,28 @@ fn main() -> anyhow::Result<()> {
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
                     
-                    // Connect (connectionless)
-                    if let Some(conn) = node.connect(Priority::Norm as u8, 2, DATA_PORT, 100, socket_opts::CONN_LESS) {
-                        let _ = conn.send_discard(pkt, 100);
+                    if conn.send_discard(pkt, 500).is_ok() {
                         bytes_sent += 200;
                         count += 1;
+                    } else {
+                        // Send failed, maybe connection died?
+                        active_conn = None;
                     }
-                }
-            }
-            ProtocolMode::Rdp => {
-                // Reliable connection
-                if let Some(conn) = node.connect(Priority::Norm as u8, 2, DATA_PORT, 1000, conn_opts::RDP) {
-                    println!("[TX] RDP session started (count={})", count);
-                    for _ in 0..50 {
-                        if let Some(mut pkt) = Packet::get(200) {
-                            let mut data = [0u8; 200];
-                            data[0..8].copy_from_slice(&count.to_le_bytes());
-                            let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
-                            packet_prng.fill(&mut data[8..]);
-                            pkt.write(&data).unwrap();
-                            
-                            if conn.send_discard(pkt, 500).is_ok() {
-                                bytes_sent += 200;
-                                count += 1;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    // Give RDP some time to flush ACKs before dropping the connection
-                    thread::sleep(Duration::from_millis(50));
-                    println!("[TX] RDP session closing...");
-                    // Connection closed on drop
-                } else {
-                    eprintln!("[TX] RDP Connect failed, retrying...");
-                    thread::sleep(Duration::from_millis(100));
-                    count += 1; // Progress to eventually change mode
                 }
             }
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
-                let mut opts = conn_opts::NONE;
-                if mode == ProtocolMode::RdpSfp {
-                    opts |= conn_opts::RDP;
-                }
+                let size = (prng.next() % 4000) + 1000;
+                let mut data = vec![0u8; size as usize];
+                data[0..8].copy_from_slice(&count.to_le_bytes());
+                let mut blob_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                blob_prng.fill(&mut data[8..]);
 
-                if let Some(conn) = node.connect(Priority::Norm as u8, 2, SFP_PORT, 1000, opts) {
-                    let size = (prng.next() % 4000) + 1000;
-                    let mut data = vec![0u8; size as usize];
-                    data[0..8].copy_from_slice(&count.to_le_bytes());
-                    let mut blob_prng = Prng::new(PRNG_SEED ^ (count as u32));
-                    blob_prng.fill(&mut data[8..]);
-
-                    if conn.sfp_send(&data, 200, 1000).is_ok() {
-                        bytes_sent += size as u64;
-                        count += 100;
-                        println!("[TX] SFP sent {} bytes (count={})", size, count - 100);
-                    }
+                if conn.sfp_send(&data, 200, 1000).is_ok() {
+                    bytes_sent += size as u64;
+                    count += 100; // SFP counts as more "work"
+                    println!("[TX] SFP sent {} bytes (count={})", size, count - 100);
                 } else {
-                    count += 1;
+                    active_conn = None;
                 }
             }
         }
@@ -122,7 +119,6 @@ fn main() -> anyhow::Result<()> {
             last_log = Instant::now();
         }
 
-        // Throttling to prevent buffer exhaustion on fast vcan
         thread::sleep(Duration::from_millis(1));
     }
 }
