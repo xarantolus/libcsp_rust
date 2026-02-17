@@ -4,6 +4,8 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 use rtt_target::{rtt_init_print, rprintln};
 use embassy_executor::Spawner;
 use embassy_stm32::can::Can;
@@ -11,9 +13,36 @@ use embassy_stm32::peripherals::CAN1;
 use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Timer};
 use core::ffi::c_void;
-use libcsp::{CspArch, CspConfig, Packet, Port, Dispatcher, CspInterface, interface, InterfaceHandle, Priority};
+use libcsp::{CspArch, CspConfig, Packet, Port, Dispatcher, CspInterface, interface, InterfaceHandle, Priority, socket_opts};
 use panic_probe as _;
 use static_cell::StaticCell;
+
+// Import stress logic (manually since it's an example)
+const PRNG_SEED: u32 = 0x12345678;
+const DATA_PORT: u8 = 10;
+const SFP_PORT: u8 = 11;
+
+pub struct Prng { state: u32 }
+impl Prng {
+    pub fn new(seed: u32) -> Self { Self { state: if seed == 0 { 1 } else { seed } } }
+    pub fn next(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        self.state = x; x
+    }
+    pub fn fill(&mut self, buf: &mut [u8]) {
+        for chunk in buf.chunks_exact_mut(4) {
+            let val = self.next();
+            chunk.copy_from_slice(&val.to_le_bytes());
+        }
+        let remaining = buf.len() % 4;
+        if remaining > 0 {
+            let val = self.next().to_le_bytes();
+            let start = buf.len() - remaining;
+            buf[start..].copy_from_slice(&val[..remaining]);
+        }
+    }
+}
 
 bind_interrupts!(struct Irqs {
     CAN1_TX => embassy_stm32::can::TxInterruptHandler<CAN1>;
@@ -33,7 +62,11 @@ impl CspArch for EmbassyArch {
     fn bin_sem_remove(&self, sem: *mut c_void) { unsafe { drop(Box::from_raw(sem as *mut core::sync::atomic::AtomicBool)); } }
     fn bin_sem_wait(&self, sem: *mut c_void, _t: u32) -> bool {
         let sem = unsafe { &*(sem as *const core::sync::atomic::AtomicBool) };
-        while sem.swap(false, core::sync::atomic::Ordering::Acquire) == false { }
+        while sem.swap(false, core::sync::atomic::Ordering::Acquire) == false { 
+             // In a real app, we should yield here. For stress test, spinning is okay for now
+             // but could cause issues with high-prio tasks.
+             cortex_m::asm::nop();
+        }
         true
     }
     fn bin_sem_post(&self, sem: *mut c_void) -> bool {
@@ -51,81 +84,71 @@ impl CspArch for EmbassyArch {
     fn queue_dequeue(&self, _q: *mut c_void, _i: *mut c_void, _t: u32) -> bool { true }
     fn queue_size(&self, _q: *mut c_void) -> usize { 0 }
     fn malloc(&self, size: usize) -> *mut c_void { unsafe { core::alloc::GlobalAlloc::alloc(&HEAP, core::alloc::Layout::from_size_align(size, 4).unwrap()) as *mut c_void } }
-    fn free(&self, _p: *mut c_void) { }
+    fn free(&self, ptr: *mut c_void) { 
+        if !ptr.is_null() {
+            // We don't have enough info to call dealloc properly here since Layout is unknown
+            // For the stress test, we'll use a fixed size heap and might leak or use a better allocator.
+            // But libcsp calls csp_free on buffers it allocated via csp_malloc.
+        }
+    }
 }
 
 static ARCH: EmbassyArch = EmbassyArch;
-
+// ... (shimming functions omitted for brevity, keeping only the ones that changed or are essential)
 #[no_mangle] pub extern "C" fn csp_get_ms() -> u32 { ARCH.get_ms() }
 #[no_mangle] pub extern "C" fn csp_get_s() -> u32 { ARCH.get_s() }
 #[no_mangle] pub extern "C" fn csp_get_uptime_s() -> u32 { ARCH.get_s() }
 #[no_mangle] pub extern "C" fn csp_get_ms_isr() -> u32 { ARCH.get_ms() }
-#[no_mangle] pub extern "C" fn csp_bin_sem_create(sem: *mut *mut c_void) -> i32 {
-    let s = ARCH.bin_sem_create();
-    if s.is_null() { 0 } else { unsafe { *sem = s }; 1 }
-}
+#[no_mangle] pub extern "C" fn csp_bin_sem_create(sem: *mut *mut c_void) -> i32 { let s = ARCH.bin_sem_create(); if s.is_null() { 0 } else { unsafe { *sem = s }; 1 } }
 #[no_mangle] pub extern "C" fn csp_bin_sem_remove(sem: *mut *mut c_void) -> i32 { unsafe { ARCH.bin_sem_remove(*sem) }; 1 }
 #[no_mangle] pub extern "C" fn csp_bin_sem_wait(sem: *mut *mut c_void, timeout: u32) -> i32 { if unsafe { ARCH.bin_sem_wait(*sem, timeout) } { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_bin_sem_post(sem: *mut *mut c_void) -> i32 { if unsafe { ARCH.bin_sem_post(*sem) } { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_bin_sem_post_isr(sem: *mut *mut c_void, _px: *mut i32) -> i32 { if unsafe { ARCH.bin_sem_post(*sem) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_mutex_create(mutex: *mut *mut c_void) -> i32 {
-    let m = ARCH.mutex_create();
-    if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 }
-}
+#[no_mangle] pub extern "C" fn csp_mutex_create(mutex: *mut *mut c_void) -> i32 { let m = ARCH.mutex_create(); if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 } }
 #[no_mangle] pub extern "C" fn csp_mutex_remove(mutex: *mut *mut c_void) -> i32 { unsafe { ARCH.mutex_remove(*mutex) }; 1 }
 #[no_mangle] pub extern "C" fn csp_mutex_lock(mutex: *mut *mut c_void, timeout: u32) -> i32 { if unsafe { ARCH.mutex_lock(*mutex, timeout) } { 1 } else { 0 } }
 #[no_mangle] pub extern "C" fn csp_mutex_unlock(mutex: *mut *mut c_void) -> i32 { if unsafe { ARCH.mutex_unlock(*mutex) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_create(length: i32, item_size: usize) -> *mut c_void { ARCH.queue_create(length as usize, item_size) }
-#[no_mangle] pub extern "C" fn csp_queue_remove(queue: *mut c_void) { ARCH.queue_remove(queue) }
-#[no_mangle] pub extern "C" fn csp_queue_enqueue(queue: *mut c_void, item: *const c_void, timeout: u32) -> i32 { if ARCH.queue_enqueue(queue, item, timeout) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_enqueue_isr(queue: *mut c_void, item: *const c_void, _px: *mut i32) -> i32 { if ARCH.queue_enqueue(queue, item, 0) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_dequeue(queue: *mut c_void, item: *mut c_void, timeout: u32) -> i32 { if ARCH.queue_dequeue(queue, item, timeout) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_dequeue_isr(queue: *mut c_void, item: *mut c_void, _px: *mut i32) -> i32 { if ARCH.queue_dequeue(queue, item, 0) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_size(queue: *mut c_void) -> i32 { ARCH.queue_size(queue) as i32 }
-#[no_mangle] pub extern "C" fn csp_queue_size_isr(queue: *mut c_void) -> i32 { ARCH.queue_size(queue) as i32 }
-#[no_mangle] pub extern "C" fn csp_malloc(size: usize) -> *mut c_void { ARCH.malloc(size) }
-#[no_mangle] pub extern "C" fn csp_calloc(n: usize, size: usize) -> *mut c_void {
-    let total = n * size;
-    let ptr = ARCH.malloc(total);
-    if !ptr.is_null() { unsafe { core::ptr::write_bytes(ptr, 0, total) }; }
-    ptr
+#[no_mangle] pub extern "C" fn csp_queue_create(l: i32, s: usize) -> *mut c_void { ARCH.queue_create(l as usize, s) }
+#[no_mangle] pub extern "C" fn csp_queue_remove(q: *mut c_void) { ARCH.queue_remove(q) }
+#[no_mangle] pub extern "C" fn csp_queue_enqueue(q: *mut c_void, i: *const c_void, t: u32) -> i32 { if ARCH.queue_enqueue(q, i, t) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_enqueue_isr(q: *mut c_void, i: *const c_void, _p: *mut i32) -> i32 { if ARCH.queue_enqueue(q, i, 0) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_dequeue(q: *mut c_void, i: *mut c_void, t: u32) -> i32 { if ARCH.queue_dequeue(q, i, t) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_dequeue_isr(q: *mut c_void, i: *mut c_void, _p: *mut i32) -> i32 { if ARCH.queue_dequeue(q, i, 0) { 1 } else { 0 } }
+#[no_mangle] pub extern "C" fn csp_queue_size(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
+#[no_mangle] pub extern "C" fn csp_queue_size_isr(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
+#[no_mangle] pub extern "C" fn csp_malloc(s: usize) -> *mut c_void { ARCH.malloc(s) }
+#[no_mangle] pub extern "C" fn csp_calloc(n: usize, s: usize) -> *mut c_void {
+    let t = n * s; let p = ARCH.malloc(t);
+    if !p.is_null() { unsafe { core::ptr::write_bytes(p, 0, t) }; }
+    p
 }
-#[no_mangle] pub extern "C" fn csp_free(ptr: *mut c_void) { ARCH.free(ptr) }
-
-#[no_mangle] pub extern "C" fn csp_clock_set_time(_at: *const c_void) {}
-#[no_mangle] pub extern "C" fn csp_clock_get_time(_at: *mut c_void) {}
+#[no_mangle] pub extern "C" fn csp_free(p: *mut c_void) { ARCH.free(p) }
+#[no_mangle] pub extern "C" fn csp_clock_set_time(_a: *const c_void) {}
+#[no_mangle] pub extern "C" fn csp_clock_get_time(_a: *mut c_void) {}
 #[no_mangle] pub extern "C" fn csp_sys_tasklist_size() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn csp_sys_tasklist(_p: *mut i8) {}
 #[no_mangle] pub extern "C" fn csp_sys_memfree() -> u32 { 0 }
 #[no_mangle] pub extern "C" fn csp_sys_reboot() {}
 #[no_mangle] pub extern "C" fn csp_sys_shutdown() {}
-
 #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn srand(_s: u32) {}
 #[no_mangle] pub unsafe extern "C" fn strncpy(d: *mut i8, s: *const i8, n: usize) -> *mut i8 {
-    let mut i = 0;
-    while i < n && *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
-    while i < n { *d.add(i) = 0; i += 1; }
-    d
+    let mut i = 0; while i < n && *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
+    while i < n { *d.add(i) = 0; i += 1; } d
 }
 #[no_mangle] pub unsafe extern "C" fn strcpy(d: *mut i8, s: *const i8) -> *mut i8 {
-    let mut i = 0;
-    while *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
-    *d.add(i) = 0;
-    d
+    let mut i = 0; while *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
+    *d.add(i) = 0; d
 }
 #[no_mangle] pub unsafe extern "C" fn strnlen(s: *const i8, m: usize) -> usize {
-    let mut l = 0;
-    while l < m && *s.add(l) != 0 { l += 1; }
-    l
+    let mut l = 0; while l < m && *s.add(l) != 0 { l += 1; } l
 }
 #[no_mangle] pub unsafe extern "C" fn strncasecmp(s1: *const i8, s2: *const i8, n: usize) -> i32 {
     for i in 0..n {
         let c1 = (*s1.add(i) as u8).to_ascii_lowercase();
         let c2 = (*s2.add(i) as u8).to_ascii_lowercase();
         if c1 != c2 || c1 == 0 { return (c1 as i32) - (c2 as i32); }
-    }
-    0
+    } 0
 }
 #[no_mangle] pub unsafe extern "C" fn strtok_r(_s: *mut i8, _d: *const i8, _p: *mut *mut i8) -> *mut i8 { core::ptr::null_mut() }
 #[no_mangle] pub unsafe extern "C" fn sscanf(_s: *const i8, _f: *const i8) -> i32 { 0 }
@@ -149,47 +172,80 @@ static CAN_BUS: StaticCell<Can<'static, CAN1>> = StaticCell::new();
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     rtt_init_print!();
-    // WAIT FOR DEBUGGER
     for _ in 0..10_000_000 { cortex_m::asm::nop(); }
-    rprintln!("--- EMBASSY START ---");
+    rprintln!("--- STRESS TEST RECEIVER START ---");
 
     let p = embassy_stm32::init(Default::default());
-    rprintln!("HW INIT OK");
 
     {
         use core::mem::MaybeUninit;
-        static mut HEAP_MEM: [MaybeUninit<u8>; 4096] = [MaybeUninit::uninit(); 4096];
+        static mut HEAP_MEM: [MaybeUninit<u8>; 65536] = [MaybeUninit::uninit(); 65536];
         unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_MEM.len()) }
-        rprintln!("HEAP INIT OK");
     }
 
-    let node = CspConfig::new().address(1).buffers(5, 256).init().expect("CSP INIT FAIL");
-    rprintln!("CSP INIT OK");
+    let node = CspConfig::new().address(2).buffers(100, 256).init().expect("CSP INIT FAIL");
 
     let mut can = Can::new(p.CAN1, p.PA11, p.PA12, Irqs);
-    let _ = can.as_mut().modify_config().set_loopback(true).set_silent(false);
-    can.set_bitrate(250_000);
+    let _ = can.as_mut().modify_config().set_loopback(false).set_silent(false);
+    can.set_bitrate(1_000_000);
     can.enable().await;
-    rprintln!("CAN INIT OK");
     
     let can_static = CAN_BUS.init(can);
     let (tx, rx) = can_static.split();
     let handle = interface::register(Stm32CanIface { tx });
     
-    node.route_load("2 CAN").unwrap();
+    node.route_load("1 CAN").unwrap();
     spawner.spawn(csp_router_task(node)).unwrap();
     spawner.spawn(can_rx_task(rx, handle)).unwrap();
-    rprintln!("SPAWN OK");
 
-    let mut server = Dispatcher::new().unwrap();
-    server.bind_service(Port::Ping).unwrap();
+    let mut prng = Prng::new(PRNG_SEED);
+    let mut count = 0u64;
+    let mut bytes_recv = 0u64;
+    let mut last_log = Instant::now();
 
-    rprintln!("!!! RUNNING !!!");
+    // High-level dispatcher for stress ports
+    let mut server = libcsp::Dispatcher::new().unwrap();
+    
+    // 1. Normal/RDP data port
+    server.register(DATA_PORT, move |_conn, pkt| {
+        let data = pkt.data();
+        let mut expected = vec![0u8; data.len()];
+        prng.fill(&mut expected);
+
+        if data != expected {
+            rprintln!("[RX] ERR count {}", count);
+        }
+        bytes_recv += data.len() as u64;
+        count += 1;
+        None
+    }).unwrap();
+
+    // 2. SFP port (requires a separate listening socket usually, but Dispatcher handles it if we bind)
+    let sfp_sock = libcsp::Socket::new(socket_opts::NONE).unwrap();
+    sfp_sock.bind(SFP_PORT).unwrap();
+    sfp_sock.listen(5).unwrap();
+
+    rprintln!("!!! READY !!!");
 
     loop {
-        rprintln!("TICK: time {} ms", Instant::now().as_millis());
         server.run(10);
-        Timer::after(Duration::from_secs(1)).await;
+        
+        // Check for SFP connections manually as Dispatcher doesn't do SFP blobs yet
+        if let Some(conn) = sfp_sock.accept(0) {
+            match conn.sfp_recv(1000) {
+                Ok(data) => {
+                    rprintln!("[RX] SFP received {} bytes", data.len());
+                    // Verification would need another PRNG state or similar
+                }
+                Err(_) => rprintln!("[RX] SFP FAIL"),
+            }
+        }
+
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            rprintln!("Recv {} KB, Uptime {}s", bytes_recv / 1024, Instant::now().as_secs());
+            last_log = Instant::now();
+        }
+        Timer::after(Duration::from_millis(1)).await;
     }
 }
 
@@ -212,7 +268,7 @@ async fn can_rx_task(mut rx: embassy_stm32::can::CanRx<'static, 'static, CAN1>, 
 #[embassy_executor::task]
 async fn csp_router_task(node: libcsp::CspNode) {
     loop {
-        let _ = node.route_work(50); 
-        Timer::after(Duration::from_millis(5)).await;
+        let _ = node.route_work(10); 
+        Timer::after(Duration::from_millis(1)).await;
     }
 }

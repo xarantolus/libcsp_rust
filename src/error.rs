@@ -82,6 +82,12 @@ impl CspError {
     }
 }
 
+impl From<i32> for CspError {
+    fn from(code: i32) -> Self {
+        Self::from_code(code)
+    }
+}
+
 impl fmt::Display for CspError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -165,6 +165,60 @@ impl Connection {
             Err(CspError::TransmitFailed)
         }
     }
+
+    // ── SFP (Simple Fragmentation Protocol) ──────────────────────────────
+
+    /// Send a large blob of data over this connection using SFP.
+    ///
+    /// Data is chopped into chunks of at most `mtu` bytes.
+    pub fn sfp_send(&self, data: &[u8], mtu: u32, timeout: u32) -> Result<()> {
+        extern "C" {
+            fn memcpy(dest: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
+        }
+        let ret = unsafe {
+            sys::csp_sfp_send_own_memcpy(
+                self.inner,
+                data.as_ptr() as *const core::ffi::c_void,
+                data.len() as u32,
+                mtu,
+                timeout,
+                Some(memcpy),
+            )
+        };
+        if ret == (sys::CSP_ERR_NONE as i32) {
+            Ok(())
+        } else {
+            Err(CspError::from(ret))
+        }
+    }
+
+    /// Receive a large blob of data over this connection using SFP.
+    ///
+    /// Returns the received data as a `Vec<u8>` if the `std` feature is enabled,
+    /// otherwise it returns the raw pointer and size (caller must free via `csp_free`).
+    #[cfg(feature = "std")]
+    pub fn sfp_recv(&self, timeout: u32) -> Result<Vec<u8>> {
+        let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut data_size: core::ffi::c_int = 0;
+        let ret = unsafe {
+            sys::csp_sfp_recv_fp(
+                self.inner,
+                &mut data_ptr,
+                &mut data_size,
+                timeout,
+                core::ptr::null_mut(),
+            )
+        };
+
+        if ret == (sys::CSP_ERR_NONE as i32) && !data_ptr.is_null() {
+            let slice = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, data_size as usize) };
+            let vec = slice.to_vec();
+            unsafe { sys::csp_free(data_ptr) };
+            Ok(vec)
+        } else {
+            Err(CspError::from(ret))
+        }
+    }
 }
 
 impl Drop for Connection {
