@@ -7,6 +7,7 @@ extern crate alloc;
 use alloc::ffi::CString;
 use alloc::boxed::Box;
 use alloc::sync::Arc;
+use alloc::string::ToString;
 use core::ffi::c_void;
 
 use crate::sys;

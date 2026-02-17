@@ -37,6 +37,10 @@ fn main() {
     fs::create_dir_all(&gen_csp_dir).expect("failed to create generated include dir");
     generate_autoconfig(&gen_csp_dir);
 
+    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+        generate_external_arch_headers(&gen_csp_dir);
+    }
+
     // 2. Compile libcsp as a static library
     compile_libcsp(&src_dir, &include_dir, &gen_include_dir);
 
@@ -211,6 +215,68 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     fs::write(&dest, &content).expect("failed to write csp_autoconfig.h");
 }
 
+fn generate_external_arch_headers(dest_dir: &std::path::Path) {
+    let content = r#"/*
+ * Hack to support external architecture implementation in Rust.
+ * We define the types as void* so they always fit a pointer.
+ */
+#ifndef CSP_EXTERNAL_ARCH_H
+#define CSP_EXTERNAL_ARCH_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+typedef void * csp_bin_sem_handle_t;
+typedef void * csp_mutex_t;
+typedef void * csp_queue_handle_t;
+typedef int    CSP_BASE_TYPE;
+
+#define CSP_SEMAPHORE_OK    1
+#define CSP_SEMAPHORE_ERROR 0
+#define CSP_MUTEX_OK        1
+#define CSP_MUTEX_ERROR     0
+#define CSP_QUEUE_OK        1
+#define CSP_QUEUE_ERROR     0
+#define CSP_QUEUE_FULL      0
+
+/* Prototypes */
+uint32_t csp_get_ms(void);
+uint32_t csp_get_s(void);
+uint32_t csp_get_ms_isr(void);
+
+int csp_mutex_create(csp_mutex_t * mutex);
+int csp_mutex_remove(csp_mutex_t * mutex);
+int csp_mutex_lock(csp_mutex_t * mutex, uint32_t timeout);
+int csp_mutex_unlock(csp_mutex_t * mutex);
+
+int csp_bin_sem_create(csp_bin_sem_handle_t * sem);
+int csp_bin_sem_remove(csp_bin_sem_handle_t * sem);
+int csp_bin_sem_wait(csp_bin_sem_handle_t * sem, uint32_t timeout);
+int csp_bin_sem_post(csp_bin_sem_handle_t * sem);
+int csp_bin_sem_post_isr(csp_bin_sem_handle_t * sem, CSP_BASE_TYPE * pxTaskWoken);
+
+csp_queue_handle_t csp_queue_create(int length, size_t item_size);
+void csp_queue_remove(csp_queue_handle_t queue);
+int csp_queue_enqueue(csp_queue_handle_t handle, const void *value, uint32_t timeout);
+int csp_queue_enqueue_isr(csp_queue_handle_t handle, const void * value, CSP_BASE_TYPE * pxTaskWoken);
+int csp_queue_dequeue(csp_queue_handle_t handle, void *buf, uint32_t timeout);
+int csp_queue_dequeue_isr(csp_queue_handle_t handle, void * buf, CSP_BASE_TYPE * pxTaskWoken);
+int csp_queue_size(csp_queue_handle_t handle);
+int csp_queue_size_isr(csp_queue_handle_t handle);
+
+void * csp_malloc(size_t size);
+void * csp_calloc(size_t nmemb, size_t size);
+void   csp_free(void * ptr);
+
+uint32_t csp_sys_memfree(void);
+void     csp_sys_reboot(void);
+void     csp_sys_shutdown(void);
+
+#endif
+"#;
+    fs::write(dest_dir.join("csp_external_arch.h"), content).expect("failed to write csp_external_arch.h");
+}
+
 /// Compile all libcsp C sources as a single static library `libcsp.a`.
 fn compile_libcsp(
     src_dir: &std::path::Path,
@@ -255,6 +321,18 @@ fn compile_libcsp(
     feat_define(&mut build, "CARGO_FEATURE_DEDUP",          "CSP_USE_DEDUP");
     feat_define(&mut build, "CARGO_FEATURE_DEBUG",          "CSP_DEBUG");
     feat_define(&mut build, "CARGO_FEATURE_DEBUG_TIMESTAMP","CSP_DEBUG_TIMESTAMP");
+
+    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+        // Force-include our hack header
+        build.flag("-include").flag("csp/csp_external_arch.h");
+        // Define guards so the original headers think they've been included
+        build.define("_CSP_SEMAPHORE_H_", None);
+        build.define("_CSP_ARCH_QUEUE_H_", None);
+        build.define("_CSP_CLOCK_H_", None);
+        build.define("_CSP_TIME_H_", None);
+        build.define("_CSP_SYSTEM_H_", None);
+        build.define("_CSP_MALLOC_H_", None);
+    }
 
     build.define("CSP_USE_RTABLE", "1");
 
@@ -320,8 +398,10 @@ fn compile_libcsp(
     }
 
     // Generic arch files (not OS-specific)
-    build.file(src_dir.join("arch/csp_system.c"));
-    build.file(src_dir.join("arch/csp_time.c"));
+    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_err() {
+        build.file(src_dir.join("arch/csp_system.c"));
+        build.file(src_dir.join("arch/csp_time.c"));
+    }
 
     // OS-specific arch files
     if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_err() {
@@ -403,21 +483,38 @@ fn compile_libcsp(
 
 /// Return the GCC/clang built-in include directory so bindgen can find
 /// `stddef.h`, `stdint.h`, etc. when libclang doesn't locate them by itself.
-fn gcc_builtin_include() -> Option<String> {
+fn gcc_builtin_include() -> Vec<String> {
+    let mut paths = Vec::new();
+
+    // Use the cross-compiler if CC is set (typical for cross-compilation)
+    let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+
     // `cc -print-file-name=include` prints the compiler's internal include dir.
-    let output = std::process::Command::new("cc")
+    if let Ok(output) = std::process::Command::new(&cc)
         .arg("-print-file-name=include")
         .output()
-        .ok()?;
-    let path = std::str::from_utf8(&output.stdout).ok()?.trim().to_owned();
-    if path.is_empty() || path == "include" {
+    {
+        let path = std::str::from_utf8(&output.stdout).unwrap_or_default().trim().to_owned();
+        if !path.is_empty() && path != "include" {
+            paths.push(path);
+        }
+    }
+
+    // Special case for arm-none-eabi newlib
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.contains("thumb") || target.contains("arm-none-eabi") {
+        if std::path::Path::new("/usr/include/newlib").exists() {
+            paths.push("/usr/include/newlib".into());
+        }
+    }
+
+    if paths.is_empty() {
         // Fallback: try the standard system location
         if std::path::Path::new("/usr/include").exists() {
-            return Some("/usr/include".into());
+            paths.push("/usr/include".into());
         }
-        return None;
     }
-    Some(path)
+    paths
 }
 
 /// Use bindgen to generate Rust FFI bindings from `libcsp/include/csp/csp.h`.
@@ -487,7 +584,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
     // On some Linux systems libclang cannot locate GCC's built-in headers
     // (stddef.h, stdint.h …) on its own.  Ask the C compiler where they live
     // and forward that as a -isystem path to clang.
-    if let Some(gcc_include) = gcc_builtin_include() {
+    for gcc_include in gcc_builtin_include() {
         builder = builder.clang_arg(format!("-isystem{gcc_include}"));
     }
 

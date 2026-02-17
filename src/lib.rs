@@ -113,6 +113,7 @@ pub mod route;
 pub mod promisc;
 pub mod interface;
 pub mod service;
+pub mod arch;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
@@ -123,6 +124,12 @@ pub use connection::Connection;
 pub use socket::Socket;
 pub use interface::{CspInterface, InterfaceHandle};
 pub use service::{Ident, IfStats, Dispatcher};
+pub use arch::CspArch;
+
+#[macro_use]
+pub mod arch_macro {
+    pub use crate::export_arch;
+}
 
 /// Convenience `Result` type with [`CspError`] as the error variant.
 pub type Result<T> = core::result::Result<T, CspError>;

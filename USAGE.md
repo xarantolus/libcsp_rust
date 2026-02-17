@@ -200,14 +200,34 @@ pub extern "C" fn csp_get_s() -> u32 {
 }
 ```
 
-### Providing OS Primitives
-If you enable the `external-arch` feature, the library will not compile its own POSIX/FreeRTOS arch files. You must then provide implementation for:
-*   **Queues**: `csp_queue_create`, `csp_queue_enqueue`, `csp_queue_dequeue`, etc.
-*   **Semaphores**: `csp_bin_sem_create`, `csp_bin_sem_wait`, `csp_bin_sem_post`.
-*   **Malloc**: `csp_malloc`, `csp_free` (can bridge to your Rust global allocator).
-*   **System**: `csp_sys_memfree`, `csp_sys_reboot`, `csp_sys_shutdown`.
+### Providing OS Primitives (CspArch Trait)
+If you enable the `external-arch` feature, you can provide all OS primitives by implementing the `CspArch` trait. This is the recommended way for `no_std` environments like Embassy.
 
-See `libcsp/include/csp/arch/` for the exact C signatures required.
+```rust
+use libcsp::{CspArch, export_arch};
+use core::ffi::c_void;
+
+struct MyArch;
+
+impl CspArch for MyArch {
+    fn get_ms(&self) -> u32 { /* ... */ 0 }
+    fn get_s(&self) -> u32 { /* ... */ 0 }
+
+    fn bin_sem_create(&self) -> *mut c_void { /* ... */ core::ptr::null_mut() }
+    fn bin_sem_wait(&self, sem: *mut c_void, timeout: u32) -> bool { true }
+    // ... implement other methods ...
+    fn malloc(&self, size: usize) -> *mut c_void { /* ... */ core::ptr::null_mut() }
+    fn free(&self, ptr: *mut c_void) { /* ... */ }
+}
+
+// Export symbols to the C linker
+export_arch!(MyArch, MyArch);
+```
+
+The `export_arch!` macro generates the `#[no_mangle]` C shims that libcsp expects.
+
+### Cross-Compilation Requirement
+When building for an embedded target (e.g. `thumbv7em-none-eabihf`), the `cc` crate requires an appropriate cross-compiler (e.g. `arm-none-eabi-gcc`) to be available on your host system to compile the libcsp C core.
 
 ## 7. Summary of Ownership
 

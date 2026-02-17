@@ -1,0 +1,26 @@
+[package]
+name = "embassy-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embassy-stm32 = { version = "0.1", features = ["defmt", "stm32l4r5zi", "unstable-pac", "memory-x", "time-driver-any"] }
+embassy-executor = { version = "0.5", features = ["defmt", "arch-cortex-m", "executor-thread"] }
+embassy-time = { version = "0.3", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-sync = { version = "0.6" }
+embassy-futures = { version = "0.1" }
+
+cortex-m = { version = "0.7", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7"
+panic-probe = { version = "0.3", features = ["print-defmt"] }
+defmt = "0.3"
+defmt-rtt = "0.4"
+static_cell = "2.1"
+
+embedded-alloc = "0.5"
+libcsp = { path = "..", default-features = false, features = ["external-arch", "rdp", "crc32"] }
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = 's'

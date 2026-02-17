@@ -1,0 +1,13 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+runner = "probe-rs run --chip STM32L4R5ZITx"
+rustflags = [
+  "-C", "link-arg=-Tdefmt.x",
+  "-C", "link-arg=-Tlink.x",
+]
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[env]
+CC_thumbv7em_none_eabihf = "arm-none-eabi-gcc"
+AR_thumbv7em_none_eabihf = "arm-none-eabi-gcc-ar"
