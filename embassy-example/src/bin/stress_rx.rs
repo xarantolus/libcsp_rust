@@ -30,6 +30,11 @@ impl Prng {
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         self.state = x; x
     }
+    pub fn next_with_seed(seed: u32) -> u32 {
+        let mut x = if seed == 0 { 1 } else { seed };
+        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+        x
+    }
     pub fn fill(&mut self, buf: &mut [u8]) {
         for chunk in buf.chunks_exact_mut(4) {
             let val = self.next();
@@ -124,7 +129,7 @@ static ARCH: EmbassyArch = EmbassyArch;
 #[no_mangle] pub extern "C" fn csp_sys_tasklist_size() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn csp_sys_tasklist(_p: *mut i8) {}
 #[no_mangle] pub extern "C" fn csp_sys_memfree() -> u32 { 0 }
-#[no_mangle_isr] pub extern "C" fn csp_sys_reboot() {}
+#[no_mangle] pub extern "C" fn csp_sys_reboot() {}
 #[no_mangle] pub extern "C" fn csp_sys_shutdown() {}
 #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn srand(_s: u32) {}

@@ -18,6 +18,7 @@ version 2.1 of the License, or (at your option) any later version.
 extern crate alloc;
 
 use alloc::ffi::CString;
+use alloc::sync::Arc;
 use core::ffi::c_char;
 
 use crate::error::csp_result;
@@ -177,7 +178,7 @@ impl CspConfig {
         csp_result(unsafe { sys::csp_init(&conf) })?;
 
         // Move self into the node so the CStrings live as long as the node.
-        Ok(CspNode { _config: self })
+        Ok(CspNode { inner: Arc::new(CspNodeInner { _config: self }) })
     }
 }
 
@@ -185,14 +186,25 @@ impl CspConfig {
 
 /// Token representing an initialised CSP runtime.
 ///
-/// Returned by [`CspConfig::init()`].  When this value is dropped,
-/// `csp_free_resources()` is called to tear down the CSP stack.
+/// Returned by [`CspConfig::init()`].  When the last reference to this value
+/// is dropped, `csp_free_resources()` is called to tear down the CSP stack.
 ///
 /// All connections, sockets and packets obtained from this node must be
 /// dropped **before** the `CspNode` itself is dropped.
+#[derive(Clone)]
 pub struct CspNode {
     /// Keeps the C strings alive for the duration of the CSP runtime.
+    inner: Arc<CspNodeInner>,
+}
+
+struct CspNodeInner {
     _config: CspConfig,
+}
+
+impl Drop for CspNodeInner {
+    fn drop(&mut self) {
+        unsafe { sys::csp_free_resources() }
+    }
 }
 
 impl CspNode {
@@ -385,12 +397,6 @@ impl CspNode {
         })?;
         
         Ok(iface_ptr)
-    }
-}
-
-impl Drop for CspNode {
-    fn drop(&mut self) {
-        unsafe { sys::csp_free_resources() }
     }
 }
 

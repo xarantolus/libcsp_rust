@@ -34,13 +34,22 @@ The tests will automatically cycle through:
 
 ## STM32 Stress Tests (Embassy)
 
-The `embassy-example` is configured as a **Stress Receiver** by default.
+The `embassy-example` project provides two binaries for stress testing.
 
-### Flash and Run
+### Stress Receiver
+The STM32 acts as a server, verifying incoming PRNG data from a Linux sender.
 ```bash
 cd embassy-example
-cargo build --release
-probe-rs run --chip STM32L4R5ZITx target/thumbv7em-none-eabihf/release/embassy-example
+cargo build --release --bin stress_rx
+probe-rs run --chip STM32L4R5ZITx target/thumbv7em-none-eabihf/release/stress_rx
+```
+
+### Stress Sender
+The STM32 acts as a client, cycling through modes and sending PRNG data to a Linux receiver.
+```bash
+cd embassy-example
+cargo build --release --bin stress_tx
+probe-rs run --chip STM32L4R5ZITx target/thumbv7em-none-eabihf/release/stress_tx
 ```
 
 ### Connectivity

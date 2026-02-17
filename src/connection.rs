@@ -194,10 +194,8 @@ impl Connection {
 
     /// Receive a large blob of data over this connection using SFP.
     ///
-    /// Returns the received data as a `Vec<u8>` if the `std` feature is enabled,
-    /// otherwise it returns the raw pointer and size (caller must free via `csp_free`).
-    #[cfg(feature = "std")]
-    pub fn sfp_recv(&self, timeout: u32) -> Result<Vec<u8>> {
+    /// Returns the received data as a `Vec<u8>`.
+    pub fn sfp_recv(&self, timeout: u32) -> Result<alloc::vec::Vec<u8>> {
         let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
         let mut data_size: core::ffi::c_int = 0;
         let ret = unsafe {
