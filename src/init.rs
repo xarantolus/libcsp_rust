@@ -354,7 +354,7 @@ impl CspNode {
 
     /// Send a shutdown request to `node`.
     pub fn shutdown(&self, node: u8) {
-        unsafe { sys::shutdown(node) }
+        unsafe { sys::csp_shutdown(node) }
     }
 
     // ── Drivers ───────────────────────────────────────────────────────────────

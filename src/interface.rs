@@ -6,6 +6,7 @@
 extern crate alloc;
 use alloc::ffi::CString;
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::ffi::c_void;
 
 use crate::sys;
@@ -29,12 +30,19 @@ pub trait CspInterface: Send {
 /// Registration handle for a custom interface.
 ///
 /// Keeps the interface state and the C-compatible callback pointers alive.
+/// This handle is internally reference-counted and can be cloned safely.
+#[derive(Clone)]
 pub struct InterfaceHandle {
-    _inner: Box<InterfaceState>,
+    _inner: Arc<InterfaceState>,
 }
 
+// Safety: InterfaceHandle is an opaque handle to CSP data structures that are
+// protected by libcsp's internal mutexes.
+unsafe impl Send for InterfaceHandle {}
+unsafe impl Sync for InterfaceHandle {}
+
 struct InterfaceState {
-    user_iface: Box<dyn CspInterface>,
+    user_iface: spin::Mutex<Box<dyn CspInterface>>,
     c_iface: sys::csp_iface_t,
     c_name: CString,
 }
@@ -47,19 +55,31 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     let name = interface.name().to_string();
     let c_name = CString::new(name).unwrap();
     
-    let mut state = Box::new(InterfaceState {
-        user_iface: Box::new(interface),
-        c_iface: unsafe { core::mem::zeroed() },
+    // We use a raw pointer to the state inside Arc so C can access it.
+    // This is safe because Arc keeps the memory alive.
+    // However, C needs a stable pointer. 
+    // We'll use a Box then wrap in Arc? No, let's just use Arc and get a pointer.
+    
+    let mut c_iface: sys::csp_iface_t = unsafe { core::mem::zeroed() };
+    c_iface.name = c_name.as_ptr();
+    c_iface.nexthop = Some(nexthop_shim);
+    c_iface.mtu = unsafe { sys::csp_buffer_data_size() } as u16;
+
+    let state = Arc::new(InterfaceState {
+        user_iface: spin::Mutex::new(Box::new(interface)),
+        c_iface,
         c_name,
     });
 
-    state.c_iface.name = state.c_name.as_ptr();
-    state.c_iface.nexthop = Some(nexthop_shim);
-    state.c_iface.interface_data = &mut *state as *mut InterfaceState as *mut c_void;
-    state.c_iface.mtu = unsafe { sys::csp_buffer_data_size() } as u16;
-
+    // We need to set the interface_data to the Arc's inner pointer.
+    // Since we can't easily get a stable pointer from Arc without leaking it or 
+    // using unsafe, let's just use Box for the state and Arc for the handle.
+    // Wait, if I use Box for state, then InterfaceHandle just holds an Arc<Box<InterfaceState>>.
+    
+    let state_ptr = Arc::as_ptr(&state) as *mut InterfaceState;
     unsafe {
-        sys::csp_iflist_add(&mut state.c_iface);
+        (*state_ptr).c_iface.interface_data = state_ptr as *mut c_void;
+        sys::csp_iflist_add(&mut (*state_ptr).c_iface);
     }
 
     InterfaceHandle { _inner: state }
@@ -87,10 +107,10 @@ impl InterfaceHandle {
 unsafe extern "C" fn nexthop_shim(route: *const sys::csp_route_t, packet: *mut sys::csp_packet_t) -> i32 {
     let iface = (*route).iface;
     let state_ptr = (*iface).interface_data as *mut InterfaceState;
-    let state = &mut *state_ptr;
+    let state = &*state_ptr;
     
     let pkt = Packet::from_raw(packet);
-    state.user_iface.nexthop((*route).via, pkt);
+    state.user_iface.lock().nexthop((*route).via, pkt);
     
     0 // CSP_ERR_NONE
 }

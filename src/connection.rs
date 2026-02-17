@@ -39,6 +39,12 @@ impl Connection {
         Connection { inner: ptr }
     }
 
+    /// Return the raw C pointer.
+    #[inline]
+    pub fn as_raw(&self) -> *mut sys::csp_conn_t {
+        self.inner
+    }
+
     // ── Sending ──────────────────────────────────────────────────────────
 
     /// Send a packet over this connection.

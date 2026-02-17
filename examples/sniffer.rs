@@ -5,8 +5,8 @@
 //! Usage: cargo run --example sniffer [interface_name]
 //! Default interface: vcan0
 
-use libcsp::{CspConfig, Packet, Priority, CspInterface, interface, promisc};
-use socketcan::{CanSocket, Socket, CanFrame, Frame};
+use libcsp::{CspConfig, Packet, CspInterface, interface, promisc};
+use socketcan::{CanSocket, Socket, CanFrame, EmbeddedFrame, Frame};
 use std::sync::Arc;
 use std::thread;
 use std::env;
@@ -53,15 +53,13 @@ fn main() -> anyhow::Result<()> {
     let handle = interface::register(can_iface);
 
     // 4. Start RX thread (This feeds the CSP router)
-    let rx_handle = Arc::clone(&handle);
+    let rx_handle = handle.clone();
     let rx_socket = Arc::clone(&socket);
     thread::spawn(move || {
         loop {
             if let Ok(frame) = rx_socket.read_frame() {
-                let data = frame.data();
+                let data = EmbeddedFrame::data(&frame);
                 if let Some(mut pkt) = Packet::get(data.len()) {
-                    // Raw CAN ID in libcsp matches the CSP ID (usually).
-                    // socketcan v3.3 uses frame.id().raw_id()
                     pkt.set_id_raw(frame.raw_id());
                     pkt.write(data).unwrap();
                     rx_handle.rx(pkt);

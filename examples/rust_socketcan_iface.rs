@@ -4,7 +4,7 @@
 //! safe Rust libraries instead of the built-in C drivers.
 
 use libcsp::{CspConfig, Packet, Priority, CspInterface, interface};
-use socketcan::{CanSocket, Socket, CanFrame, Frame};
+use socketcan::{CanSocket, Socket, CanFrame, EmbeddedFrame, ExtendedId, Id, Frame};
 use std::thread;
 use std::sync::Arc;
 
@@ -18,12 +18,12 @@ impl CspInterface for RustCanIface {
         &self.name
     }
 
-    fn nexthop(&mut self, _via: u8, mut pkt: Packet) {
+    fn nexthop(&mut self, _via: u8, pkt: Packet) {
         // 1. Convert CSP packet to CAN frame(s)
         let can_id = pkt.id_raw();
         
-        // socketcan::CanFrame::new_raw(id, data)
-        if let Ok(frame) = CanFrame::new_raw(can_id, pkt.data()) {
+        let id = Id::Extended(ExtendedId::new(can_id).unwrap());
+        if let Some(frame) = CanFrame::new(id, pkt.data()) {
             let _ = self.socket.write_frame(&frame);
         }
         
@@ -53,13 +53,13 @@ fn main() -> anyhow::Result<()> {
     let handle = interface::register(can_iface);
     
     // 4. Start RX thread
-    let rx_handle = Arc::clone(&handle);
+    let rx_handle = handle.clone();
     let rx_socket = Arc::clone(&socket);
     thread::spawn(move || {
         println!("RX Thread: Listening on vcan0...");
         loop {
             if let Ok(frame) = rx_socket.read_frame() {
-                let data = frame.data();
+                let data = EmbeddedFrame::data(&frame);
                 if let Some(mut pkt) = Packet::get(data.len()) {
                     pkt.set_id_raw(frame.raw_id());
                     pkt.write(data).unwrap();
