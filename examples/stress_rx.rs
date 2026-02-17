@@ -17,7 +17,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Initialise CSP (address 2)
     let node = CspConfig::new()
         .address(2)
-        .buffers(100, 256)
+        .buffers(500, 256)
         .init()
         .expect("CSP init failed");
 
@@ -51,6 +51,10 @@ fn main() -> anyhow::Result<()> {
         if let Some(conn) = sock_data.accept(100) {
             let src_addr = conn.src_addr();
             let src_port = conn.src_port();
+            let is_rdp = (conn.flags() & libcsp::sys::CSP_FRDP as i32) != 0;
+            if is_rdp {
+                println!("[RX] RDP session started from {}:{}", src_addr, src_port);
+            }
             
             while let Some(pkt) = conn.read(100) {
                 let data = pkt.data();
@@ -77,6 +81,9 @@ fn main() -> anyhow::Result<()> {
                 if count % 100 == 0 {
                     println!("[RX] Received 100 packets (latest count={}, from {}:{})", pkt_count, src_addr, src_port);
                 }
+            }
+            if is_rdp {
+                println!("[RX] RDP session closed from {}:{}", src_addr, src_port);
             }
         }
 

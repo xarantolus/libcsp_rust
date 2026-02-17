@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     // 1. Initialise CSP
     let node = CspConfig::new()
         .address(1)
-        .buffers(100, 256)
+        .buffers(500, 256)
         .init()
         .expect("CSP init failed");
 
@@ -62,6 +62,7 @@ fn main() -> anyhow::Result<()> {
             ProtocolMode::Rdp => {
                 // Reliable connection
                 if let Some(conn) = node.connect(Priority::Norm as u8, 2, DATA_PORT, 1000, conn_opts::RDP) {
+                    println!("[TX] RDP session started (count={})", count);
                     for _ in 0..50 {
                         if let Some(mut pkt) = Packet::get(200) {
                             let mut data = [0u8; 200];
@@ -78,7 +79,10 @@ fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                    // Connection closed on drop (RDP Close)
+                    // Give RDP some time to flush ACKs before dropping the connection
+                    thread::sleep(Duration::from_millis(50));
+                    println!("[TX] RDP session closing...");
+                    // Connection closed on drop
                 } else {
                     eprintln!("[TX] RDP Connect failed, retrying...");
                     thread::sleep(Duration::from_millis(100));
@@ -118,7 +122,7 @@ fn main() -> anyhow::Result<()> {
             last_log = Instant::now();
         }
 
-        // Slight throttle to not overwhelm local vcan if needed
-        // thread::sleep(Duration::from_millis(1));
+        // Throttling to prevent buffer exhaustion on fast vcan
+        thread::sleep(Duration::from_millis(1));
     }
 }
