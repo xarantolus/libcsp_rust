@@ -1,0 +1,45 @@
+[package]
+name = "libcsp"
+version = "1.6.0"
+edition = "2021"
+description = "Safe Rust bindings for libcsp (Cubesat Space Protocol) v1.6"
+license = "LGPL-2.1"
+links = "csp"
+
+[features]
+default = ["std", "rdp", "crc32", "hmac", "xtea", "qos", "promisc", "dedup"]
+
+# Pull in the standard library. Disable to build for no_std targets.
+# When disabled you still need `alloc` (for CString / heap-allocated strings
+# in CspConfig). The CSP buffer pool itself never calls the Rust allocator.
+std = []
+
+# Security / protocol features
+rdp           = []   # Reliable Datagram Protocol
+rdp-fast-close = ["rdp"]  # Fast close of RDP connections
+crc32         = []   # CRC32 checksum
+hmac          = []   # HMAC-SHA1 authentication
+xtea          = []   # XTEA encryption
+
+# Routing / QoS
+qos           = []   # Quality of Service (priority FIFOs)
+promisc       = []   # Promiscuous mode
+dedup         = []   # Packet deduplication
+cidr-rtable   = []   # CIDR routing table (instead of static)
+
+# Drivers / interfaces (optional external dependencies)
+socketcan     = []   # Linux SocketCAN driver (requires libsocketcan)
+zmq           = []   # ZMQ hub interface (requires libzmq)
+usart-linux   = []   # Linux USART driver
+usart-windows = []   # Windows USART driver
+
+# Debug
+debug         = []   # Enable CSP debug output
+debug-timestamp = [] # Add timestamps to debug output
+
+[dependencies]
+bitflags = "2"
+
+[build-dependencies]
+cc = "1"
+bindgen = "0.70"

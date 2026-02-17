@@ -1,0 +1,474 @@
+/*
+Cubesat Space Protocol - A small network-layer protocol designed for Cubesats
+Copyright (C) 2012 GomSpace ApS (http://www.gomspace.com)
+Copyright (C) 2012 AAUSAT3 Project (http://aausat3.space.aau.dk)
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let libcsp_dir = PathBuf::from("libcsp");
+    let src_dir = libcsp_dir.join("src");
+    let include_dir = libcsp_dir.join("include");
+
+    // Notify cargo of files/env vars that trigger rebuild
+    emit_rerun_triggers();
+
+    // 1. Generate csp_autoconfig.h into OUT_DIR/include/csp/
+    let gen_include_dir = out_dir.join("include");
+    let gen_csp_dir = gen_include_dir.join("csp");
+    fs::create_dir_all(&gen_csp_dir).expect("failed to create generated include dir");
+    generate_autoconfig(&gen_csp_dir);
+
+    // 2. Compile libcsp as a static library
+    compile_libcsp(&src_dir, &include_dir, &gen_include_dir);
+
+    // 3. Generate Rust bindings via bindgen
+    generate_bindings(&include_dir, &gen_include_dir, &out_dir);
+
+    // 4. Emit link flags
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    match target_os.as_str() {
+        "linux" => {
+            println!("cargo:rustc-link-lib=pthread");
+            println!("cargo:rustc-link-lib=rt");
+        }
+        "macos" => {
+            println!("cargo:rustc-link-lib=pthread");
+        }
+        "windows" => {
+            println!("cargo:rustc-link-lib=ws2_32");
+        }
+        _ => {}
+    }
+
+    if env::var("CARGO_FEATURE_SOCKETCAN").is_ok() {
+        println!("cargo:rustc-link-lib=socketcan");
+    }
+    if env::var("CARGO_FEATURE_ZMQ").is_ok() {
+        println!("cargo:rustc-link-lib=zmq");
+    }
+}
+
+/// Emit `rerun-if-changed` / `rerun-if-env-changed` directives.
+fn emit_rerun_triggers() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=libcsp/include");
+    println!("cargo:rerun-if-changed=libcsp/src");
+
+    // Sizing overrides via environment variables
+    for name in &[
+        "LIBCSP_BUFFER_SIZE",
+        "LIBCSP_BUFFER_COUNT",
+        "LIBCSP_CONN_MAX",
+        "LIBCSP_CONN_RXQUEUE_LEN",
+        "LIBCSP_QFIFO_LEN",
+        "LIBCSP_PORT_MAX_BIND",
+        "LIBCSP_RTABLE_SIZE",
+        "LIBCSP_MAX_INTERFACES",
+        "LIBCSP_RDP_MAX_WINDOW",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+}
+
+/// Read a sizing constant from an env var, falling back to a default.
+fn cfg_u32(env_name: &str, default: u32) -> u32 {
+    env::var(env_name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Generate `csp_autoconfig.h` in `dest_dir` based on enabled Cargo features
+/// and optional environment-variable overrides for buffer/connection sizing.
+fn generate_autoconfig(dest_dir: &std::path::Path) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
+
+    // OS defines
+    let os_define = match target_os.as_str() {
+        "windows" => "#define CSP_WINDOWS 1\n#define CSP_POSIX  0\n#define CSP_MACOSX 0",
+        "macos"   => "#define CSP_MACOSX 1\n#define CSP_POSIX  0\n#define CSP_WINDOWS 0",
+        _         => "#define CSP_POSIX  1\n#define CSP_WINDOWS 0\n#define CSP_MACOSX 0",
+    };
+
+    // Endianness
+    let endian_define = if target_endian == "big" {
+        "#define CSP_BIG_ENDIAN    1\n#define CSP_LITTLE_ENDIAN 0"
+    } else {
+        "#define CSP_LITTLE_ENDIAN 1\n#define CSP_BIG_ENDIAN    0"
+    };
+
+    // Feature flags — controlled by Cargo features
+    let feat = |env: &str| -> &'static str {
+        if env::var(env).is_ok() { "1" } else { "0" }
+    };
+    let use_rdp        = feat("CARGO_FEATURE_RDP");
+    let use_rdp_fc     = feat("CARGO_FEATURE_RDP_FAST_CLOSE");
+    let use_crc32      = feat("CARGO_FEATURE_CRC32");
+    let use_hmac       = feat("CARGO_FEATURE_HMAC");
+    let use_xtea       = feat("CARGO_FEATURE_XTEA");
+    let use_qos        = feat("CARGO_FEATURE_QOS");
+    let use_promisc    = feat("CARGO_FEATURE_PROMISC");
+    let use_dedup      = feat("CARGO_FEATURE_DEDUP");
+    let debug          = feat("CARGO_FEATURE_DEBUG");
+    let debug_ts       = feat("CARGO_FEATURE_DEBUG_TIMESTAMP");
+
+    // Log levels: in release (no debug feature) only ERROR is enabled
+    let (log_debug, log_info, log_warn, log_error) = if debug == "1" {
+        ("1", "1", "1", "1")
+    } else {
+        ("0", "0", "0", "1")
+    };
+
+    // Sizing — overridable via env vars
+    let buf_size   = cfg_u32("LIBCSP_BUFFER_SIZE",      256);
+    let buf_count  = cfg_u32("LIBCSP_BUFFER_COUNT",      10);
+    let conn_max   = cfg_u32("LIBCSP_CONN_MAX",          10);
+    let conn_rxq   = cfg_u32("LIBCSP_CONN_RXQUEUE_LEN",  10);
+    let qfifo_len  = cfg_u32("LIBCSP_QFIFO_LEN",         25);
+    let port_max   = cfg_u32("LIBCSP_PORT_MAX_BIND",      24);
+    let rtable_sz  = cfg_u32("LIBCSP_RTABLE_SIZE",        10);
+    let max_iface  = cfg_u32("LIBCSP_MAX_INTERFACES",      8);
+    let rdp_win    = cfg_u32("LIBCSP_RDP_MAX_WINDOW",     20);
+
+    let content = format!(
+        r#"/*
+ * Auto-generated by Rust build script — DO NOT EDIT.
+ * Cubesat Space Protocol v1.6 compile-time configuration.
+ *
+ * Copyright (C) 2012 GomSpace ApS (http://www.gomspace.com)
+ * Licensed under the GNU Lesser General Public License v2.1+
+ */
+#ifndef CSP_AUTOCONFIG_H
+#define CSP_AUTOCONFIG_H
+
+/* OS selection */
+{os_define}
+
+/* Endianness */
+{endian_define}
+
+/* Feature flags */
+#define CSP_USE_RDP               {use_rdp}
+#define CSP_USE_RDP_FAST_CLOSE    {use_rdp_fc}
+#define CSP_USE_CRC32             {use_crc32}
+#define CSP_USE_HMAC              {use_hmac}
+#define CSP_USE_XTEA              {use_xtea}
+#define CSP_USE_QOS               {use_qos}
+#define CSP_USE_PROMISC           {use_promisc}
+#define CSP_USE_DEDUP             {use_dedup}
+#define CSP_USE_RTABLE            1
+
+/* Debug / logging */
+#define CSP_DEBUG                 {debug}
+#define CSP_DEBUG_TIMESTAMP       {debug_ts}
+#define CSP_LOG_LEVEL_DEBUG       {log_debug}
+#define CSP_LOG_LEVEL_INFO        {log_info}
+#define CSP_LOG_LEVEL_WARN        {log_warn}
+#define CSP_LOG_LEVEL_ERROR       {log_error}
+
+/* Buffer and connection sizing */
+#define CSP_BUFFER_SIZE           {buf_size}
+#define CSP_BUFFER_COUNT          {buf_count}
+#define CSP_CONN_MAX              {conn_max}
+#define CSP_CONN_RXQUEUE_LEN      {conn_rxq}
+#define CSP_QFIFO_LEN             {qfifo_len}
+#define CSP_PORT_MAX_BIND         {port_max}
+#define CSP_RTABLE_SIZE           {rtable_sz}
+#define CSP_MAX_INTERFACES        {max_iface}
+#define CSP_RDP_MAX_WINDOW        {rdp_win}
+
+/* Library version */
+#define LIBCSP_VERSION            "1.6"
+#define GIT_REV                   "unknown"
+
+#include <stdio.h>
+
+#endif /* CSP_AUTOCONFIG_H */
+"#
+    );
+
+    let dest = dest_dir.join("csp_autoconfig.h");
+    fs::write(&dest, &content).expect("failed to write csp_autoconfig.h");
+}
+
+/// Compile all libcsp C sources as a single static library `libcsp.a`.
+fn compile_libcsp(
+    src_dir: &std::path::Path,
+    include_dir: &std::path::Path,
+    gen_include_dir: &std::path::Path,
+) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    let mut build = cc::Build::new();
+
+    // ── Include paths ──────────────────────────────────────────────────────
+    build.include(include_dir);                        // libcsp/include
+    build.include(src_dir);                            // private headers in src/
+    build.include(src_dir.join("transport"));
+    build.include(src_dir.join("interfaces"));
+    build.include(gen_include_dir);                    // OUT_DIR/include (csp_autoconfig.h)
+
+    // ── Compiler flags ─────────────────────────────────────────────────────
+    build
+        .flag("-std=gnu99")
+        .flag("-Os")
+        .flag("-Wall")
+        .flag("-Wextra")
+        .flag("-Wshadow")
+        .flag("-Wcast-align")
+        .flag("-Wwrite-strings")
+        .flag("-Wno-unused-parameter");
+
+    // ── Feature defines — must match csp_autoconfig.h ─────────────────────
+    let feat_define = |b: &mut cc::Build, env: &str, name: &str| {
+        let val = if env::var(env).is_ok() { "1" } else { "0" };
+        b.define(name, val);
+    };
+
+    feat_define(&mut build, "CARGO_FEATURE_RDP",            "CSP_USE_RDP");
+    feat_define(&mut build, "CARGO_FEATURE_RDP_FAST_CLOSE", "CSP_USE_RDP_FAST_CLOSE");
+    feat_define(&mut build, "CARGO_FEATURE_CRC32",          "CSP_USE_CRC32");
+    feat_define(&mut build, "CARGO_FEATURE_HMAC",           "CSP_USE_HMAC");
+    feat_define(&mut build, "CARGO_FEATURE_XTEA",           "CSP_USE_XTEA");
+    feat_define(&mut build, "CARGO_FEATURE_QOS",            "CSP_USE_QOS");
+    feat_define(&mut build, "CARGO_FEATURE_PROMISC",        "CSP_USE_PROMISC");
+    feat_define(&mut build, "CARGO_FEATURE_DEDUP",          "CSP_USE_DEDUP");
+    feat_define(&mut build, "CARGO_FEATURE_DEBUG",          "CSP_DEBUG");
+    feat_define(&mut build, "CARGO_FEATURE_DEBUG_TIMESTAMP","CSP_DEBUG_TIMESTAMP");
+
+    build.define("CSP_USE_RTABLE", "1");
+
+    let debug = if env::var("CARGO_FEATURE_DEBUG").is_ok() { "1" } else { "0" };
+    build.define("CSP_LOG_LEVEL_DEBUG", if debug == "1" { "1" } else { "0" });
+    build.define("CSP_LOG_LEVEL_INFO",  if debug == "1" { "1" } else { "0" });
+    build.define("CSP_LOG_LEVEL_WARN",  if debug == "1" { "1" } else { "0" });
+    build.define("CSP_LOG_LEVEL_ERROR", "1");
+
+    // ── Core source files ──────────────────────────────────────────────────
+    let core = [
+        "csp_buffer.c",
+        "csp_bridge.c",
+        "csp_conn.c",
+        "csp_crc32.c",
+        "csp_debug.c",
+        "csp_dedup.c",
+        "csp_endian.c",
+        "csp_hex_dump.c",
+        "csp_iflist.c",
+        "csp_init.c",
+        "csp_io.c",
+        "csp_port.c",
+        "csp_promisc.c",
+        "csp_qfifo.c",
+        "csp_route.c",
+        "csp_service_handler.c",
+        "csp_services.c",
+        "csp_sfp.c",
+    ];
+    for f in &core {
+        build.file(src_dir.join(f));
+    }
+
+    // Transport
+    build.file(src_dir.join("transport/csp_rdp.c"));
+    build.file(src_dir.join("transport/csp_udp.c"));
+
+    // Crypto
+    build.file(src_dir.join("crypto/csp_hmac.c"));
+    build.file(src_dir.join("crypto/csp_sha1.c"));
+    build.file(src_dir.join("crypto/csp_xtea.c"));
+
+    // Interfaces
+    let interfaces = [
+        "interfaces/csp_if_can.c",
+        "interfaces/csp_if_can_pbuf.c",
+        "interfaces/csp_if_i2c.c",
+        "interfaces/csp_if_kiss.c",
+        "interfaces/csp_if_lo.c",
+        "interfaces/csp_if_zmqhub.c",
+    ];
+    for f in &interfaces {
+        build.file(src_dir.join(f));
+    }
+
+    // Routing table
+    build.file(src_dir.join("rtable/csp_rtable.c"));
+    if env::var("CARGO_FEATURE_CIDR_RTABLE").is_ok() {
+        build.file(src_dir.join("rtable/csp_rtable_cidr.c"));
+    } else {
+        build.file(src_dir.join("rtable/csp_rtable_static.c"));
+    }
+
+    // Generic arch files (not OS-specific)
+    build.file(src_dir.join("arch/csp_system.c"));
+    build.file(src_dir.join("arch/csp_time.c"));
+
+    // OS-specific arch files
+    match target_os.as_str() {
+        "windows" => {
+            build.define("CSP_WINDOWS", "1");
+            let win_src = src_dir.join("arch/windows");
+            for f in &[
+                "csp_clock.c",
+                "csp_malloc.c",
+                "csp_queue.c",
+                "csp_semaphore.c",
+                "csp_system.c",
+                "csp_thread.c",
+                "csp_time.c",
+                "windows_queue.c",
+            ] {
+                build.file(win_src.join(f));
+            }
+        }
+        "macos" => {
+            build.define("CSP_MACOSX", "1");
+            let mac_src = src_dir.join("arch/macosx");
+            for f in &[
+                "csp_clock.c",
+                "csp_malloc.c",
+                "csp_queue.c",
+                "csp_semaphore.c",
+                "csp_system.c",
+                "csp_thread.c",
+                "csp_time.c",
+                "pthread_queue.c",
+            ] {
+                build.file(mac_src.join(f));
+            }
+        }
+        _ => {
+            // Default: POSIX (Linux, etc.)
+            build.define("CSP_POSIX", "1");
+            let posix_src = src_dir.join("arch/posix");
+            for f in &[
+                "csp_clock.c",
+                "csp_malloc.c",
+                "csp_queue.c",
+                "csp_semaphore.c",
+                "csp_system.c",
+                "csp_thread.c",
+                "csp_time.c",
+                "pthread_queue.c",
+            ] {
+                build.file(posix_src.join(f));
+            }
+        }
+    }
+
+    // Optional: SocketCAN driver
+    if env::var("CARGO_FEATURE_SOCKETCAN").is_ok() {
+        build.file(src_dir.join("drivers/can/can_socketcan.c"));
+    }
+
+    // Optional: USART drivers
+    if env::var("CARGO_FEATURE_USART_LINUX").is_ok() {
+        build.file(src_dir.join("drivers/usart/usart_kiss.c"));
+        build.file(src_dir.join("drivers/usart/usart_linux.c"));
+    }
+    if env::var("CARGO_FEATURE_USART_WINDOWS").is_ok() {
+        build.file(src_dir.join("drivers/usart/usart_kiss.c"));
+        build.file(src_dir.join("drivers/usart/usart_windows.c"));
+    }
+
+    build.compile("csp");
+}
+
+/// Use bindgen to generate Rust FFI bindings from `libcsp/include/csp/csp.h`.
+fn generate_bindings(
+    include_dir: &std::path::Path,
+    gen_include_dir: &std::path::Path,
+    out_dir: &std::path::Path,
+) {
+    let license_header = r#"/*
+Cubesat Space Protocol - A small network-layer protocol designed for Cubesats
+Copyright (C) 2012 GomSpace ApS (http://www.gomspace.com)
+Copyright (C) 2012 AAUSAT3 Project (http://aausat3.space.aau.dk)
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+*/
+// AUTO-GENERATED FILE — DO NOT EDIT
+// Generated by bindgen from libcsp/include/csp/csp.h"#;
+
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
+
+    let os_define = match target_os.as_str() {
+        "windows" => "CSP_WINDOWS=1",
+        "macos"   => "CSP_MACOSX=1",
+        _         => "CSP_POSIX=1",
+    };
+
+    let endian_define = if target_endian == "big" {
+        "CSP_BIG_ENDIAN=1"
+    } else {
+        "CSP_LITTLE_ENDIAN=1"
+    };
+
+    let bindings = bindgen::Builder::default()
+        .header(
+            include_dir
+                .join("csp/csp.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        // Include paths
+        .clang_arg(format!("-I{}", include_dir.display()))
+        .clang_arg(format!("-I{}", gen_include_dir.display()))
+        // OS + endian defines so bindgen sees the correct conditional branches
+        .clang_arg(format!("-D{os_define}"))
+        .clang_arg(format!("-D{endian_define}"))
+        .clang_arg("-DCSP_USE_RTABLE=1")
+        // Inject the LGPL header into the generated file
+        .raw_line(license_header)
+        // Allow-list: only emit CSP symbols
+        .allowlist_function("csp_.*")
+        .allowlist_type("csp_.*")
+        .allowlist_var("CSP_.*")
+        // Derive common traits where possible
+        .derive_debug(true)
+        .derive_copy(true)
+        .derive_default(true)
+        // Use core:: types instead of std:: so the generated bindings compile
+        // in no_std environments (requires Rust 1.64+ for core::ffi::c_*).
+        .use_core(true)
+        .generate()
+        .expect("bindgen failed to generate bindings");
+
+    let out = out_dir.join("bindings.rs");
+    bindings
+        .write_to_file(&out)
+        .expect("failed to write bindings.rs");
+}
