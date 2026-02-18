@@ -186,7 +186,8 @@ async fn main(spawner: Spawner) {
 
     let node = CspConfig::new()
         .address(2)
-        .buffers(500, 256)
+        .buffers(1000, 256)
+        .fifo_length(100)
         .init()
         .expect("CSP INIT FAIL");
 

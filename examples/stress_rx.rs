@@ -17,7 +17,8 @@ fn main() -> anyhow::Result<()> {
     // 1. Initialise CSP (address 2)
     let node = CspConfig::new()
         .address(2)
-        .buffers(500, 256)
+        .buffers(1000, 256)
+        .fifo_length(100)
         .init()
         .expect("CSP init failed");
 

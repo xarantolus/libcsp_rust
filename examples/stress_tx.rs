@@ -18,7 +18,8 @@ fn main() -> anyhow::Result<()> {
     // 1. Initialise CSP
     let node = CspConfig::new()
         .address(1)
-        .buffers(500, 256)
+        .buffers(1000, 256)
+        .fifo_length(100)
         .init()
         .expect("CSP init failed");
 
@@ -64,10 +65,10 @@ fn main() -> anyhow::Result<()> {
             };
             let port = if matches!(current_mode, ProtocolMode::SFP | ProtocolMode::RdpSfp) { SFP_PORT } else { DATA_PORT };
             
-            active_conn = node.connect(Priority::Norm as u8, 2, port, 1000, opts);
+            // Reduced timeout to 200ms for faster cycling
+            active_conn = node.connect(Priority::Norm as u8, 2, port, 200, opts);
             if active_conn.is_none() {
-                eprintln!("[TX] Failed to establish connection for {}, retrying...", current_mode.to_str());
-                thread::sleep(Duration::from_millis(100));
+                // No sleep here, just continue to next iteration to retry
                 continue;
             }
             println!("[TX] Established connection for {}", current_mode.to_str());
@@ -77,19 +78,28 @@ fn main() -> anyhow::Result<()> {
 
         match current_mode {
             ProtocolMode::Normal | ProtocolMode::Rdp => {
-                if let Some(mut pkt) = Packet::get(200) {
-                    let mut data = [0u8; 200];
-                    data[0..8].copy_from_slice(&count.to_le_bytes());
-                    let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
-                    packet_prng.fill(&mut data[8..]);
-                    pkt.write(&data).unwrap();
-                    
-                    if conn.send_discard(pkt, 500).is_ok() {
-                        bytes_sent += 200;
-                        count += 1;
+                // Send in bursts of 5 to increase bus load
+                for _ in 0..5 {
+                    if let Some(mut pkt) = Packet::get(200) {
+                        let mut data = [0u8; 200];
+                        data[0..8].copy_from_slice(&count.to_le_bytes());
+                        let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                        packet_prng.fill(&mut data[8..]);
+                        pkt.write(&data).unwrap();
+                        
+                        if conn.send_discard(pkt, 10).is_ok() {
+                            bytes_sent += 200;
+                            count += 1;
+                        } else {
+                            // On failure, back off slightly and reset connection
+                            active_conn = None;
+                            thread::sleep(Duration::from_millis(5));
+                            break;
+                        }
                     } else {
-                        // Send failed, maybe connection died?
-                        active_conn = None;
+                        // Out of buffers?
+                        thread::sleep(Duration::from_millis(1));
+                        break;
                     }
                 }
             }
@@ -100,12 +110,14 @@ fn main() -> anyhow::Result<()> {
                 let mut blob_prng = Prng::new(PRNG_SEED ^ (count as u32));
                 blob_prng.fill(&mut data[8..]);
 
+                // SFP send is blocking and sends many packets
                 if conn.sfp_send(&data, 200, 1000).is_ok() {
                     bytes_sent += size as u64;
-                    count += 100; // SFP counts as more "work"
-                    println!("[TX] SFP sent {} bytes (count={})", size, count - 100);
+                    count += 20; // Lowered increment to stay in mode longer
+                    println!("[TX] SFP sent {} bytes (count={})", size, count - 20);
                 } else {
                     active_conn = None;
+                    thread::sleep(Duration::from_millis(10));
                 }
             }
         }
@@ -119,6 +131,7 @@ fn main() -> anyhow::Result<()> {
             last_log = Instant::now();
         }
 
-        thread::sleep(Duration::from_millis(1));
+        // Minimal yield instead of fixed sleep
+        // thread::sleep(Duration::from_millis(1));
     }
 }

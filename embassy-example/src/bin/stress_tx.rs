@@ -196,7 +196,8 @@ async fn main(spawner: Spawner) {
 
     let node = CspConfig::new()
         .address(1)
-        .buffers(500, 256)
+        .buffers(1000, 256)
+        .fifo_length(100)
         .init()
         .expect("CSP INIT FAIL");
 
@@ -226,7 +227,7 @@ async fn main(spawner: Spawner) {
     loop {
         let next_mode = ProtocolMode::from_count(count);
         if next_mode != current_mode {
-            rprintln!("[TX] Mode Switch: {} -> {}", current_mode.to_str(), next_mode.to_str());
+            rprintln!("[TX] Mode Switch: {} -> {} (count={})", current_mode.to_str(), next_mode.to_str(), count);
             if let Some(conn) = active_conn.take() {
                 if (conn.flags() & libcsp::sys::CSP_FRDP as i32) != 0 {
                     Timer::after(Duration::from_millis(50)).await;
@@ -245,10 +246,9 @@ async fn main(spawner: Spawner) {
             };
             let port = if matches!(current_mode, ProtocolMode::SFP | ProtocolMode::RdpSfp) { SFP_PORT } else { DATA_PORT };
             
-            active_conn = node.connect(Priority::Norm as u8, 2, port, 1000, opts);
+            active_conn = node.connect(Priority::Norm as u8, 2, port, 200, opts);
             if active_conn.is_none() {
-                rprintln!("[TX] Connect FAIL for {}, retry...", current_mode.to_str());
-                Timer::after(Duration::from_millis(100)).await;
+                Timer::after(Duration::from_millis(10)).await;
                 continue;
             }
             rprintln!("[TX] Connected for {}", current_mode.to_str());
@@ -258,18 +258,25 @@ async fn main(spawner: Spawner) {
 
         match current_mode {
             ProtocolMode::Normal | ProtocolMode::Rdp => {
-                if let Some(mut pkt) = Packet::get(200) {
-                    let mut data = [0u8; 200];
-                    data[0..8].copy_from_slice(&count.to_le_bytes());
-                    let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
-                    packet_prng.fill(&mut data[8..]);
-                    pkt.write(&data).unwrap();
-                    
-                    if conn.send_discard(pkt, 500).is_ok() {
-                        bytes_sent += 200;
-                        count += 1;
+                for _ in 0..5 {
+                    if let Some(mut pkt) = Packet::get(200) {
+                        let mut data = [0u8; 200];
+                        data[0..8].copy_from_slice(&count.to_le_bytes());
+                        let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                        packet_prng.fill(&mut data[8..]);
+                        pkt.write(&data).unwrap();
+                        
+                        if conn.send_discard(pkt, 10).is_ok() {
+                            bytes_sent += 200;
+                            count += 1;
+                        } else {
+                            active_conn = None;
+                            Timer::after(Duration::from_millis(5)).await;
+                            break;
+                        }
                     } else {
-                        active_conn = None;
+                        Timer::after(Duration::from_millis(1)).await;
+                        break;
                     }
                 }
             }
@@ -282,10 +289,11 @@ async fn main(spawner: Spawner) {
 
                 if conn.sfp_send(&data, 200, 1000).is_ok() {
                     bytes_sent += size as u64;
-                    count += 100;
-                    rprintln!("[TX] SFP sent {} bytes", size);
+                    count += 20;
+                    rprintln!("[TX] SFP sent {} bytes (count={})", size, count - 20);
                 } else {
                     active_conn = None;
+                    Timer::after(Duration::from_millis(10)).await;
                 }
             }
         }
