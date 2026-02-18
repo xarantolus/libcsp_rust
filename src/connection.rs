@@ -133,6 +133,16 @@ impl Connection {
         unsafe { sys::csp_conn_flags(self.inner) }
     }
 
+    /// Return `true` if this connection was opened with the RDP flag.
+    ///
+    /// RDP (Reliable Datagram Protocol) adds sequence numbers,
+    /// acknowledgements, and retransmission on top of CSP.  This method is
+    /// equivalent to `(conn.flags() & CSP_FRDP) != 0`.
+    #[inline]
+    pub fn is_rdp(&self) -> bool {
+        (self.flags() & sys::CSP_FRDP as i32) != 0
+    }
+
     // ── Transactions ──────────────────────────────────────────────────────
 
     /// Perform a complete request/reply exchange on this *existing* connection.

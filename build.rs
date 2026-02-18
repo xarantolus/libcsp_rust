@@ -597,6 +597,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
                 .to_str()
                 .expect("include path is not valid UTF-8"),
         )
+        .header(
+            include_dir
+                .join("csp/crypto/csp_xtea.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/crypto/csp_hmac.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
         // Include paths
         .clang_arg(format!("-I{}", include_dir.display()))
         .clang_arg(format!("-I{}", gen_include_dir.display()))

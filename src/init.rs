@@ -407,6 +407,24 @@ impl CspNode {
         unsafe { sys::csp_shutdown(node) }
     }
 
+    // ── Security ──────────────────────────────────────────────────────────────
+
+    /// Load the 128-bit XTEA pre-shared key (four 32-bit words).
+    ///
+    /// Both ends of any XTEA-encrypted connection must share the same key.
+    /// Call this **before** starting the router task and opening any
+    /// encrypted connections.
+    ///
+    /// The key is stored in a global variable inside the C library.  This
+    /// call is not thread-safe if made concurrently with active XTEA
+    /// connections.
+    ///
+    /// Requires the `xtea` feature (enabled by default).
+    #[cfg(feature = "xtea")]
+    pub fn set_xtea_key(&self, key: &[u32; 4]) {
+        unsafe { sys::csp_xtea_set_key(key.as_ptr() as *const core::ffi::c_void, 4); }
+    }
+
     // ── Drivers ───────────────────────────────────────────────────────────────
 
     /// Open a Linux SocketCAN interface and add it to CSP.

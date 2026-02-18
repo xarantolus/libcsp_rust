@@ -133,7 +133,9 @@ impl Dispatcher {
             while let Some(pkt) = conn.read(100) {
                 if let Some(handler) = self.handlers.get_mut(&dport) {
                     if let Some(reply) = handler(&conn, pkt) {
-                        let _ = conn.send(reply, 100);
+                        // Ignore send errors — if it fails the reply packet
+                        // is freed automatically by send_discard.
+                        let _ = conn.send_discard(reply, 100);
                     }
                 } else if Port::from(dport).is_service_port() {
                     unsafe {

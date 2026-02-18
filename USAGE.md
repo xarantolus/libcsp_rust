@@ -61,9 +61,15 @@ use libcsp::Packet;
 
 if let Some(mut pkt) = Packet::get(32) {
     pkt.write(b"hello").unwrap();
-    // Packet will be freed here if not moved (e.g. into conn.send())
+    // Packet is freed here automatically because it goes out of scope.
+    // If you pass it to conn.send() or handle.rx(), ownership transfers
+    // and the packet is freed by the CSP stack instead.
 }
 ```
+
+**Why can `pkt.write()` fail?**
+
+All packet buffers are pre-allocated at startup with a fixed data capacity — the `data_size` argument to `.buffers(count, data_size)`. The argument to `Packet::get(n)` is a *minimum request hint*, not an independent allocation: you always get a buffer of the globally-configured capacity. `pkt.write(bytes)` returns `Err(bytes.len())` if `bytes.len() > buffer_data_size`. For payloads that exceed one buffer, use SFP (§3.5).
 
 ### Decoding Headers
 `Packet` provides safe methods to inspect the CSP header without bit-shifting:
@@ -176,12 +182,17 @@ sock.bind(DATA_PORT).unwrap();
 sock.listen(10).unwrap();
 
 while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
-    if conn.flags() & libcsp::sys::CSP_FRDP as i32 != 0 {
+    if conn.is_rdp() {
         println!("RDP session from node {}", conn.src_addr());
     }
+    // conn.read(500): block up to 500 ms for the next packet.
+    // Returns None when the sender closes the connection or the timeout
+    // expires with nothing in the queue.
     while let Some(pkt) = conn.read(500) {
         process(pkt.data()); // guaranteed order, no duplicates
+        // pkt freed here automatically
     }
+    // conn dropped here → csp_close() called
 }
 ```
 
@@ -212,19 +223,19 @@ if let Some(conn) = node.connect(
 ) {
     if let Some(mut pkt) = Packet::get(32) {
         pkt.write(b"top secret command").unwrap();
+        // pkt ownership transferred to CSP (freed by stack on success,
+        // freed automatically on failure because send_discard discards it).
         let _ = conn.send_discard(pkt, 500);
     }
+    // conn dropped here → csp_close() called
 }
 ```
 
 **Loading the key** (do this once at startup, before any connections):
 ```rust
-// Safety: csp_xtea_set_key writes to a global C array.
 // Call before route_start_task and any connections.
 let key: [u32; 4] = [0xDEAD_BEEF, 0xCAFE_F00D, 0x1234_5678, 0xABCD_EF01];
-unsafe {
-    libcsp::sys::csp_xtea_set_key(key.as_ptr(), key.len() as u32);
-}
+node.set_xtea_key(&key); // requires the `xtea` feature (enabled by default)
 ```
 
 **Receiver side** — decryption is automatic as long as the socket does not prohibit XTEA:
@@ -273,10 +284,10 @@ let reply_len = node.transaction(
     Priority::Norm as u8,
     DST_NODE,
     QUERY_PORT,
-    1000,           // timeout (ms)
+    1000,           // reply wait timeout (ms): how long to block waiting for the server's reply
     request,
     &mut reply,
-    -1,             // -1 = unknown reply length (reply buf is the limit)
+    -1,             // -1 = unknown reply length (accept any size up to reply.len())
     conn_opts::NONE,
 )?;
 
@@ -314,32 +325,74 @@ server.run(libcsp::MAX_TIMEOUT);
 
 For protocols that need several exchanges on one connection, open the connection manually and send/receive in a loop.
 
+**How timeouts work:**
+
+| Call | Timeout argument | Meaning |
+|------|-----------------|---------|
+| `node.connect(…, timeout, …)` | ms | **Handshake timeout.** For RDP, this is how long to wait for the SYN-ACK. For plain CSP (no RDP), the connection slot is allocated immediately and this value is ignored. |
+| `conn.send_discard(pkt, timeout)` | ms | **Send timeout.** Passed to `csp_send()`. In libcsp 1.6 this is largely unused — the send enqueues immediately. For RDP it governs how long to wait for buffer space. |
+| `conn.read(timeout)` | ms | **Receive timeout.** Blocks until a packet arrives in the connection's RX queue or the timeout expires. Returns `None` on timeout or when the peer closes the connection. Use `libcsp::MAX_TIMEOUT` to block indefinitely. |
+| `conn.transaction(timeout, …)` | ms | **Reply wait timeout.** Used by the one-shot helper; applies only to waiting for the server's single reply. |
+
+**Client side:**
 ```rust
 use libcsp::{Priority, conn_opts, Packet};
 
+// connect: 1000 ms RDP handshake timeout (ignored here since no RDP flag)
 if let Some(conn) = node.connect(
     Priority::Norm as u8, DST_NODE, QUERY_PORT, 1000, conn_opts::NONE,
 ) {
-    // Round 1
+    // Round 1: send a request
     if let Some(mut req) = Packet::get(16) {
         req.write(b"HELLO").unwrap();
+        // req freed by CSP on success, or freed automatically on failure
         let _ = conn.send_discard(req, 200);
     }
+    // Block up to 500 ms for the server's reply
     if let Some(reply) = conn.read(500) {
         println!("Round 1 reply: {:?}", reply.data());
+        // reply freed here automatically
     }
 
-    // Round 2
+    // Round 2: send another request on the same connection
     if let Some(mut req) = Packet::get(16) {
         req.write(b"GET data").unwrap();
         let _ = conn.send_discard(req, 200);
     }
     if let Some(reply) = conn.read(500) {
         println!("Round 2 reply: {:?}", reply.data());
+        // reply freed here automatically
     }
 
-    // conn dropped here → connection closed
+    // conn dropped here → csp_close() called, connection torn down
 }
+```
+
+**Server side** — handle multiple packets on the same connection using a `Dispatcher`:
+```rust
+use libcsp::{Dispatcher, Packet, Port};
+
+let mut server = Dispatcher::new().unwrap();
+
+server.register(Port::Custom(QUERY_PORT), |_conn, pkt| {
+    // pkt is owned by this closure — we must either return it as a reply
+    // or drop it.  Both paths free the buffer.
+    let request = pkt.data();
+
+    if request == b"HELLO" {
+        let mut reply = Packet::get(5)?;
+        reply.write(b"HI!").ok()?;
+        Some(reply) // reply sent; original pkt freed when closure returns
+    } else if request == b"GET data" {
+        let mut reply = Packet::get(16)?;
+        reply.write(b"data payload").ok()?;
+        Some(reply)
+    } else {
+        None // unknown command — pkt freed automatically, no reply sent
+    }
+})?;
+
+server.run(libcsp::MAX_TIMEOUT); // blocks; run in a dedicated thread
 ```
 
 ### 3.5 Large Payload Transfer (SFP)
@@ -403,38 +456,81 @@ let port_custom = Port::Custom(10);
 ```
 
 ### Server-Side: The `Dispatcher`
-The `Dispatcher` allows you to register closures for specific ports, avoiding manual `accept`/`read` loops.
+
+The `Dispatcher` is a single-socket, single-thread server.  Internally it holds **one `Socket`** bound to all registered port numbers and runs a single `accept` loop.  You do **not** need one thread per port — one thread handles all registered ports.
+
+```text
+One socket → bound to ports [1, 3, 5, 6, 10, 11]
+One accept loop → dispatches by destination port
+```
+
+There are two ways to register a port:
+
+| Method | Effect |
+|--------|--------|
+| `server.register(port, closure)` | Your closure handles every incoming packet on that port. Return `Some(reply_pkt)` to respond, `None` to silently consume. |
+| `server.bind_service(port)` | Binds the port for listening but delegates packet handling to libcsp's built-in `csp_service_handler`. Use this for standard protocol ports (Ping, MemFree, Uptime, BufFree, Reboot). |
+
+**Standard services and their client-side calls:**
+
+| `bind_service(…)` | Enables remote call |
+|-------------------|---------------------|
+| `Port::Ping` | `node.ping(target, …)` |
+| `Port::MemFree` | `node.memfree(target, …)` |
+| `Port::Uptime` | `node.uptime(target, …)` |
+| `Port::BufFree` | `node.buf_free(target, …)` |
+| `Port::Reboot` | `node.reboot(target)` |
+| `Port::Cmp` | `node.ident(…)`, `node.peek(…)`, `node.poke(…)` |
+
+The server must have called `bind_service` for the corresponding port before a remote client can query it.
 
 ```rust
 use libcsp::{Dispatcher, Port, MAX_TIMEOUT};
+use std::thread;
 
 let mut server = Dispatcher::new().unwrap();
 
-// Bind standard service handlers (Ping, Uptime, etc.)
-server.bind_service(Port::Ping)?;
+// Standard built-in service handlers
+server.bind_service(Port::Ping)?;    // enables node.ping(this_addr, …) from remotes
+server.bind_service(Port::MemFree)?; // enables node.memfree(this_addr, …) from remotes
+server.bind_service(Port::Uptime)?;  // enables node.uptime(this_addr, …) from remotes
+server.bind_service(Port::Cmp)?;     // enables node.ident/peek/poke from remotes
 
-// Register custom port logic
-server.register(Port::Custom(10), |conn, pkt| {
-    println!("Received {} bytes", pkt.length());
-    Some(pkt) // Return packet to send as a reply, or None to consume
+// Custom port logic — one thread handles all of these
+server.register(Port::Custom(10), |_conn, pkt| {
+    println!("Port 10: {} bytes", pkt.length());
+    Some(pkt) // echo back; pkt ownership returned to CSP for sending
 })?;
 
-// Run the dispatcher (blocks or run in thread)
-server.run(MAX_TIMEOUT);
+server.register(Port::Custom(11), |_conn, pkt| {
+    println!("Port 11 data: {:?}", pkt.data());
+    None // no reply; pkt freed automatically when closure returns
+})?;
+
+// Run in a dedicated thread — blocks until the socket is closed
+thread::spawn(move || server.run(MAX_TIMEOUT));
 ```
 
-### Client-Side: CMP Services
-Safe wrappers for the CSP Management Protocol (CMP) return high-level Rust types.
+### CMP: Peer Inspection (Ident, Peek, Poke)
+
+Safe wrappers for the CSP Management Protocol (CMP) return high-level Rust types.  The **remote node must have `Port::Cmp` registered** via `server.bind_service(Port::Cmp)` (see above).
 
 ```rust
-// Get remote node identification
-let info = node.ident(address, 1000)?;
-println!("Remote node is {} running {}", info.hostname, info.model);
+// Get remote node identification (hostname, model, revision, build date/time)
+let info = node.ident(remote_addr, 1000)?; // 1000 ms reply timeout
+println!("Remote: {} running {}", info.hostname, info.model);
 
-// Read/Write remote memory (Peek/Poke)
-let data = node.peek(address, 0x20000000, 4, 1000)?;
-node.poke(address, 0x20000000, &[0xDE, 0xAD, 0xBE, 0xEF], 1000)?;
+// Read raw memory from the remote node (peek)
+// address: target memory address, len: bytes to read (max CSP_CMP_PEEK_MAX_LEN)
+let bytes = node.peek(remote_addr, 0x2000_0000, 4, 1000)?;
+println!("Memory at 0x2000_0000: {:02x?}", bytes);
+
+// Write raw memory on the remote node (poke)
+// Use with extreme care — writing to the wrong address will crash the target.
+node.poke(remote_addr, 0x2000_0000, &[0xDE, 0xAD, 0xBE, 0xEF], 1000)?;
 ```
+
+**Server-side:** No extra code is needed beyond `bind_service(Port::Cmp)`.  The built-in `csp_service_handler` reads/writes memory on the running process directly using the address and length you provide.  On embedded targets this means real hardware memory; use `peek`/`poke` only for debugging or well-understood register maps.
 
 ---
 
