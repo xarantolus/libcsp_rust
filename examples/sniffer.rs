@@ -92,21 +92,19 @@ fn main() -> anyhow::Result<()> {
             if pkt.is_rdp() {
                 if !active_rdp.contains(&conn_key) {
                     active_rdp.insert(conn_key);
-                    event = " [SESSION START]".to_string();
+                    event = ">>> [SESSION START]".to_string();
                 }
             } else if active_rdp.contains(&conn_key) {
                 active_rdp.remove(&conn_key);
-                event = " [SESSION END/RESET]".to_string();
+                event = "<<< [SESSION END/RESET]".to_string();
             }
 
             println!(
-                "prio={} src={:>2}:{:0>2} dest={:>2}:{:0>2} size={:>4}B rdp={:<3} flags={:02X} labels=[{:<15}]{}",
+                "[{:<4}] | {:>2}:{:0>2} ──▶ {:>2}:{:0>2} | SIZE: {:>4}B | FLAGS: [{:<15}] | {}",
                 prio,
                 src, sport,
                 dst, dport,
                 size,
-                if pkt.is_rdp() { "yes" } else { "no" },
-                pkt.id_raw() & 0xFF,
                 flags.join(","),
                 event
             );
