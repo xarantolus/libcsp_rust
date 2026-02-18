@@ -66,9 +66,6 @@ fn main() -> anyhow::Result<()> {
     // Key: (src, dst, sport, dport)
     let mut active_rdp = HashSet::new();
 
-    println!("\n{:<5} | {:<12} | {:<12} | {:<5} | {:<5} | {}", "PRIO", "SOURCE", "DEST", "SIZE", "RDP", "FLAGS/EVENT");
-    println!("{:-<100}", "");
-
     loop {
         if let Some(pkt) = sniffer.read(1000) {
             let src = pkt.src_addr();
@@ -88,36 +85,28 @@ fn main() -> anyhow::Result<()> {
             if pkt.is_crc32() { flags.push("CRC"); }
             if pkt.is_frag()  { flags.push("FRAG"); }
 
-            let mut event = "";
+            let mut event = String::new();
             let conn_key = (src, dst, sport, dport);
 
             // RDP State Detection
-            // We look for SYN/FIN flags in the CSP header to track sessions
-            let raw_flags = pkt.id_raw() & 0xFF;
-            const CSP_FRES1: u32 = 0x80;
-            const CSP_FRES2: u32 = 0x40;
-            const CSP_FRES3: u32 = 0x20;
-            
-            // In CSP 1.6, RDP control is handled via FRES bits or payload, 
-            // but we can infer OPEN/CLOSE from the RDP flag bit presence.
             if pkt.is_rdp() {
                 if !active_rdp.contains(&conn_key) {
                     active_rdp.insert(conn_key);
-                    event = ">>> [RDP SESSION START]";
+                    event = " [SESSION START]".to_string();
                 }
             } else if active_rdp.contains(&conn_key) {
                 active_rdp.remove(&conn_key);
-                event = "<<< [RDP SESSION END/RESET]";
+                event = " [SESSION END/RESET]".to_string();
             }
 
             println!(
-                "{:<5} | {:>2}:{:0>2}       | {:>2}:{:0>2}       | {:>4}B | {:<5} | {:02X} {} {}",
+                "prio={} src={:>2}:{:0>2} dest={:>2}:{:0>2} size={:>4}B rdp={:<3} flags={:02X} labels=[{:<15}]{}",
                 prio,
                 src, sport,
                 dst, dport,
                 size,
-                if pkt.is_rdp() { "YES" } else { "NO" },
-                raw_flags,
+                if pkt.is_rdp() { "yes" } else { "no" },
+                pkt.id_raw() & 0xFF,
                 flags.join(","),
                 event
             );
