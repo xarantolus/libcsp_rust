@@ -3,9 +3,9 @@
 //! Run with: cargo run --example stress_rx -- vcan0
 
 mod stress;
-use stress::{Prng, ProtocolMode, PRNG_SEED, DATA_PORT, SFP_PORT};
+use stress::{Prng, PRNG_SEED, DATA_PORT, SFP_PORT};
 
-use libcsp::{CspConfig, Packet, Priority, Socket, socket_opts};
+use libcsp::{CspConfig, Socket, socket_opts};
 use std::time::{Instant, Duration};
 
 fn main() -> anyhow::Result<()> {
@@ -38,7 +38,6 @@ fn main() -> anyhow::Result<()> {
     sock_sfp.bind(SFP_PORT)?;
     sock_sfp.listen(10)?;
 
-    let mut prng = Prng::new(PRNG_SEED);
     let mut count = 0u64;
     let start_time = Instant::now();
     let mut last_log = Instant::now();

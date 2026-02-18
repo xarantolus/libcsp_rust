@@ -32,9 +32,9 @@ fn main() -> libcsp::Result<()> {
     })?;
 
     // 5. Register a data logger on port 11 (consumes packets, no reply)
-    server.register(11, |_conn, pkt| {
+    server.register(Port::Custom(11), |_conn, pkt| {
         println!("Logger: Received data: {:?}", pkt.data());
-        None // No reply
+        None // No reply — pkt is freed automatically
     })?;
 
     println!("Server started. Listening for Pings and Custom Port 10/11...");
@@ -47,22 +47,22 @@ fn main() -> libcsp::Result<()> {
     // --- Client part for demo ---
     thread::sleep(std::time::Duration::from_millis(100));
 
-    // Send to port 10 (Echo)
-    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 10, 1000, 0) {
+    // Send to port 10 (Echo) — server returns the same packet as a reply.
+    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 10, 1000, libcsp::conn_opts::NONE) {
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"Hello Dispatch!").unwrap();
-        conn.send(pkt, 100).unwrap();
-        
+        conn.send_discard(pkt, 100).unwrap();
+
         if let Some(reply) = conn.read(500) {
             println!("Client: Got echo reply: {:?}", std::str::from_utf8(reply.data()));
         }
     }
 
-    // Send to port 11 (Logger)
-    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 11, 1000, 0) {
+    // Send to port 11 (Logger) — server consumes packet, no reply expected.
+    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 11, 1000, libcsp::conn_opts::NONE) {
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"log this").unwrap();
-        conn.send(pkt, 100).unwrap();
+        conn.send_discard(pkt, 100).unwrap();
     }
 
     // Ping

@@ -23,7 +23,7 @@ use core::ffi::c_char;
 
 use crate::error::csp_result;
 use crate::sys;
-use crate::{Connection, Result};
+use crate::{Connection, Packet, Result};
 
 /// Builder for the CSP runtime configuration.
 ///
@@ -178,7 +178,7 @@ impl CspConfig {
         csp_result(unsafe { sys::csp_init(&conf) })?;
 
         // Move self into the node so the CStrings live as long as the node.
-        Ok(CspNode { inner: Arc::new(CspNodeInner { _config: self }) })
+        Ok(CspNode { _inner: Arc::new(CspNodeInner { _config: self }) })
     }
 }
 
@@ -193,8 +193,8 @@ impl CspConfig {
 /// dropped **before** the `CspNode` itself is dropped.
 #[derive(Clone)]
 pub struct CspNode {
-    /// Keeps the C strings alive for the duration of the CSP runtime.
-    inner: Arc<CspNodeInner>,
+    /// Keeps the CSP runtime alive (calls `csp_free_resources` on last drop).
+    _inner: Arc<CspNodeInner>,
 }
 
 struct CspNodeInner {
@@ -263,10 +263,47 @@ impl CspNode {
         }
     }
 
+    // ── Connectionless send ────────────────────────────────────────────────
+
+    /// Send a packet connectionlessly to `dst:dst_port`.
+    ///
+    /// Unlike [`connect`](CspNode::connect) + [`Connection::send`], this
+    /// bypasses the connection table entirely — no connection slot is used.
+    /// Useful for high-rate fire-and-forget traffic.
+    ///
+    /// `src_port` — source port number (use 0 to let CSP assign one).
+    ///
+    /// ## Ownership semantics
+    ///
+    /// - **On success** (`csp_sendto` returns 1): CSP takes ownership of the
+    ///   buffer.  `Ok(())` is returned and `packet` is consumed.
+    /// - **On failure**: The packet is returned as `Err((CspError, Packet))`
+    ///   so the caller can inspect or drop it.
+    pub fn sendto(
+        &self,
+        prio: u8,
+        dst: u8,
+        dst_port: u8,
+        src_port: u8,
+        opts: u32,
+        packet: Packet,
+        timeout: u32,
+    ) -> core::result::Result<(), (crate::CspError, Packet)> {
+        let raw = packet.into_raw();
+        let ret = unsafe { sys::csp_sendto(prio, dst, dst_port, src_port, opts, raw, timeout) };
+        if ret == 1 {
+            // CSP owns `raw` now — do NOT reconstruct a Packet from it.
+            Ok(())
+        } else {
+            // Reconstruct the Packet so Drop frees the buffer.
+            let returned = unsafe { Packet::from_raw(raw) };
+            Err((crate::CspError::TransmitFailed, returned))
+        }
+    }
+
     // ── One-shot transactions ─────────────────────────────────────────────
 
     /// Perform a full request/reply transaction (new connection each call).
-    #[allow(clippy::too_many_arguments)]
     ///
     /// Creates a connection, sends `out_buf`, waits for a reply into `in_buf`,
     /// then closes the connection.
@@ -274,6 +311,7 @@ impl CspNode {
     /// `in_len` — expected reply length; `-1` for unknown, `0` for no reply.
     ///
     /// Returns `Ok(reply_len)` on success.
+    #[allow(clippy::too_many_arguments)]
     pub fn transaction(
         &self,
         prio: u8,

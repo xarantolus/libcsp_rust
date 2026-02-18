@@ -6,7 +6,7 @@
 //! Default interface: vcan0
 
 use libcsp::{CspConfig, Packet, CspInterface, interface, promisc};
-use socketcan::{CanSocket, Socket, CanFrame, EmbeddedFrame, Frame};
+use socketcan::{CanSocket, Socket, EmbeddedFrame, Frame};
 use std::sync::Arc;
 use std::thread;
 use std::env;

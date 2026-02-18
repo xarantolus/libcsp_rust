@@ -76,11 +76,12 @@ fn main() -> anyhow::Result<()> {
     println!("Interface registered and RX thread started.");
     println!("Sending test packet to node 2...");
 
-    // 6. Test TX
-    let conn = node.connect(Priority::Norm as u8, 2, 10, 1000, 0).expect("Connect failed");
+    // 6. Test TX — send a test packet to node 2 port 10.
+    let conn = node.connect(Priority::Norm as u8, 2, 10, 1000, libcsp::conn_opts::NONE)
+        .expect("Connect failed");
     let mut pkt = Packet::get(16).unwrap();
     pkt.write(b"Rust SocketCAN!").unwrap();
-    conn.send(pkt, 100).unwrap();
+    conn.send_discard(pkt, 100).unwrap();
 
     thread::sleep(std::time::Duration::from_secs(1));
     Ok(())

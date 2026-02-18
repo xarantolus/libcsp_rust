@@ -45,7 +45,7 @@ fn main() {
 
     // 4. Test TX
     println!("\n--- Testing TX ---");
-    if let Some(conn) = node.connect(Priority::Norm as u8, 2, 10, 100, 0) {
+    if let Some(conn) = node.connect(Priority::Norm as u8, 2, 10, 100, libcsp::conn_opts::NONE) {
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"safe trait tx").unwrap();
         let _ = conn.send_discard(pkt, 100);

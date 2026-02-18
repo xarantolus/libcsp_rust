@@ -45,7 +45,9 @@ unsafe impl Sync for InterfaceHandle {}
 struct InterfaceState {
     user_iface: spin::Mutex<Box<dyn CspInterface>>,
     c_iface: sys::csp_iface_t,
-    c_name: CString,
+    // Kept alive so that `c_iface.name` (a raw pointer into this CString)
+    // remains valid for the lifetime of the interface registration.
+    _c_name: CString,
 }
 
 /// Register a custom interface with the CSP stack.
@@ -69,7 +71,7 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     let state = Arc::new(InterfaceState {
         user_iface: spin::Mutex::new(Box::new(interface)),
         c_iface,
-        c_name,
+        _c_name: c_name,
     });
 
     // We need to set the interface_data to the Arc's inner pointer.

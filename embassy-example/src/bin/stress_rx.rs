@@ -5,7 +5,6 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec;
-use alloc::vec::Vec;
 use rtt_target::{rtt_init_print, rprintln};
 use embassy_executor::Spawner;
 use embassy_stm32::can::Can;
@@ -13,7 +12,7 @@ use embassy_stm32::peripherals::CAN1;
 use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Timer};
 use core::ffi::c_void;
-use libcsp::{CspArch, CspConfig, Packet, Port, Dispatcher, CspInterface, interface, InterfaceHandle, Priority, socket_opts};
+use libcsp::{CspArch, CspConfig, Packet, CspInterface, interface, InterfaceHandle, socket_opts};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -87,7 +86,7 @@ impl CspArch for EmbassyArch {
     fn queue_dequeue(&self, _q: *mut c_void, _i: *mut c_void, _t: u32) -> bool { true }
     fn queue_size(&self, _q: *mut c_void) -> usize { 0 }
     fn malloc(&self, size: usize) -> *mut c_void { unsafe { core::alloc::GlobalAlloc::alloc(&HEAP, core::alloc::Layout::from_size_align(size, 4).unwrap()) as *mut c_void } }
-    fn free(&self, ptr: *mut c_void) { 
+    fn free(&self, _ptr: *mut c_void) {
         // Note: libcsp 1.6 doesn't use the size for free, making raw GlobalAlloc::dealloc difficult
         // without a wrapper that tracks block sizes. For this example, we accept some heap fragmentation
         // or use a simple bump allocator if needed.
@@ -181,7 +180,7 @@ async fn main(spawner: Spawner) {
     {
         use core::mem::MaybeUninit;
         static mut HEAP_MEM: [MaybeUninit<u8>; 65536] = [MaybeUninit::uninit(); 65536];
-        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_MEM.len()) }
+        unsafe { HEAP.init(core::ptr::addr_of!(HEAP_MEM) as usize, 65536) }
     }
 
     let node = CspConfig::new()
@@ -228,9 +227,7 @@ async fn main(spawner: Spawner) {
 
             if data != expected {
                 rprintln!("[RX] DATA ERR count {} from {}", pkt_count, src_addr);
-                errors += 1;
             }
-            bytes_recv += data.len() as u64;
             count += 1;
             
             if count % 100 == 0 {

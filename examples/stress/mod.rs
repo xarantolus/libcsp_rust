@@ -1,4 +1,5 @@
 //! Common logic for CSP stress tests.
+#![allow(dead_code)]
 
 pub const PRNG_SEED: u32 = 0x12345678;
 pub const DATA_PORT: u8 = 10;

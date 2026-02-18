@@ -5,7 +5,6 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec;
-use alloc::vec::Vec;
 use rtt_target::{rtt_init_print, rprintln};
 use embassy_executor::Spawner;
 use embassy_stm32::can::Can;
@@ -13,7 +12,7 @@ use embassy_stm32::peripherals::CAN1;
 use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Timer, Ticker};
 use core::ffi::c_void;
-use libcsp::{CspArch, CspConfig, Packet, Port, Dispatcher, CspInterface, interface, InterfaceHandle, Priority, socket_opts, conn_opts, Connection};
+use libcsp::{CspArch, CspConfig, Packet, CspInterface, interface, InterfaceHandle, Priority, socket_opts, conn_opts, Connection};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -183,7 +182,7 @@ async fn main(spawner: Spawner) {
     {
         use core::mem::MaybeUninit;
         static mut HEAP_MEM: [MaybeUninit<u8>; 65536] = [MaybeUninit::uninit(); 65536];
-        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_MEM.len()) }
+        unsafe { HEAP.init(core::ptr::addr_of!(HEAP_MEM) as usize, 65536) }
     }
 
     let node = CspConfig::new()
@@ -192,6 +191,9 @@ async fn main(spawner: Spawner) {
         .fifo_length(100)
         .init()
         .expect("CSP INIT FAIL");
+
+    // Make RDP aggressive
+    unsafe { libcsp::sys::csp_rdp_set_opt(20, 500, 100, 1, 100, 2); }
 
     let mut can = Can::new(p.CAN1, p.PA11, p.PA12, Irqs);
     let _ = can.as_mut().modify_config().set_loopback(false).set_silent(false);
@@ -206,7 +208,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(csp_router_task(node.clone())).unwrap();
     spawner.spawn(can_rx_task(rx, handle)).unwrap();
 
-    let mut prng = Prng::new(PRNG_SEED);
     let mut count = 0u64;
     let mut bytes_sent = 0u64;
     let mut last_log = Instant::now();
@@ -221,62 +222,67 @@ async fn main(spawner: Spawner) {
     rprintln!("!!! SENDER READY !!!");
 
     loop {
-        // 1. Precise Pacing
         ticker.next().await;
 
-        // 2. Mode Switch (5s)
-        if mode_start.elapsed() >= Duration::from_secs(5) {
+        // 1. Mode Switch (10s)
+        if mode_start.elapsed() >= Duration::from_secs(10) {
             let next_mode = match current_mode {
                 ProtocolMode::Normal => ProtocolMode::Rdp,
                 ProtocolMode::Rdp => ProtocolMode::SFP,
                 ProtocolMode::SFP => ProtocolMode::RdpSfp,
                 ProtocolMode::RdpSfp => ProtocolMode::Normal,
             };
-            rprintln!("[TX] Switch: {} -> {}", current_mode.to_str(), next_mode.to_str());
+            rprintln!("[TX] MODE END: {}", current_mode.to_str());
+            rprintln!("[TX] Quiesce 500ms...");
             
-            let needs_new = match (current_mode, next_mode) {
-                (ProtocolMode::Normal, ProtocolMode::Normal) => false,
-                (ProtocolMode::Rdp, ProtocolMode::Rdp) => false,
-                _ => true,
-            };
-            if needs_new { active_conn = None; }
+            active_conn = None; 
+            Timer::after(Duration::from_millis(500)).await;
             
             current_mode = next_mode;
             mode_start = Instant::now();
+            rprintln!("[TX] MODE START: {}", current_mode.to_str());
         }
 
-        // 3. Connect (short timeout)
-        if active_conn.is_none() {
-            let opts = match current_mode {
-                ProtocolMode::Normal => socket_opts::CONN_LESS,
-                ProtocolMode::Rdp | ProtocolMode::RdpSfp => conn_opts::RDP,
-                _ => conn_opts::NONE,
-            };
-            active_conn = node.connect(Priority::Norm as u8, 2, if matches!(current_mode, ProtocolMode::SFP | ProtocolMode::RdpSfp) { SFP_PORT } else { DATA_PORT }, 50, opts);
-            if active_conn.is_none() { continue; }
-        }
-
-        let conn = active_conn.as_ref().unwrap();
-
-        // 4. Send
+        // 2. Mode Logic
         match current_mode {
-            ProtocolMode::Normal | ProtocolMode::Rdp => {
+            ProtocolMode::Normal => {
                 if let Some(mut pkt) = Packet::get(200) {
                     let mut data = [0u8; 200];
                     data[0..8].copy_from_slice(&count.to_le_bytes());
                     let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
-                    
-                    if conn.send_discard(pkt, 0).is_ok() {
+                    if node.sendto(Priority::Norm as u8, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0).is_ok() {
                         bytes_sent += 200;
                         count += 1;
-                    } else {
-                        active_conn = None;
                     }
                 }
             }
+            ProtocolMode::Rdp => {
+                if active_conn.is_none() {
+                    active_conn = node.connect(Priority::Norm as u8, 2, DATA_PORT, 100, conn_opts::RDP);
+                    if active_conn.is_none() { continue; }
+                }
+                let conn = active_conn.as_ref().unwrap();
+                if let Some(mut pkt) = Packet::get(200) {
+                    let mut data = [0u8; 200];
+                    data[0..8].copy_from_slice(&count.to_le_bytes());
+                    let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
+                    packet_prng.fill(&mut data[8..]);
+                    pkt.write(&data).unwrap();
+                    if conn.send_discard(pkt, 0).is_ok() {
+                        bytes_sent += 200;
+                        count += 1;
+                    } else { active_conn = None; }
+                }
+            }
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
+                if active_conn.is_none() {
+                    let opts = if current_mode == ProtocolMode::RdpSfp { conn_opts::RDP } else { conn_opts::NONE };
+                    active_conn = node.connect(Priority::Norm as u8, 2, SFP_PORT, 100, opts);
+                    if active_conn.is_none() { continue; }
+                }
+                let conn = active_conn.as_ref().unwrap();
                 let size = 600;
                 let mut data = vec![0u8; size as usize];
                 data[0..8].copy_from_slice(&count.to_le_bytes());
@@ -286,25 +292,14 @@ async fn main(spawner: Spawner) {
                 if conn.sfp_send(&data, 180, 100).is_ok() {
                     bytes_sent += size as u64;
                     count += 1;
-                    
                     let burst_packets = (size / 180) + 1;
                     for _ in 0..burst_packets { ticker.next().await; }
-                } else {
-                    active_conn = None;
-                }
+                } else { active_conn = None; }
             }
         }
 
         if last_log.elapsed() >= Duration::from_secs(5) {
-            let elapsed = Instant::now().duration_since(start_time).as_secs();
-            if elapsed > 0 {
-                let est_load = (count as f32 * 29.0 * 128.0) / (1_000_000.0 * elapsed as f32) * 100.0;
-                rprintln!("[Stats] App: {} KB/s, Load: {}%, Mode {}", 
-                    (bytes_sent / 1024) / elapsed, 
-                    est_load as u32,
-                    current_mode.to_str()
-                );
-            }
+            rprintln!("[Stats] Mode {}, count {}, sent {} KB", current_mode.to_str(), count, bytes_sent / 1024);
             last_log = Instant::now();
         }
     }

@@ -61,11 +61,9 @@ impl crate::CspNode {
             return Err(CspError::InvalidArgument);
         }
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
-        unsafe {
-            msg.__bindgen_anon_1.peek.addr = address;
-            msg.__bindgen_anon_1.peek.len = len;
-        }
-        
+        msg.__bindgen_anon_1.peek.addr = address;
+        msg.__bindgen_anon_1.peek.len = len;
+
         let size = 2 + 4 + 1 + len as usize;
         let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_PEEK as u8, size as i32, &mut msg) };
         if ret == 0 {
@@ -80,12 +78,11 @@ impl crate::CspNode {
             return Err(CspError::InvalidArgument);
         }
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
-        unsafe {
-            msg.__bindgen_anon_1.poke.addr = address;
-            msg.__bindgen_anon_1.poke.len = data.len() as u8;
-            for (i, &b) in data.iter().enumerate() {
-                msg.__bindgen_anon_1.poke.data[i] = b as core::ffi::c_char;
-            }
+        msg.__bindgen_anon_1.poke.addr = address;
+        msg.__bindgen_anon_1.poke.len = data.len() as u8;
+        for (i, &b) in data.iter().enumerate() {
+            // Array indexing through a union field requires unsafe.
+            unsafe { msg.__bindgen_anon_1.poke.data[i] = b as core::ffi::c_char; }
         }
 
         let size = 2 + 4 + 1 + data.len();
