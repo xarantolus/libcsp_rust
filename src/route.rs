@@ -90,11 +90,12 @@ pub unsafe fn set_raw(
 /// # Errors
 /// Returns an error if any entry is malformed or references an unknown
 /// interface name.
-pub fn load(table: &str) -> Result<i32> {
+pub fn load(table: &str) -> Result<usize> {
     let cstr = CString::new(table).map_err(|_| crate::CspError::InvalidArgument)?;
     let ret = unsafe { sys::csp_rtable_load(cstr.as_ptr()) };
     if ret >= 0 {
-        Ok(ret)
+        // Safety: Underlying C function returns the number of routes loaded (>= 0).
+        Ok(ret as usize)
     } else {
         Err(crate::CspError::from_code(ret))
     }
@@ -104,11 +105,12 @@ pub fn load(table: &str) -> Result<i32> {
 ///
 /// Returns `Ok(n)` (number of valid entries found) or a
 /// [`CspError`](crate::CspError) on failure.
-pub fn check(table: &str) -> Result<i32> {
+pub fn check(table: &str) -> Result<usize> {
     let cstr = CString::new(table).map_err(|_| crate::CspError::InvalidArgument)?;
     let ret = unsafe { sys::csp_rtable_check(cstr.as_ptr()) };
     if ret >= 0 {
-        Ok(ret)
+        // Safety: Underlying C function returns the number of routes found (>= 0).
+        Ok(ret as usize)
     } else {
         Err(crate::CspError::from_code(ret))
     }

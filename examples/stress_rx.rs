@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
             loop {
                 match conn.sfp_recv(500) {
                     Ok(data) => {
+                        let data: Vec<u8> = data;
                         if data.len() < 8 {
                             errors += 1;
                             continue;

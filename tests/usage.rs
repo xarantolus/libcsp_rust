@@ -1,12 +1,13 @@
-use libcsp::{CspConfig, Packet, Socket, Priority, Connection, socket_opts};
+use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, CspNode};
 use std::thread;
 use std::time::Duration;
-use std::sync::Once;
+use std::sync::{OnceLock, Mutex};
 
-static INIT: Once = Once::new();
+static NODE: OnceLock<CspNode> = OnceLock::new();
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-fn ensure_init() {
-    INIT.call_once(|| {
+fn ensure_init() -> CspNode {
+    NODE.get_or_init(|| {
         let node = CspConfig::new()
             .address(1)
             .buffers(20, 256)
@@ -14,14 +15,18 @@ fn ensure_init() {
             .expect("init failed");
         node.route_start_task(4096, 0).unwrap();
         node.route_load("0/0 LOOP").unwrap();
-        // Leak so it stays alive
-        core::mem::forget(node);
-    });
+        node
+    }).clone()
+}
+
+fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
+    TEST_MUTEX.lock().unwrap()
 }
 
 #[test]
 fn test_basic_client_server() {
-    ensure_init();
+    let _lock = lock_csp();
+    let node = ensure_init();
 
     let server_thread = thread::spawn(|| {
         let sock = Socket::new(socket_opts::NONE).unwrap();
@@ -37,9 +42,8 @@ fn test_basic_client_server() {
 
     thread::sleep(Duration::from_millis(100));
 
-    let ptr = unsafe { libcsp::sys::csp_connect(Priority::Norm as u8, 1, 10, 1000, 0) };
-    assert!(!ptr.is_null());
-    let conn = unsafe { Connection::from_raw(ptr) };
+    let conn = node.connect(Priority::Norm, 1, 10, 1000, 0)
+        .expect("connect failed");
     
     let mut pkt = Packet::get(4).unwrap();
     pkt.write(b"ping").unwrap();
@@ -50,7 +54,8 @@ fn test_basic_client_server() {
 
 #[test]
 fn test_connectionless() {
-    ensure_init();
+    let _lock = lock_csp();
+    let node = ensure_init();
 
     let server_thread = thread::spawn(|| {
         let sock = Socket::new(socket_opts::CONN_LESS).unwrap();
@@ -63,9 +68,8 @@ fn test_connectionless() {
 
     thread::sleep(Duration::from_millis(100));
 
-    let ptr = unsafe { libcsp::sys::csp_connect(Priority::Norm as u8, 1, 20, 1000, socket_opts::CONN_LESS) };
-    assert!(!ptr.is_null());
-    let conn = unsafe { Connection::from_raw(ptr) };
+    let conn = node.connect(Priority::Norm, 1, 20, 1000, socket_opts::CONN_LESS)
+        .expect("connect failed");
 
     let mut pkt = Packet::get(10).unwrap();
     pkt.write(b"udp-style").unwrap();

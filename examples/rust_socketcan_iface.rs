@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
     println!("Sending test packet to node 2...");
 
     // 6. Test TX — send a test packet to node 2 port 10.
-    let conn = node.connect(Priority::Norm as u8, 2, 10, 1000, libcsp::conn_opts::NONE)
+    let conn = node.connect(Priority::Norm, 2, 10, 1000, libcsp::conn_opts::NONE)
         .expect("Connect failed");
     let mut pkt = Packet::get(16).unwrap();
     pkt.write(b"Rust SocketCAN!").unwrap();

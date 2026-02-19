@@ -23,7 +23,7 @@ use core::ffi::c_char;
 
 use crate::error::csp_result;
 use crate::sys;
-use crate::{Connection, Packet, Result};
+use crate::{Connection, Packet, Priority, Result};
 
 /// Builder for the CSP runtime configuration.
 ///
@@ -249,13 +249,13 @@ impl CspNode {
     /// times out.
     pub fn connect(
         &self,
-        prio: u8,
+        prio: Priority,
         dst: u8,
         dst_port: u8,
         timeout: u32,
         opts: u32,
     ) -> Option<Connection> {
-        let ptr = unsafe { sys::csp_connect(prio, dst, dst_port, timeout, opts) };
+        let ptr = unsafe { sys::csp_connect(prio as u8, dst, dst_port, timeout, opts) };
         if ptr.is_null() {
             None
         } else {
@@ -281,7 +281,7 @@ impl CspNode {
     ///   so the caller can inspect or drop it.
     pub fn sendto(
         &self,
-        prio: u8,
+        prio: Priority,
         dst: u8,
         dst_port: u8,
         src_port: u8,
@@ -290,7 +290,7 @@ impl CspNode {
         timeout: u32,
     ) -> core::result::Result<(), (crate::CspError, Packet)> {
         let raw = packet.into_raw();
-        let ret = unsafe { sys::csp_sendto(prio, dst, dst_port, src_port, opts, raw, timeout) };
+        let ret = unsafe { sys::csp_sendto(prio as u8, dst, dst_port, src_port, opts, raw, timeout) };
         if ret == 1 {
             // CSP owns `raw` now — do NOT reconstruct a Packet from it.
             Ok(())
@@ -314,7 +314,7 @@ impl CspNode {
     #[allow(clippy::too_many_arguments)]
     pub fn transaction(
         &self,
-        prio: u8,
+        prio: Priority,
         dst: u8,
         dst_port: u8,
         timeout: u32,
@@ -322,10 +322,10 @@ impl CspNode {
         in_buf: &mut [u8],
         in_len: i32,
         opts: u32,
-    ) -> Result<i32> {
+    ) -> Result<usize> {
         let ret = unsafe {
             sys::csp_transaction_w_opts(
-                prio,
+                prio as u8,
                 dst,
                 dst_port,
                 timeout,
@@ -337,7 +337,8 @@ impl CspNode {
             )
         };
         if ret > 0 || (ret == 1 && in_len == 0) {
-            Ok(ret)
+            // Safety: Underlying C function returns the length of the reply (>= 0).
+            Ok(ret as usize)
         } else {
             Err(crate::CspError::TransmitFailed)
         }
@@ -351,7 +352,7 @@ impl CspNode {
     /// Format: `"<addr>[/<mask>] <iface> [<via>][, ...]"`
     ///
     /// Example: `"0/0 LOOP"` routes all traffic through the loopback interface.
-    pub fn route_load(&self, table: &str) -> Result<i32> {
+    pub fn route_load(&self, table: &str) -> Result<usize> {
         crate::route::load(table)
     }
 
@@ -371,9 +372,14 @@ impl CspNode {
 
     // ── Service calls ──────────────────────────────────────────────────────
 
-    /// Send a ping to `node` and return the echo time in ms, or -1 on error.
-    pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> i32 {
-        unsafe { sys::csp_ping(node, timeout, payload_size, opts) }
+    /// Send a ping to `node` and return the echo time in ms.
+    pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> Result<u32> {
+        let res = unsafe { sys::csp_ping(node, timeout, payload_size, opts) };
+        if res >= 0 {
+            Ok(res as u32)
+        } else {
+            Err(crate::CspError::TransmitFailed)
+        }
     }
 
     /// Request and return free memory on `node`.

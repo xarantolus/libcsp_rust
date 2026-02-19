@@ -52,7 +52,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 //! }
 //!
 //! // Client: connect and send
-//! if let Some(conn) = node.connect(2 /* CSP_PRIO_NORM */, 2, 10, 1000, 0) {
+//! if let Some(conn) = node.connect(libcsp::Priority::Norm, 2, 10, 1000, 0) {
 //!     let mut pkt = Packet::get(32).expect("no packet buffers");
 //!     pkt.write(b"hello").unwrap();
 //!     let _ = conn.send_discard(pkt, 100);

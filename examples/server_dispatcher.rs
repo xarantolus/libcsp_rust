@@ -48,7 +48,7 @@ fn main() -> libcsp::Result<()> {
     thread::sleep(std::time::Duration::from_millis(100));
 
     // Send to port 10 (Echo) — server returns the same packet as a reply.
-    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 10, 1000, libcsp::conn_opts::NONE) {
+    if let Some(conn) = node.connect(Priority::Norm, 1, 10, 1000, libcsp::conn_opts::NONE) {
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"Hello Dispatch!").unwrap();
         conn.send_discard(pkt, 100).unwrap();
@@ -59,14 +59,14 @@ fn main() -> libcsp::Result<()> {
     }
 
     // Send to port 11 (Logger) — server consumes packet, no reply expected.
-    if let Some(conn) = node.connect(Priority::Norm as u8, 1, 11, 1000, libcsp::conn_opts::NONE) {
+    if let Some(conn) = node.connect(Priority::Norm, 1, 11, 1000, libcsp::conn_opts::NONE) {
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"log this").unwrap();
         conn.send_discard(pkt, 100).unwrap();
     }
 
     // Ping
-    let res = node.ping(1, 1000, 100, 0);
+    let res = node.ping(1, 1000, 100, 0).expect("Ping failed");
     println!("Client: Ping local node: {} ms", res);
 
     thread::sleep(std::time::Duration::from_millis(500));

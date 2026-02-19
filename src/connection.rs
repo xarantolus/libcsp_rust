@@ -105,26 +105,28 @@ impl Connection {
 
     /// Destination port.
     #[inline]
-    pub fn dst_port(&self) -> i32 {
-        unsafe { sys::csp_conn_dport(self.inner) }
+    pub fn dst_port(&self) -> u8 {
+        // Safety: Underlying C getters return bitfields (6-bit for ports, 5-bit for addresses)
+        // defined in csp_id_t. They are always >= 0 and fit in u8.
+        unsafe { sys::csp_conn_dport(self.inner) as u8 }
     }
 
     /// Source port.
     #[inline]
-    pub fn src_port(&self) -> i32 {
-        unsafe { sys::csp_conn_sport(self.inner) }
+    pub fn src_port(&self) -> u8 {
+        unsafe { sys::csp_conn_sport(self.inner) as u8 }
     }
 
     /// Destination address.
     #[inline]
-    pub fn dst_addr(&self) -> i32 {
-        unsafe { sys::csp_conn_dst(self.inner) }
+    pub fn dst_addr(&self) -> u8 {
+        unsafe { sys::csp_conn_dst(self.inner) as u8 }
     }
 
     /// Source address.
     #[inline]
-    pub fn src_addr(&self) -> i32 {
-        unsafe { sys::csp_conn_src(self.inner) }
+    pub fn src_addr(&self) -> u8 {
+        unsafe { sys::csp_conn_src(self.inner) as u8 }
     }
 
     /// Header flags (see `CSP_F*` constants in the `sys` module).
@@ -158,7 +160,7 @@ impl Connection {
         out_buf: &[u8],
         in_buf: &mut [u8],
         in_len: i32,
-    ) -> Result<i32> {
+    ) -> Result<usize> {
         let ret = unsafe {
             sys::csp_transaction_persistent(
                 self.inner,
@@ -170,7 +172,8 @@ impl Connection {
             )
         };
         if ret > 0 || (ret == 1 && in_len == 0) {
-            Ok(ret)
+            // Safety: Underlying C function returns the length of the reply (>= 0).
+            Ok(ret as usize)
         } else {
             Err(CspError::TransmitFailed)
         }
@@ -226,6 +229,14 @@ impl Connection {
         } else {
             Err(CspError::from(ret))
         }
+    }
+
+    /// Handle a CSP service request (e.g., PING, PS, MEMFREE) using the default
+    /// libcsp service handler.
+    ///
+    /// Consumes the packet and either sends a reply or frees it.
+    pub fn handle_service(&self, packet: Packet) {
+        unsafe { sys::csp_service_handler(self.inner, packet.into_raw()) };
     }
 }
 

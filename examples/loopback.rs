@@ -63,7 +63,7 @@ fn main() {
     // 5. Client — connect, allocate a packet, write payload, send.
     println!("Client: Connecting to local node...");
     let conn = node
-        .connect(Priority::Norm as u8, 1, 10, 1000, conn_opts::NONE)
+        .connect(Priority::Norm, 1, 10, 1000, conn_opts::NONE)
         .expect("csp_connect failed");
 
     let mut pkt = Packet::get(32).expect("no buffers");

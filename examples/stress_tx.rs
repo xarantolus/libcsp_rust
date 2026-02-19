@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
                     
-                    if node.sendto(Priority::Norm as u8, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0).is_ok() {
+                    if node.sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0).is_ok() {
                         bytes_sent += 200;
                         count += 1;
                     }
@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
             }
             ProtocolMode::Rdp => {
                 if active_conn.is_none() {
-                    active_conn = node.connect(Priority::Norm as u8, 2, DATA_PORT, 100, conn_opts::RDP);
+                    active_conn = node.connect(Priority::Norm, 2, DATA_PORT, 100, conn_opts::RDP);
                     if active_conn.is_none() { continue; }
                 }
                 let conn = active_conn.as_ref().unwrap();
@@ -112,7 +112,7 @@ fn main() -> anyhow::Result<()> {
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
                 if active_conn.is_none() {
                     let opts = if current_mode == ProtocolMode::RdpSfp { conn_opts::RDP } else { conn_opts::NONE };
-                    active_conn = node.connect(Priority::Norm as u8, 2, SFP_PORT, 100, opts);
+                    active_conn = node.connect(Priority::Norm, 2, SFP_PORT, 100, opts);
                     if active_conn.is_none() { continue; }
                 }
                 let conn = active_conn.as_ref().unwrap();
