@@ -2,8 +2,6 @@
 #![no_main]
 
 extern crate alloc;
-
-use alloc::boxed::Box;
 use alloc::vec;
 use rtt_target::{rtt_init_print, rprintln};
 use embassy_executor::Spawner;
@@ -11,8 +9,7 @@ use embassy_stm32::can::Can;
 use embassy_stm32::peripherals::CAN1;
 use embassy_stm32::bind_interrupts;
 use embassy_time::{Duration, Instant, Timer};
-use core::ffi::c_void;
-use libcsp::{CspArch, CspConfig, Packet, CspInterface, interface, InterfaceHandle, socket_opts};
+use libcsp::{CspConfig, Packet, CspInterface, interface, InterfaceHandle, socket_opts};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -55,81 +52,11 @@ bind_interrupts!(struct Irqs {
     CAN1_SCE => embassy_stm32::can::SceInterruptHandler<CAN1>;
 });
 
-#[global_allocator]
-static HEAP: embedded_alloc::Heap = embedded_alloc::Heap::empty();
+// Use shared arch implementation from lib
+use embassy_example::ARCH;
 
-struct EmbassyArch;
-impl CspArch for EmbassyArch {
-    fn get_ms(&self) -> u32 { Instant::now().as_millis() as u32 }
-    fn get_s(&self) -> u32 { Instant::now().as_secs() as u32 }
-    fn bin_sem_create(&self) -> *mut c_void { Box::into_raw(Box::new(core::sync::atomic::AtomicBool::new(true))) as *mut c_void }
-    fn bin_sem_remove(&self, sem: *mut c_void) { unsafe { drop(Box::from_raw(sem as *mut core::sync::atomic::AtomicBool)); } }
-    fn bin_sem_wait(&self, sem: *mut c_void, _t: u32) -> bool {
-        let sem = unsafe { &*(sem as *const core::sync::atomic::AtomicBool) };
-        while sem.swap(false, core::sync::atomic::Ordering::Acquire) == false { 
-             cortex_m::asm::nop();
-        }
-        true
-    }
-    fn bin_sem_post(&self, sem: *mut c_void) -> bool {
-        let sem = unsafe { &*(sem as *const core::sync::atomic::AtomicBool) };
-        sem.store(true, core::sync::atomic::Ordering::Release);
-        true
-    }
-    fn mutex_create(&self) -> *mut c_void { self.bin_sem_create() }
-    fn mutex_remove(&self, mutex: *mut c_void) { self.bin_sem_remove(mutex) }
-    fn mutex_lock(&self, mutex: *mut c_void, t: u32) -> bool { self.bin_sem_wait(mutex, t) }
-    fn mutex_unlock(&self, mutex: *mut c_void) -> bool { self.bin_sem_post(mutex) }
-    fn queue_create(&self, _l: usize, _s: usize) -> *mut c_void { Box::into_raw(Box::new(0usize)) as *mut c_void }
-    fn queue_remove(&self, q: *mut c_void) { unsafe { drop(Box::from_raw(q as *mut usize)); } }
-    fn queue_enqueue(&self, _q: *mut c_void, _i: *const c_void, _t: u32) -> bool { true }
-    fn queue_dequeue(&self, _q: *mut c_void, _i: *mut c_void, _t: u32) -> bool { true }
-    fn queue_size(&self, _q: *mut c_void) -> usize { 0 }
-    fn malloc(&self, size: usize) -> *mut c_void { unsafe { core::alloc::GlobalAlloc::alloc(&HEAP, core::alloc::Layout::from_size_align(size, 4).unwrap()) as *mut c_void } }
-    fn free(&self, _ptr: *mut c_void) {
-        // Note: libcsp 1.6 doesn't use the size for free, making raw GlobalAlloc::dealloc difficult
-        // without a wrapper that tracks block sizes. For this example, we accept some heap fragmentation
-        // or use a simple bump allocator if needed.
-    }
-}
-
-static ARCH: EmbassyArch = EmbassyArch;
-
-#[no_mangle] pub extern "C" fn csp_get_ms() -> u32 { ARCH.get_ms() }
-#[no_mangle] pub extern "C" fn csp_get_s() -> u32 { ARCH.get_s() }
-#[no_mangle] pub extern "C" fn csp_get_uptime_s() -> u32 { ARCH.get_s() }
-#[no_mangle] pub extern "C" fn csp_get_ms_isr() -> u32 { ARCH.get_ms() }
-#[no_mangle] pub extern "C" fn csp_bin_sem_create(sem: *mut *mut c_void) -> i32 { let s = ARCH.bin_sem_create(); if s.is_null() { 0 } else { unsafe { *sem = s }; 1 } }
-#[no_mangle] pub extern "C" fn csp_bin_sem_remove(sem: *mut *mut c_void) -> i32 { unsafe { ARCH.bin_sem_remove(*sem) }; 1 }
-#[no_mangle] pub extern "C" fn csp_bin_sem_wait(sem: *mut *mut c_void, timeout: u32) -> i32 { if unsafe { ARCH.bin_sem_wait(*sem, timeout) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_bin_sem_post(sem: *mut *mut c_void) -> i32 { if unsafe { ARCH.bin_sem_post(*sem) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_bin_sem_post_isr(sem: *mut *mut c_void, _px: *mut i32) -> i32 { if unsafe { ARCH.bin_sem_post(*sem) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_mutex_create(mutex: *mut *mut c_void) -> i32 { let m = ARCH.mutex_create(); if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 } }
-#[no_mangle] pub extern "C" fn csp_mutex_remove(mutex: *mut *mut c_void) -> i32 { unsafe { ARCH.mutex_remove(*mutex) }; 1 }
-#[no_mangle] pub extern "C" fn csp_mutex_lock(mutex: *mut *mut c_void, timeout: u32) -> i32 { if unsafe { ARCH.mutex_lock(*mutex, timeout) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_mutex_unlock(mutex: *mut *mut c_void) -> i32 { if unsafe { ARCH.mutex_unlock(*mutex) } { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_create(l: i32, s: usize) -> *mut c_void { ARCH.queue_create(l as usize, s) }
-#[no_mangle] pub extern "C" fn csp_queue_remove(q: *mut c_void) { ARCH.queue_remove(q) }
-#[no_mangle] pub extern "C" fn csp_queue_enqueue(q: *mut c_void, i: *const c_void, timeout: u32) -> i32 { if ARCH.queue_enqueue(q, i, timeout) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_enqueue_isr(q: *mut c_void, i: *const c_void, _p: *mut i32) -> i32 { if ARCH.queue_enqueue(q, i, 0) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_dequeue(q: *mut c_void, i: *mut c_void, timeout: u32) -> i32 { if ARCH.queue_dequeue(q, i, timeout) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_dequeue_isr(q: *mut c_void, i: *mut c_void, _p: *mut i32) -> i32 { if ARCH.queue_dequeue(q, i, 0) { 1 } else { 0 } }
-#[no_mangle] pub extern "C" fn csp_queue_size(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
-#[no_mangle] pub extern "C" fn csp_queue_size_isr(q: *mut c_void) -> i32 { ARCH.queue_size(q) as i32 }
-#[no_mangle] pub extern "C" fn csp_malloc(s: usize) -> *mut c_void { ARCH.malloc(s) }
-#[no_mangle] pub extern "C" fn csp_calloc(n: usize, s: usize) -> *mut c_void {
-    let t = n * s; let p = ARCH.malloc(t);
-    if !p.is_null() { unsafe { core::ptr::write_bytes(p, 0, t) }; }
-    p
-}
-#[no_mangle] pub extern "C" fn csp_free(p: *mut c_void) { ARCH.free(p) }
-#[no_mangle] pub extern "C" fn csp_clock_set_time(_a: *const c_void) {}
-#[no_mangle] pub extern "C" fn csp_clock_get_time(_a: *mut c_void) {}
-#[no_mangle] pub extern "C" fn csp_sys_tasklist_size() -> i32 { 0 }
-#[no_mangle] pub extern "C" fn csp_sys_tasklist(_p: *mut i8) {}
-#[no_mangle] pub extern "C" fn csp_sys_memfree() -> u32 { 0 }
-#[no_mangle] pub extern "C" fn csp_sys_reboot() {}
-#[no_mangle] pub extern "C" fn csp_sys_shutdown() {}
+// Use the export_arch! macro to generate all CSP arch C shims automatically
+libcsp::export_arch!(embassy_example::EmbassyArch, ARCH);
 #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn srand(_s: u32) {}
 #[no_mangle] pub unsafe extern "C" fn strncpy(d: *mut i8, s: *const i8, n: usize) -> *mut i8 {
@@ -180,7 +107,7 @@ async fn main(spawner: Spawner) {
     {
         use core::mem::MaybeUninit;
         static mut HEAP_MEM: [MaybeUninit<u8>; 65536] = [MaybeUninit::uninit(); 65536];
-        unsafe { HEAP.init(core::ptr::addr_of!(HEAP_MEM) as usize, 65536) }
+        unsafe { embassy_example::HEAP.init(core::ptr::addr_of!(HEAP_MEM) as usize, 65536) }
     }
 
     let node = CspConfig::new()
