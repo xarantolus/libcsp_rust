@@ -231,6 +231,26 @@ typedef void * csp_mutex_t;
 typedef void * csp_queue_handle_t;
 typedef int    CSP_BASE_TYPE;
 
+#define COLOR_MASK_COLOR 	0x0F
+#define COLOR_MASK_MODIFIER	0xF0
+
+typedef enum {
+    COLOR_RESET		= 0xF0,
+    COLOR_BLACK		= 0x01,
+    COLOR_RED		= 0x02,
+    COLOR_GREEN		= 0x03,
+    COLOR_YELLOW		= 0x04,
+    COLOR_BLUE		= 0x05,
+    COLOR_MAGENTA		= 0x06,
+    COLOR_CYAN		= 0x07,
+    COLOR_WHITE		= 0x08,
+    COLOR_NORMAL		= 0x0F,
+    COLOR_BOLD		= 0x10,
+    COLOR_UNDERLINE		= 0x20,
+    COLOR_BLINK		= 0x30,
+    COLOR_HIDE		= 0x40,
+} csp_color_t;
+
 #define CSP_SEMAPHORE_OK    1
 #define CSP_SEMAPHORE_ERROR 0
 #define CSP_MUTEX_OK        1
@@ -243,6 +263,16 @@ typedef int    CSP_BASE_TYPE;
 uint32_t csp_get_ms(void);
 uint32_t csp_get_s(void);
 uint32_t csp_get_ms_isr(void);
+uint32_t csp_get_s_isr(void);
+uint32_t csp_get_uptime_s(void);
+
+typedef struct {
+    uint32_t tv_sec;
+    uint32_t tv_nsec;
+} csp_timestamp_t;
+
+void csp_clock_get_time(csp_timestamp_t * time);
+int  csp_clock_set_time(const csp_timestamp_t * time);
 
 int csp_mutex_create(csp_mutex_t * mutex);
 int csp_mutex_remove(csp_mutex_t * mutex);
@@ -269,6 +299,9 @@ void * csp_calloc(size_t nmemb, size_t size);
 void   csp_free(void * ptr);
 
 uint32_t csp_sys_memfree(void);
+int      csp_sys_tasklist(char * out);
+int      csp_sys_tasklist_size(void);
+void     csp_sys_set_color(csp_color_t color);
 void     csp_sys_reboot(void);
 void     csp_sys_shutdown(void);
 
@@ -328,7 +361,7 @@ fn compile_libcsp(
         // Define guards so the original headers think they've been included
         build.define("_CSP_SEMAPHORE_H_", None);
         build.define("_CSP_ARCH_QUEUE_H_", None);
-        build.define("_CSP_CLOCK_H_", None);
+        build.define("_CSP_ARCH_CLOCK_H_", None);
         build.define("_CSP_TIME_H_", None);
         build.define("_CSP_SYSTEM_H_", None);
         build.define("_CSP_MALLOC_H_", None);
