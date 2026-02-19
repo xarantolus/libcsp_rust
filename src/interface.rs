@@ -9,6 +9,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::string::ToString;
 use core::ffi::c_void;
+use core::cell::UnsafeCell;
 
 use crate::sys;
 use crate::Packet;
@@ -37,18 +38,26 @@ pub struct InterfaceHandle {
     _inner: Arc<InterfaceState>,
 }
 
-// Safety: InterfaceHandle is an opaque handle to CSP data structures that are
-// protected by libcsp's internal mutexes.
+// Safety: InterfaceHandle is an opaque handle to CSP data structures.
+// InterfaceState uses UnsafeCell for the C struct (handled by C/libcsp locking)
+// and Spin Mutex for the user trait object.
 unsafe impl Send for InterfaceHandle {}
 unsafe impl Sync for InterfaceHandle {}
 
 struct InterfaceState {
     user_iface: spin::Mutex<Box<dyn CspInterface>>,
-    c_iface: sys::csp_iface_t,
+    // Wrapped in UnsafeCell because C library mutates it (counters, next pointers)
+    // while we hold a shared reference (Arc).
+    c_iface: UnsafeCell<sys::csp_iface_t>,
     // Kept alive so that `c_iface.name` (a raw pointer into this CString)
     // remains valid for the lifetime of the interface registration.
     _c_name: CString,
 }
+
+// Safety: InterfaceState is Sync because the mutable `c_iface` part is managed
+// by libcsp's internal synchronization (or we assume single-threaded setup/usage patterns
+// compatible with libcsp constraints), and `user_iface` is protected by a Mutex.
+unsafe impl Sync for InterfaceState {}
 
 /// Register a custom interface with the CSP stack.
 ///
@@ -67,7 +76,7 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
 
     let state = Arc::new(InterfaceState {
         user_iface: spin::Mutex::new(Box::new(interface)),
-        c_iface,
+        c_iface: UnsafeCell::new(c_iface),
         _c_name: c_name,
     });
 
@@ -75,8 +84,11 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     // Safety: `state_ptr` is valid as it comes from an active `Arc`.
     // `sys::csp_iflist_add` is thread-safe.
     unsafe {
-        (*state_ptr).c_iface.interface_data = state_ptr as *mut c_void;
-        sys::csp_iflist_add(&mut (*state_ptr).c_iface);
+        // We need to write the self-pointer into the struct inside the Arc.
+        // UnsafeCell::get() gives us a raw pointer to the inner data.
+        let iface_ptr = (*state_ptr).c_iface.get();
+        (*iface_ptr).interface_data = state_ptr as *mut c_void;
+        sys::csp_iflist_add(iface_ptr);
     }
 
     InterfaceHandle { _inner: state }
@@ -91,13 +103,13 @@ impl InterfaceHandle {
         // Safety: `self._inner` is valid. `packet.into_raw()` relinquishes ownership.
         unsafe {
             let raw = packet.into_raw();
-            sys::csp_qfifo_write(raw, &self._inner.c_iface as *const _ as *mut _, core::ptr::null_mut());
+            sys::csp_qfifo_write(raw, self._inner.c_iface.get(), core::ptr::null_mut());
         }
     }
     
     /// Get the raw C interface pointer (for use with `sys::csp_rtable_set` etc).
     pub fn c_iface_ptr(&self) -> *mut sys::csp_iface_t {
-        &self._inner.c_iface as *const _ as *mut _
+        self._inner.c_iface.get()
     }
 }
 
@@ -106,6 +118,7 @@ unsafe extern "C" fn nexthop_shim(route: *const sys::csp_route_t, packet: *mut s
     // Safety: `route` and `packet` are valid pointers provided by libcsp.
     // `interface_data` is a valid pointer to `InterfaceState`.
     let iface = (*route).iface;
+    // Note: (*iface).interface_data was set to `*mut InterfaceState` in register().
     let state_ptr = (*iface).interface_data as *mut InterfaceState;
     let state = &*state_ptr;
     
