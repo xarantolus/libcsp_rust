@@ -21,13 +21,6 @@ use crate::{Connection, Packet, Result};
 /// `csp_conn_t`, but used on the *server* side. After calling
 /// [`bind`](Socket::bind) and [`listen`](Socket::listen), you call
 /// [`accept`](Socket::accept) in a loop to receive incoming connections.
-///
-/// ## Lifetime
-///
-/// libcsp does not expose an explicit socket-free function. Sockets are
-/// released when [`csp_free_resources()`](crate::CspNode) is called (i.e.
-/// when [`CspNode`](crate::CspNode) is dropped). Therefore `Socket` has **no
-/// `Drop` implementation** — ownership is tied to the `CspNode`.
 pub struct Socket {
     inner: *mut sys::csp_socket_t,
 }
@@ -40,6 +33,7 @@ impl Socket {
     ///
     /// Returns `None` if libcsp is out of resources.
     pub fn new(opts: u32) -> Option<Self> {
+        // Safety: libcsp is assumed to be initialised.
         let ptr = unsafe { sys::csp_socket(opts) };
         if ptr.is_null() {
             None
@@ -53,6 +47,7 @@ impl Socket {
     /// Use `CSP_ANY` (255) to accept packets on all unbound ports.
     /// A specific-port bind takes precedence over `CSP_ANY`.
     pub fn bind(&self, port: u8) -> Result<()> {
+        // Safety: `inner` is a valid socket pointer.
         csp_result(unsafe { sys::csp_bind(self.inner, port) })
     }
 
@@ -61,6 +56,7 @@ impl Socket {
     /// `backlog` is the maximum number of connections queued waiting for
     /// [`accept`](Socket::accept).
     pub fn listen(&self, backlog: usize) -> Result<()> {
+        // Safety: `inner` is a valid socket pointer.
         csp_result(unsafe { sys::csp_listen(self.inner, backlog) })
     }
 
@@ -71,10 +67,12 @@ impl Socket {
     ///
     /// Returns `None` on timeout or error.
     pub fn accept(&self, timeout: u32) -> Option<Connection> {
+        // Safety: `inner` is a valid socket pointer.
         let ptr = unsafe { sys::csp_accept(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {
+            // Safety: `ptr` is a valid connection pointer returned by libcsp.
             Some(unsafe { Connection::from_raw(ptr) })
         }
     }
@@ -87,19 +85,30 @@ impl Socket {
     ///
     /// Returns `None` on timeout or error.
     pub fn recvfrom(&self, timeout: u32) -> Option<Packet> {
+        // Safety: `inner` is a valid socket pointer.
         let ptr =
             unsafe { sys::csp_recvfrom(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {
+            // Safety: `ptr` is a valid packet pointer returned by libcsp.
             Some(unsafe { Packet::from_raw(ptr) })
         }
     }
 }
 
+impl Drop for Socket {
+    fn drop(&mut self) {
+        // Safety: `inner` is a valid socket pointer.
+        // Closing a socket in libcsp is equivalent to closing a connection.
+        unsafe { sys::csp_close(self.inner) };
+    }
+}
+
 // The inner pointer is always accessed through libcsp's own thread-safe
-// mechanisms (OS mutexes / semaphores), so moving a Socket is safe.
+// mechanisms (OS mutexes / semaphores), so moving and sharing a Socket is safe.
 unsafe impl Send for Socket {}
+unsafe impl Sync for Socket {}
 
 impl core::fmt::Debug for Socket {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -66,6 +66,8 @@ pub unsafe fn set_raw(
     iface: *mut sys::csp_iface_t,
     via: u8,
 ) -> Result<()> {
+    // Safety: `iface` is assumed to be a valid pointer provided by the caller.
+    // `sys::csp_rtable_set` is thread-safe.
     csp_result(sys::csp_rtable_set(dest_address, mask, iface, via))
 }
 
@@ -92,6 +94,7 @@ pub unsafe fn set_raw(
 /// interface name.
 pub fn load(table: &str) -> Result<usize> {
     let cstr = CString::new(table).map_err(|_| crate::CspError::InvalidArgument)?;
+    // Safety: `cstr` is a valid C-string. `sys::csp_rtable_load` is thread-safe.
     let ret = unsafe { sys::csp_rtable_load(cstr.as_ptr()) };
     if ret >= 0 {
         // Safety: Underlying C function returns the number of routes loaded (>= 0).
@@ -107,6 +110,7 @@ pub fn load(table: &str) -> Result<usize> {
 /// [`CspError`](crate::CspError) on failure.
 pub fn check(table: &str) -> Result<usize> {
     let cstr = CString::new(table).map_err(|_| crate::CspError::InvalidArgument)?;
+    // Safety: `cstr` is a valid C-string. `sys::csp_rtable_check` is thread-safe.
     let ret = unsafe { sys::csp_rtable_check(cstr.as_ptr()) };
     if ret >= 0 {
         // Safety: Underlying C function returns the number of routes found (>= 0).
@@ -125,6 +129,7 @@ pub fn check(table: &str) -> Result<usize> {
 pub fn save(buf_size: usize) -> Result<alloc::string::String> {
     let mut buf: Vec<u8> = vec![0u8; buf_size];
 
+    // Safety: `buf` is a valid vector. `sys::csp_rtable_save` is thread-safe.
     let ret = unsafe {
         sys::csp_rtable_save(buf.as_mut_ptr() as *mut core::ffi::c_char, buf_size)
     };
@@ -140,17 +145,20 @@ pub fn save(buf_size: usize) -> Result<alloc::string::String> {
 
 /// Clear the routing table and re-add only the loopback route.
 pub fn clear() {
+    // Safety: `sys::csp_rtable_clear` is thread-safe.
     unsafe { sys::csp_rtable_clear() }
 }
 
 /// Clear **all** routing table entries, including the loopback route.
 pub fn free_all() {
+    // Safety: `sys::csp_rtable_free` is thread-safe.
     unsafe { sys::csp_rtable_free() }
 }
 
 /// Print the routing table to stdout (requires `debug` feature / `CSP_DEBUG`).
 #[cfg(feature = "debug")]
 pub fn print() {
+    // Safety: `sys::csp_rtable_print` is thread-safe.
     unsafe { sys::csp_rtable_print() }
 }
 
@@ -160,6 +168,8 @@ pub fn print() {
 ///
 /// Returns a [`RouteEntry`] on success, or `None` if no route is found.
 pub fn find(dest_address: u8) -> Option<RouteEntry> {
+    // Safety: `sys::csp_rtable_find_route` is thread-safe and returns a valid
+    // pointer or NULL.
     let ptr = unsafe { sys::csp_rtable_find_route(dest_address) };
     if ptr.is_null() {
         None
@@ -179,12 +189,14 @@ pub struct RouteEntry {
 impl RouteEntry {
     /// The "via" relay address (`NO_VIA` = 0xFF means direct delivery).
     pub fn via(&self) -> u8 {
+        // Safety: `inner` is a valid pointer to a route entry.
         unsafe { (*self.inner).via }
     }
 
     /// Raw pointer to the interface.  Use the `sys` module for advanced
     /// interface inspection.
     pub fn iface_ptr(&self) -> *const sys::csp_iface_t {
+        // Safety: `inner` is a valid pointer to a route entry.
         unsafe { (*self.inner).iface }
     }
 }
@@ -210,11 +222,14 @@ where
     where
         F: FnMut(u8, u8, RouteEntry) -> bool,
     {
+        // Safety: `ctx` is a valid pointer to the closure `F`.
+        // `route` is a valid pointer provided by libcsp.
         let f = &mut *(ctx as *mut F);
         f(address, mask, RouteEntry { inner: route })
     }
 
     let mut f_ref = f;
+    // Safety: `sys::csp_rtable_iterate` is thread-safe.
     unsafe {
         sys::csp_rtable_iterate(Some(shim::<F>), &mut f_ref as *mut F as *mut core::ffi::c_void);
     }

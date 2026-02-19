@@ -65,12 +65,15 @@ impl Connection {
         timeout: u32,
     ) -> core::result::Result<(), (CspError, Packet)> {
         let raw = packet.into_raw(); // Rust forgets ownership
+        // Safety: `raw` is a valid packet obtained from `Packet::get`.
+        // CSP takes ownership of the buffer if it returns 1.
         let ret = unsafe { sys::csp_send(self.inner, raw, timeout) };
         if ret == 1 {
             // CSP owns `raw` now — do NOT reconstruct a Packet from it.
             Ok(())
         } else {
-            // Reconstruct the Packet so Drop frees the buffer.
+            // Safety: CSP did not take ownership, so we can safely reconstruct
+            // the Packet to ensure the buffer is eventually freed.
             let returned = unsafe { Packet::from_raw(raw) };
             Err((CspError::TransmitFailed, returned))
         }
@@ -92,11 +95,13 @@ impl Connection {
     /// Returns `None` on timeout or error.  The returned [`Packet`] is owned
     /// by the caller and will be freed when dropped.
     pub fn read(&self, timeout: u32) -> Option<Packet> {
+        // Safety: `inner` is a valid connection pointer.
         let ptr =
             unsafe { sys::csp_read(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {
+            // Safety: `ptr` is a valid packet pointer returned by libcsp.
             Some(unsafe { Packet::from_raw(ptr) })
         }
     }
@@ -108,30 +113,35 @@ impl Connection {
     pub fn dst_port(&self) -> u8 {
         // Safety: Underlying C getters return bitfields (6-bit for ports, 5-bit for addresses)
         // defined in csp_id_t. They are always >= 0 and fit in u8.
+        // Safety: `inner` is a valid connection pointer.
         unsafe { sys::csp_conn_dport(self.inner) as u8 }
     }
 
     /// Source port.
     #[inline]
     pub fn src_port(&self) -> u8 {
+        // Safety: `inner` is a valid connection pointer.
         unsafe { sys::csp_conn_sport(self.inner) as u8 }
     }
 
     /// Destination address.
     #[inline]
     pub fn dst_addr(&self) -> u8 {
+        // Safety: `inner` is a valid connection pointer.
         unsafe { sys::csp_conn_dst(self.inner) as u8 }
     }
 
     /// Source address.
     #[inline]
     pub fn src_addr(&self) -> u8 {
+        // Safety: `inner` is a valid connection pointer.
         unsafe { sys::csp_conn_src(self.inner) as u8 }
     }
 
     /// Header flags (see `CSP_F*` constants in the `sys` module).
     #[inline]
     pub fn flags(&self) -> i32 {
+        // Safety: `inner` is a valid connection pointer.
         unsafe { sys::csp_conn_flags(self.inner) }
     }
 
@@ -161,6 +171,8 @@ impl Connection {
         in_buf: &mut [u8],
         in_len: i32,
     ) -> Result<usize> {
+        // Safety: `inner` is a valid connection pointer. `out_buf` and `in_buf`
+        // are valid slices whose pointers and lengths are correctly passed.
         let ret = unsafe {
             sys::csp_transaction_persistent(
                 self.inner,
@@ -188,6 +200,7 @@ impl Connection {
         extern "C" {
             fn memcpy(dest: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
         }
+        // Safety: `inner` is a valid connection pointer. `data` is a valid slice.
         let ret = unsafe {
             sys::csp_sfp_send_own_memcpy(
                 self.inner,
@@ -211,6 +224,8 @@ impl Connection {
     pub fn sfp_recv(&self, timeout: u32) -> Result<alloc::vec::Vec<u8>> {
         let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
         let mut data_size: core::ffi::c_int = 0;
+        // Safety: `inner` is a valid connection pointer. libcsp allocates
+        // the buffer using `csp_malloc`.
         let ret = unsafe {
             sys::csp_sfp_recv_fp(
                 self.inner,
@@ -222,8 +237,10 @@ impl Connection {
         };
 
         if ret == (sys::CSP_ERR_NONE as i32) && !data_ptr.is_null() {
+            // Safety: `data_ptr` was allocated by libcsp and `data_size` is valid.
             let slice = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, data_size as usize) };
             let vec = slice.to_vec();
+            // Safety: The buffer must be freed using `sys::csp_free`.
             unsafe { sys::csp_free(data_ptr) };
             Ok(vec)
         } else {
@@ -236,12 +253,15 @@ impl Connection {
     ///
     /// Consumes the packet and either sends a reply or frees it.
     pub fn handle_service(&self, packet: Packet) {
+        // Safety: `inner` is a valid connection pointer. `packet.into_raw()`
+        // relinquishes ownership to the service handler.
         unsafe { sys::csp_service_handler(self.inner, packet.into_raw()) };
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        // Safety: `inner` is a valid, open connection pointer.
         // csp_close handles a NULL pointer gracefully, but our pointer is
         // always non-null (we only build Connection from non-null pointers).
         unsafe { sys::csp_close(self.inner) };
@@ -249,8 +269,9 @@ impl Drop for Connection {
 }
 
 // CSP connections are protected by internal OS synchronisation primitives,
-// making it safe to move a Connection to another thread.
+// making it safe to move and share a Connection between threads.
 unsafe impl Send for Connection {}
+unsafe impl Sync for Connection {}
 
 impl fmt::Debug for Connection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -265,32 +286,20 @@ impl fmt::Debug for Connection {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{CspConfig, Packet};
-    use std::sync::Once;
-
-    static INIT: Once = Once::new();
-
-    fn ensure_init() {
-        INIT.call_once(|| {
-            let node = CspConfig::new()
-                .address(1)
-                .buffers(10, 256)
-                .init()
-                .expect("failed to init CSP for tests");
-            core::mem::forget(node);
-        });
-    }
 
     #[test]
     fn test_connection_send_to_nowhere() {
-        ensure_init();
+        let node = CspConfig::new()
+            .address(1)
+            .buffers(10, 256)
+            .init()
+            .expect("failed to init CSP for tests");
+
         // Trying to connect to a node that isn't there (and we don't have a route for except LOOP)
         // If we connect to address 1 port 10 (loopback), we can test send.
         let node_addr = 1;
-        let ptr = unsafe { sys::csp_connect(2, node_addr, 10, 100, 0) };
-        assert!(!ptr.is_null());
-        let conn = unsafe { Connection::from_raw(ptr) };
+        let conn = node.connect(crate::Priority::Norm, node_addr, 10, 100, 0).expect("Connect failed");
 
         let mut pkt = Packet::get(16).unwrap();
         pkt.write(b"hello").unwrap();

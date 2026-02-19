@@ -37,14 +37,19 @@ pub struct IfStats {
 
 impl crate::CspNode {
     pub fn ident(&self, node: u8, timeout: u32) -> Result<Ident> {
+        // Safety: Creating a zeroed struct is safe as it's passed to C.
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
         // CMP_SIZE(ident) = 2 (type+code) + sizeof(ident struct)
+        // Safety: Union access is safe here because we're just calculating size.
         let size = 2 + core::mem::size_of_val(unsafe { &msg.__bindgen_anon_1.ident });
         
+        // Safety: CSP_CMP_IDENT is 1, size fits in i32. `msg` is valid.
         let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_IDENT as u8, size as i32, &mut msg) };
         if ret == 0 {
+            // Safety: The command succeeded, so the ident union field is valid.
             let ident = unsafe { &msg.__bindgen_anon_1.ident };
             Ok(Ident {
+                // Safety: libcsp guarantees these strings are NUL-terminated.
                 hostname: unsafe { CStr::from_ptr(ident.hostname.as_ptr()) }.to_string_lossy().into_owned(),
                 model:    unsafe { CStr::from_ptr(ident.model.as_ptr()) }.to_string_lossy().into_owned(),
                 revision: unsafe { CStr::from_ptr(ident.revision.as_ptr()) }.to_string_lossy().into_owned(),
@@ -60,13 +65,16 @@ impl crate::CspNode {
         if len as u32 > sys::CSP_CMP_PEEK_MAX_LEN {
             return Err(CspError::InvalidArgument);
         }
+        // Safety: Creating a zeroed struct is safe.
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
         msg.__bindgen_anon_1.peek.addr = address;
         msg.__bindgen_anon_1.peek.len = len;
 
         let size = 2 + 4 + 1 + len as usize;
+        // Safety: CMP codes and sizes fit in their target types. `msg` is valid.
         let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_PEEK as u8, size as i32, &mut msg) };
         if ret == 0 {
+            // Safety: The command succeeded, so the peek union field is valid.
             Ok(unsafe { msg.__bindgen_anon_1.peek.data[..len as usize].iter().map(|&c| c as u8).collect() })
         } else {
             Err(CspError::from_code(ret))
@@ -77,15 +85,17 @@ impl crate::CspNode {
         if data.len() as u32 > sys::CSP_CMP_POKE_MAX_LEN {
             return Err(CspError::InvalidArgument);
         }
+        // Safety: Creating a zeroed struct is safe.
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
         msg.__bindgen_anon_1.poke.addr = address;
         msg.__bindgen_anon_1.poke.len = data.len() as u8;
         for (i, &b) in data.iter().enumerate() {
-            // Array indexing through a union field requires unsafe.
+            // Safety: b fits in c_char. Union access is safe for initialization.
             unsafe { msg.__bindgen_anon_1.poke.data[i] = b as core::ffi::c_char; }
         }
 
         let size = 2 + 4 + 1 + data.len();
+        // Safety: CMP codes and sizes fit in their target types. `msg` is valid.
         let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_POKE as u8, size as i32, &mut msg) };
         if ret == 0 { Ok(()) } else { Err(CspError::from_code(ret)) }
     }
@@ -129,7 +139,7 @@ impl Dispatcher {
     pub fn run(&mut self, timeout: u32) {
         let _ = self.socket.listen(10);
         while let Some(conn) = self.socket.accept(timeout) {
-            let dport = conn.dst_port() as u8;
+            let dport = conn.dst_port();
             while let Some(pkt) = conn.read(100) {
                 if let Some(handler) = self.handlers.get_mut(&dport) {
                     if let Some(reply) = handler(&conn, pkt) {
@@ -138,9 +148,7 @@ impl Dispatcher {
                         let _ = conn.send_discard(reply, 100);
                     }
                 } else if Port::from(dport).is_service_port() {
-                    unsafe {
-                        sys::csp_service_handler(conn.as_raw(), pkt.into_raw());
-                    }
+                    conn.handle_service(pkt);
                 }
             }
         }

@@ -37,6 +37,7 @@ pub trait CspArch: Send + Sync {
         let total = nmemb * size;
         let ptr = self.malloc(total);
         if !ptr.is_null() {
+            // Safety: `ptr` is a valid pointer newly allocated by `malloc`.
             unsafe { core::ptr::write_bytes(ptr, 0, total) };
         }
         ptr
@@ -67,32 +68,41 @@ macro_rules! export_arch {
 
         #[no_mangle] pub extern "C" fn csp_bin_sem_create(sem: *mut *mut ::core::ffi::c_void) -> i32 {
             let s = <$impl_type as $crate::CspArch>::bin_sem_create(&$instance);
+            // Safety: `sem` is a valid pointer provided by libcsp.
             if s.is_null() { 0 } else { unsafe { *sem = s }; 1 }
         }
         #[no_mangle] pub extern "C" fn csp_bin_sem_remove(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+            // Safety: `sem` is a valid pointer to a handle created by this macro.
             unsafe { <$impl_type as $crate::CspArch>::bin_sem_remove(&$instance, *sem) }; 1
         }
         #[no_mangle] pub extern "C" fn csp_bin_sem_wait(sem: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
+            // Safety: `sem` is a valid pointer.
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_wait(&$instance, *sem, timeout) } { 1 } else { 0 }
         }
         #[no_mangle] pub extern "C" fn csp_bin_sem_post(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+            // Safety: `sem` is a valid pointer.
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
         }
         #[no_mangle] pub extern "C" fn csp_bin_sem_post_isr(sem: *mut *mut ::core::ffi::c_void, _px: *mut i32) -> i32 {
+            // Safety: `sem` is a valid pointer.
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
         }
 
         #[no_mangle] pub extern "C" fn csp_mutex_create(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
             let m = <$impl_type as $crate::CspArch>::mutex_create(&$instance);
+            // Safety: `mutex` is a valid pointer provided by libcsp.
             if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 }
         }
         #[no_mangle] pub extern "C" fn csp_mutex_remove(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
+            // Safety: `mutex` is a valid pointer to a handle created by this macro.
             unsafe { <$impl_type as $crate::CspArch>::mutex_remove(&$instance, *mutex) }; 1
         }
         #[no_mangle] pub extern "C" fn csp_mutex_lock(mutex: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
+            // Safety: `mutex` is a valid pointer.
             if unsafe { <$impl_type as $crate::CspArch>::mutex_lock(&$instance, *mutex, timeout) } { 1 } else { 0 }
         }
-        #[no_mangle] pub extern "C" fn csp_mutex_unlock(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle] pub extern "C" fn csp_mutex_unlock(mutex: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
+            // Safety: `mutex` is a valid pointer.
             if unsafe { <$impl_type as $crate::CspArch>::mutex_unlock(&$instance, *mutex) } { 1 } else { 0 }
         }
 

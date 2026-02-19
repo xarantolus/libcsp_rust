@@ -175,6 +175,7 @@ impl CspConfig {
             conn_dfl_so:       self.conn_dfl_so,
         };
 
+        // Safety: `conf` is a valid struct pointing to C-strings owned by `self`.
         csp_result(unsafe { sys::csp_init(&conf) })?;
 
         // Move self into the node so the CStrings live as long as the node.
@@ -203,6 +204,7 @@ struct CspNodeInner {
 
 impl Drop for CspNodeInner {
     fn drop(&mut self) {
+        // Safety: libcsp was successfully initialised.
         unsafe { sys::csp_free_resources() }
     }
 }
@@ -210,6 +212,7 @@ impl Drop for CspNodeInner {
 impl CspNode {
     /// Return the CSP address of this node.
     pub fn address(&self) -> u8 {
+        // Safety: libcsp is initialised.
         unsafe { sys::csp_get_address() }
     }
 
@@ -225,6 +228,7 @@ impl CspNode {
     ///
     /// `priority` — task priority (platform-dependent).
     pub fn route_start_task(&self, stack_size: u32, priority: u32) -> Result<()> {
+        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_route_start_task(stack_size, priority) })
     }
 
@@ -234,6 +238,7 @@ impl CspNode {
     /// [`route_start_task`](CspNode::route_start_task) when you do not want
     /// a background thread.
     pub fn route_work(&self, timeout: u32) -> Result<()> {
+        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_route_work(timeout) })
     }
 
@@ -255,10 +260,12 @@ impl CspNode {
         timeout: u32,
         opts: u32,
     ) -> Option<Connection> {
+        // Safety: libcsp is initialised.
         let ptr = unsafe { sys::csp_connect(prio as u8, dst, dst_port, timeout, opts) };
         if ptr.is_null() {
             None
         } else {
+            // Safety: `ptr` is a valid connection pointer returned by libcsp.
             Some(unsafe { Connection::from_raw(ptr) })
         }
     }
@@ -290,12 +297,15 @@ impl CspNode {
         timeout: u32,
     ) -> core::result::Result<(), (crate::CspError, Packet)> {
         let raw = packet.into_raw();
+        // Safety: `raw` is a valid packet obtained from `Packet::get`.
+        // CSP takes ownership of the buffer if it returns 1.
         let ret = unsafe { sys::csp_sendto(prio as u8, dst, dst_port, src_port, opts, raw, timeout) };
         if ret == 1 {
             // CSP owns `raw` now — do NOT reconstruct a Packet from it.
             Ok(())
         } else {
-            // Reconstruct the Packet so Drop frees the buffer.
+            // Safety: CSP did not take ownership, so we can safely reconstruct
+            // the Packet to ensure the buffer is eventually freed.
             let returned = unsafe { Packet::from_raw(raw) };
             Err((crate::CspError::TransmitFailed, returned))
         }
@@ -323,6 +333,7 @@ impl CspNode {
         in_len: i32,
         opts: u32,
     ) -> Result<usize> {
+        // Safety: libcsp is initialised. `out_buf` and `in_buf` are valid slices.
         let ret = unsafe {
             sys::csp_transaction_w_opts(
                 prio as u8,
@@ -374,6 +385,7 @@ impl CspNode {
 
     /// Send a ping to `node` and return the echo time in ms.
     pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> Result<u32> {
+        // Safety: libcsp is initialised.
         let res = unsafe { sys::csp_ping(node, timeout, payload_size, opts) };
         if res >= 0 {
             Ok(res as u32)
@@ -385,6 +397,7 @@ impl CspNode {
     /// Request and return free memory on `node`.
     pub fn memfree(&self, node: u8, timeout: u32) -> Result<u32> {
         let mut size: u32 = 0;
+        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_memfree(node, timeout, &mut size) })?;
         Ok(size)
     }
@@ -392,6 +405,7 @@ impl CspNode {
     /// Request and return uptime (seconds) of `node`.
     pub fn uptime(&self, node: u8, timeout: u32) -> Result<u32> {
         let mut secs: u32 = 0;
+        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_uptime(node, timeout, &mut secs) })?;
         Ok(secs)
     }
@@ -399,17 +413,20 @@ impl CspNode {
     /// Request and return the number of free packet buffers on `node`.
     pub fn buf_free(&self, node: u8, timeout: u32) -> Result<u32> {
         let mut n: u32 = 0;
+        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_buf_free(node, timeout, &mut n) })?;
         Ok(n)
     }
 
     /// Send a reboot request to `node`.
     pub fn reboot(&self, node: u8) {
+        // Safety: libcsp is initialised.
         unsafe { sys::csp_reboot(node) }
     }
 
     /// Send a shutdown request to `node`.
     pub fn shutdown(&self, node: u8) {
+        // Safety: libcsp is initialised.
         unsafe { sys::csp_shutdown(node) }
     }
 
@@ -428,6 +445,7 @@ impl CspNode {
     /// Requires the `xtea` feature (enabled by default).
     #[cfg(feature = "xtea")]
     pub fn set_xtea_key(&self, key: &[u32; 4]) {
+        // Safety: `key` is a valid array of four 32-bit words.
         unsafe { sys::csp_xtea_set_key(key.as_ptr() as *const core::ffi::c_void, 4); }
     }
 
@@ -448,6 +466,7 @@ impl CspNode {
         let c_device = CString::new(device).map_err(|_| crate::CspError::InvalidArgument)?;
         let mut iface_ptr: *mut sys::csp_iface_t = core::ptr::null_mut();
         
+        // Safety: `c_device` is a valid C-string. `iface_ptr` will be populated by libcsp.
         csp_result(unsafe {
             sys::csp_can_socketcan_open_and_add_interface(
                 c_device.as_ptr(),

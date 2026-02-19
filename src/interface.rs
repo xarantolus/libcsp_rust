@@ -58,14 +58,11 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     let name = interface.name().to_string();
     let c_name = CString::new(name).unwrap();
     
-    // We use a raw pointer to the state inside Arc so C can access it.
-    // This is safe because Arc keeps the memory alive.
-    // However, C needs a stable pointer. 
-    // We'll use a Box then wrap in Arc? No, let's just use Arc and get a pointer.
-    
+    // Safety: Creating a zeroed struct is safe as it's passed to C.
     let mut c_iface: sys::csp_iface_t = unsafe { core::mem::zeroed() };
     c_iface.name = c_name.as_ptr();
     c_iface.nexthop = Some(nexthop_shim);
+    // Safety: libcsp is assumed to be initialised.
     c_iface.mtu = unsafe { sys::csp_buffer_data_size() } as u16;
 
     let state = Arc::new(InterfaceState {
@@ -74,12 +71,9 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
         _c_name: c_name,
     });
 
-    // We need to set the interface_data to the Arc's inner pointer.
-    // Since we can't easily get a stable pointer from Arc without leaking it or 
-    // using unsafe, let's just use Box for the state and Arc for the handle.
-    // Wait, if I use Box for state, then InterfaceHandle just holds an Arc<Box<InterfaceState>>.
-    
     let state_ptr = Arc::as_ptr(&state) as *mut InterfaceState;
+    // Safety: `state_ptr` is valid as it comes from an active `Arc`.
+    // `sys::csp_iflist_add` is thread-safe.
     unsafe {
         (*state_ptr).c_iface.interface_data = state_ptr as *mut c_void;
         sys::csp_iflist_add(&mut (*state_ptr).c_iface);
@@ -94,6 +88,7 @@ impl InterfaceHandle {
     /// Call this from your hardware RX interrupt or task when a new packet
     /// arrives.
     pub fn rx(&self, packet: Packet) {
+        // Safety: `self._inner` is valid. `packet.into_raw()` relinquishes ownership.
         unsafe {
             let raw = packet.into_raw();
             sys::csp_qfifo_write(raw, &self._inner.c_iface as *const _ as *mut _, core::ptr::null_mut());
@@ -108,6 +103,8 @@ impl InterfaceHandle {
 
 /// C-compatible shim that forwards the nexthop call to the Rust trait.
 unsafe extern "C" fn nexthop_shim(route: *const sys::csp_route_t, packet: *mut sys::csp_packet_t) -> i32 {
+    // Safety: `route` and `packet` are valid pointers provided by libcsp.
+    // `interface_data` is a valid pointer to `InterfaceState`.
     let iface = (*route).iface;
     let state_ptr = (*iface).interface_data as *mut InterfaceState;
     let state = &*state_ptr;

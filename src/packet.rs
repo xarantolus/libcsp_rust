@@ -49,6 +49,8 @@ impl Packet {
     /// `data_size` is the minimum number of payload bytes needed.
     /// Returns `None` if the pool is exhausted or `data_size` is too large.
     pub fn get(data_size: usize) -> Option<Self> {
+        // Safety: `sys::csp_buffer_get` is thread-safe and returns a valid
+        // pointer or NULL.
         let ptr = unsafe {
             sys::csp_buffer_get(data_size) as *mut sys::csp_packet_t
         };
@@ -63,6 +65,7 @@ impl Packet {
     /// (the `length` field of the CSP packet header).
     #[inline]
     pub fn length(&self) -> u16 {
+        // Safety: `inner` is a valid packet pointer.
         unsafe { (*self.inner).length }
     }
 
@@ -72,48 +75,57 @@ impl Packet {
     /// bytes to transmit.
     #[inline]
     pub fn set_length(&mut self, len: u16) {
+        // Safety: `inner` is a valid packet pointer.
         unsafe { (*self.inner).length = len; }
     }
 
     /// Return the raw 32-bit CSP header (priority, addresses, ports, flags).
     #[inline]
     pub fn id_raw(&self) -> u32 {
+        // Safety: `inner` is a valid packet pointer.
         unsafe { (*self.inner).id.ext }
     }
 
     /// Set the raw 32-bit CSP header.
     #[inline]
     pub fn set_id_raw(&mut self, id: u32) {
+        // Safety: `inner` is a valid packet pointer.
         unsafe { (*self.inner).id.ext = id; }
     }
 
     /// Return the message priority (0-3).
     pub fn priority(&self) -> u8 {
+        // Safety: Priority is a 2-bit field (0-3) in the CSP header.
         ((self.id_raw() & 0xC0000000) >> 30) as u8
     }
 
     /// Return the source address (0-31).
     pub fn src_addr(&self) -> u8 {
+        // Safety: Addresses are 5-bit fields (0-31) in the CSP header.
         ((self.id_raw() & 0x3E000000) >> 25) as u8
     }
 
     /// Return the destination address (0-31).
     pub fn dst_addr(&self) -> u8 {
+        // Safety: Addresses are 5-bit fields (0-31) in the CSP header.
         ((self.id_raw() & 0x01F00000) >> 20) as u8
     }
 
     /// Return the destination port (0-63).
     pub fn dst_port(&self) -> u8 {
+        // Safety: Ports are 6-bit fields (0-63) in the CSP header.
         ((self.id_raw() & 0x000FC000) >> 14) as u8
     }
 
     /// Return the source port (0-63).
     pub fn src_port(&self) -> u8 {
+        // Safety: Ports are 6-bit fields (0-63) in the CSP header.
         ((self.id_raw() & 0x00003F00) >> 8) as u8
     }
 
     /// Return the CSP header flags (8 bits).
     pub fn flags(&self) -> u8 {
+        // Safety: Flags is an 8-bit field in the CSP header.
         (self.id_raw() & 0x000000FF) as u8
     }
 
@@ -162,6 +174,7 @@ impl Packet {
     /// Mutable view of the **used** payload (`[0..length()]`).
     pub fn data_mut(&mut self) -> &mut [u8] {
         let len = self.length() as usize;
+        // Safety: `inner` is valid, and the data buffer is large enough for `len` bytes.
         unsafe {
             slice::from_raw_parts_mut(
                 (self.inner as *mut u8).add(DATA_OFFSET),
@@ -174,11 +187,13 @@ impl Packet {
     ///
     /// Use this to fill the payload before calling [`set_length`](Packet::set_length).
     pub fn data_buf_mut(&mut self) -> &mut [u8] {
+        // Safety: libcsp is initialised.
         let cap = unsafe { sys::csp_buffer_data_size() };
+        // Safety: `inner` is valid, and the data buffer is exactly `cap` bytes.
         unsafe {
             slice::from_raw_parts_mut(
                 (self.inner as *mut u8).add(DATA_OFFSET),
-                cap,
+                cap as usize,
             )
         }
     }
@@ -221,7 +236,8 @@ impl Packet {
 
 impl Drop for Packet {
     fn drop(&mut self) {
-        // Safety: `inner` is a valid pointer obtained from csp_buffer_get.
+        // Safety: `inner` is a valid pointer obtained from `csp_buffer_get`.
+        // libcsp's buffer pool is thread-safe.
         unsafe { sys::csp_buffer_free(self.inner as *mut c_void) }
     }
 }
