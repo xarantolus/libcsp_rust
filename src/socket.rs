@@ -117,3 +117,84 @@ impl core::fmt::Debug for Socket {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{test_helpers::with_csp_node, Priority, Packet, socket_opts};
+
+    #[test]
+    fn test_socket_create_bind_listen() {
+        with_csp_node(|_node| {
+            let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+
+            // Bind to a specific port
+            sock.bind(10).expect("Failed to bind");
+
+            // Listen with backlog
+            sock.listen(5).expect("Failed to listen");
+        });
+    }
+
+    #[test]
+    fn test_socket_bind_any_port() {
+        with_csp_node(|_node| {
+            let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+
+            // Bind to ANY port (all ports)
+            sock.bind(crate::ANY_PORT).expect("Failed to bind to ANY");
+            sock.listen(10).expect("Failed to listen");
+        });
+    }
+
+    #[test]
+    fn test_socket_connectionless() {
+        with_csp_node(|_node| {
+            // Create a connectionless (UDP-style) socket
+            let sock = Socket::new(socket_opts::CONN_LESS).expect("Failed to create socket");
+            sock.bind(20).expect("Failed to bind");
+
+            // Try to receive with a short timeout (will timeout, which is expected)
+            let result = sock.recvfrom(10);
+            assert!(result.is_none(), "Expected timeout with no incoming packets");
+
+            // Full connectionless send/receive testing requires proper routing configuration
+            // which is beyond the scope of a unit test
+        });
+    }
+
+    #[test]
+    fn test_socket_with_options() {
+        with_csp_node(|_node| {
+            // Test socket creation with NONE options (always available)
+            let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+            sock.bind(22).expect("Failed to bind");
+            sock.listen(5).expect("Failed to listen");
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "rdp")]
+    fn test_socket_with_rdp() {
+        with_csp_node(|_node| {
+            // Create a socket with RDP connection option
+            let sock = Socket::new(crate::conn_opts::RDP).expect("Failed to create RDP socket");
+            sock.bind(21).expect("Failed to bind");
+            sock.listen(5).expect("Failed to listen");
+        });
+    }
+
+    #[test]
+    fn test_socket_accept_timeout() {
+        with_csp_node(|_node| {
+            let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+            sock.bind(23).expect("Failed to bind");
+            sock.listen(5).expect("Failed to listen");
+
+            // Accept with short timeout - should return None (no incoming connections)
+            let result = sock.accept(10);
+            assert!(result.is_none(), "Expected timeout when no connections");
+        });
+    }
+
+}

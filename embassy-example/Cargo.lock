@@ -616,6 +616,7 @@ dependencies = [
  "bindgen",
  "bitflags 2.11.0",
  "cc",
+ "libc",
  "spin",
 ]
 

@@ -75,7 +75,10 @@ fn main() -> anyhow::Result<()> {
             let size = pkt.length();
             
             let prio = match pkt.priority() {
-                0 => "CRIT", 1 => "HIGH", 2 => "NORM", 3 => "LOW ", _ => "UNKN",
+                libcsp::Priority::Critical => "CRIT",
+                libcsp::Priority::High => "HIGH",
+                libcsp::Priority::Norm => "NORM",
+                libcsp::Priority::Low => "LOW ",
             };
 
             let mut flags = Vec::new();

@@ -1,7 +1,6 @@
 use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, CspNode};
 use std::thread;
-use std::time::Duration;
-use std::sync::{OnceLock, Mutex};
+use std::sync::{OnceLock, Mutex, mpsc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NODE: OnceLock<CspNode> = OnceLock::new();
@@ -22,7 +21,8 @@ fn ensure_init() -> CspNode {
 }
 
 fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
-    TEST_MUTEX.lock().unwrap()
+    // Handle poison error gracefully - if a test panicked, we still want other tests to run
+    TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[test]
@@ -34,11 +34,17 @@ fn test_csp_server_client_loopback() {
     const MY_SERVER_PORT: u8 = 10;
     const SERVER_ADDR: u8 = 1;
 
+    // Use a channel to signal when server is ready
+    let (ready_tx, ready_rx) = mpsc::channel();
+
     // Start Server
     let server_handle = thread::spawn(move || {
         let sock = Socket::new(socket_opts::NONE).expect("csp_socket failed");
         sock.bind(MY_SERVER_PORT).expect("csp_bind failed");
         sock.listen(10).expect("csp_listen failed");
+
+        // Signal that server is ready
+        ready_tx.send(()).expect("Failed to signal ready");
 
         // Process 5 packets then exit
         for _ in 0..5 {
@@ -55,40 +61,43 @@ fn test_csp_server_client_loopback() {
         }
     });
 
-    thread::sleep(Duration::from_millis(100));
+    // Wait for server to be ready instead of sleeping
+    ready_rx.recv().expect("Server failed to start");
 
     // Start Client logic
-    let mut count = 0;
-    for _ in 0..5 {
-        thread::sleep(Duration::from_millis(50));
-
+    for count in 0..5 {
         let conn = node.connect(Priority::Norm, SERVER_ADDR, MY_SERVER_PORT, 1000, 0)
             .expect("Connection failed");
 
         let mut pkt = Packet::get(100).expect("Failed to get buffer");
         let msg = format!("Hello World ({})", count);
-        pkt.write(msg.as_bytes()).unwrap();
-        count += 1;
+        pkt.write(msg.as_bytes()).expect("Failed to write packet");
 
         conn.send(pkt, 1000).expect("Send failed");
     }
 
     server_handle.join().expect("Server thread panicked");
 
-    assert_eq!(SERVER_RECEIVED.load(Ordering::SeqCst), 5, "Server should have received 5 packets");
+    assert_eq!(SERVER_RECEIVED.load(Ordering::SeqCst), 5, "Server should have received exactly 5 packets");
 }
 
 #[test]
 fn test_csp_ping() {
     let _lock = lock_csp();
     let node = ensure_init();
-    
+
+    // Use a channel to signal when service is ready
+    let (ready_tx, ready_rx) = mpsc::channel();
+
     // Start a thread to handle pings (CSP service port is 1)
-    let service_handle = thread::spawn(|| {
-        let sock = Socket::new(socket_opts::NONE).unwrap();
-        sock.bind(libcsp::ports::PING).unwrap();
-        sock.listen(5).unwrap();
-        
+    let service_handle = thread::spawn(move || {
+        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        sock.bind(libcsp::ports::PING).expect("Failed to bind ping port");
+        sock.listen(5).expect("Failed to listen");
+
+        // Signal that service is ready
+        ready_tx.send(()).expect("Failed to signal ready");
+
         if let Some(conn) = sock.accept(2000) {
             if let Some(pkt) = conn.read(100) {
                 conn.handle_service(pkt);
@@ -96,13 +105,15 @@ fn test_csp_ping() {
         }
     });
 
-    thread::sleep(Duration::from_millis(100));
+    // Wait for service to be ready instead of sleeping
+    ready_rx.recv().expect("Service thread failed to start");
 
     // Ping local address
     let node_addr = 1;
     let res = node.ping(node_addr, 1000, 100, 0).expect("Ping failed");
-    
-    println!("Ping took {} ms", res);
-    
+
+    // Validate that ping returned a reasonable round-trip time
+    assert!(res < 1000, "Ping RTT should be less than timeout (1000ms), got {} ms", res);
+
     service_handle.join().expect("Service thread panicked");
 }

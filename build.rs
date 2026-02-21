@@ -223,8 +223,24 @@ fn generate_external_arch_headers(dest_dir: &std::path::Path) {
 #ifndef CSP_EXTERNAL_ARCH_H
 #define CSP_EXTERNAL_ARCH_H
 
+/* Prevent libcsp's arch headers from declaring conflicting functions */
+#define _CSP_THREAD_H_
+#define _CSP_SEMAPHORE_H_
+#define _CSP_QUEUE_H_
+#define _CSP_TIME_H_
+#define _CSP_MALLOC_H_
+#define _CSP_SYSTEM_H_
+#define _CSP_ARCH_CLOCK_H_
+
 #include <stdint.h>
 #include <stddef.h>
+
+/* Thread types and macros normally provided by csp_thread.h */
+typedef void * csp_thread_handle_t;
+typedef void * csp_thread_return_t;
+typedef csp_thread_return_t (* csp_thread_func_t)(void *);
+#define CSP_DEFINE_TASK(task_name) csp_thread_return_t task_name(void * param)
+#define CSP_TASK_RETURN NULL
 
 typedef void * csp_bin_sem_handle_t;
 typedef void * csp_mutex_t;
@@ -255,9 +271,16 @@ typedef enum {
 #define CSP_SEMAPHORE_ERROR 0
 #define CSP_MUTEX_OK        1
 #define CSP_MUTEX_ERROR     0
+
+#ifndef CSP_QUEUE_OK
 #define CSP_QUEUE_OK        1
+#endif
+#ifndef CSP_QUEUE_ERROR
 #define CSP_QUEUE_ERROR     0
+#endif
+#ifndef CSP_QUEUE_FULL
 #define CSP_QUEUE_FULL      0
+#endif
 
 /* Prototypes */
 uint32_t csp_get_ms(void);
@@ -302,11 +325,12 @@ uint32_t csp_sys_memfree(void);
 int      csp_sys_tasklist(char * out);
 int      csp_sys_tasklist_size(void);
 void     csp_sys_set_color(csp_color_t color);
-void     csp_sys_reboot(void);
-void     csp_sys_shutdown(void);
+int      csp_sys_reboot(void);
+int      csp_sys_shutdown(void);
+void     csp_sleep_ms(uint32_t ms);
+int      csp_thread_create(csp_thread_func_t func, const char * const name, unsigned int stack_size, void * parameter, unsigned int priority, csp_thread_handle_t * handle);
 
-#endif
-"#;
+#endif"#;
     fs::write(dest_dir.join("csp_external_arch.h"), content).expect("failed to write csp_external_arch.h");
 }
 
@@ -356,15 +380,9 @@ fn compile_libcsp(
     feat_define(&mut build, "CARGO_FEATURE_DEBUG_TIMESTAMP","CSP_DEBUG_TIMESTAMP");
 
     if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
-        // Force-include our hack header
+        // Force-include our external arch header.
+        // The header defines guards to prevent libcsp's arch headers from being included.
         build.flag("-include").flag("csp/csp_external_arch.h");
-        // Define guards so the original headers think they've been included
-        build.define("_CSP_SEMAPHORE_H_", None);
-        build.define("_CSP_ARCH_QUEUE_H_", None);
-        build.define("_CSP_ARCH_CLOCK_H_", None);
-        build.define("_CSP_TIME_H_", None);
-        build.define("_CSP_SYSTEM_H_", None);
-        build.define("_CSP_MALLOC_H_", None);
     }
 
     build.define("CSP_USE_RTABLE", "1");
@@ -400,6 +418,11 @@ fn compile_libcsp(
         build.file(src_dir.join(f));
     }
 
+    // Debug wrapper for Rust callback (handles va_list formatting)
+    if env::var("CARGO_FEATURE_DEBUG").is_ok() {
+        build.file("csp_debug_wrapper.c");
+    }
+
     // Transport
     build.file(src_dir.join("transport/csp_rdp.c"));
     build.file(src_dir.join("transport/csp_udp.c"));
@@ -410,14 +433,16 @@ fn compile_libcsp(
     build.file(src_dir.join("crypto/csp_xtea.c"));
 
     // Interfaces
-    let interfaces = [
+    let mut interfaces = vec![
         "interfaces/csp_if_can.c",
         "interfaces/csp_if_can_pbuf.c",
         "interfaces/csp_if_i2c.c",
         "interfaces/csp_if_kiss.c",
         "interfaces/csp_if_lo.c",
-        "interfaces/csp_if_zmqhub.c",
     ];
+    if env::var("CARGO_FEATURE_ZMQ").is_ok() {
+        interfaces.push("interfaces/csp_if_zmqhub.c");
+    }
     for f in &interfaces {
         build.file(src_dir.join(f));
     }
@@ -502,11 +527,11 @@ fn compile_libcsp(
     }
 
     // Optional: USART drivers
-    if env::var("CARGO_FEATURE_USART_LINUX").is_ok() {
+    if env::var("CARGO_FEATURE_USART_LINUX").is_ok() && target_os == "linux" {
         build.file(src_dir.join("drivers/usart/usart_kiss.c"));
         build.file(src_dir.join("drivers/usart/usart_linux.c"));
     }
-    if env::var("CARGO_FEATURE_USART_WINDOWS").is_ok() {
+    if env::var("CARGO_FEATURE_USART_WINDOWS").is_ok() && target_os == "windows" {
         build.file(src_dir.join("drivers/usart/usart_kiss.c"));
         build.file(src_dir.join("drivers/usart/usart_windows.c"));
     }
@@ -615,6 +640,12 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         .header(
             include_dir
                 .join("csp/arch/csp_malloc.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/arch/csp_system.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),
         )

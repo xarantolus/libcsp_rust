@@ -20,10 +20,13 @@ extern crate alloc;
 use alloc::ffi::CString;
 use alloc::sync::Arc;
 use core::ffi::c_char;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::csp_result;
 use crate::sys;
 use crate::{Connection, Packet, Priority, Result};
+
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Builder for the CSP runtime configuration.
 ///
@@ -158,6 +161,10 @@ impl CspConfig {
     /// # Errors
     /// Returns [`CspError`](crate::CspError) if `csp_init()` fails.
     pub fn init(self) -> Result<CspNode> {
+        if INITIALIZED.swap(true, Ordering::SeqCst) {
+            return Err(crate::CspError::AlreadyInitialized);
+        }
+
         // Build the C struct. The pointer fields point into self's CStrings.
         // Those must remain valid until csp_free_resources() is called.
         let conf = sys::csp_conf_t {
@@ -190,8 +197,25 @@ impl CspConfig {
 /// Returned by [`CspConfig::init()`].  When the last reference to this value
 /// is dropped, `csp_free_resources()` is called to tear down the CSP stack.
 ///
+/// ## Single Node Limitation
+///
+/// **Important:** Due to global state in the underlying libcsp C library,
+/// only **one** `CspNode` can exist at a time in a process. Attempting to
+/// create a second node (via [`CspConfig::init()`]) will return
+/// [`CspError::AlreadyInitialized`].
+///
+/// You can clone a `CspNode` (it's `Arc`-based internally), but you cannot
+/// have two independently-initialized CSP stacks in the same process.
+///
+/// This is a fundamental limitation of libcsp's design and cannot be worked
+/// around from Rust.
+///
+/// ## Lifetime
+///
 /// All connections, sockets and packets obtained from this node must be
 /// dropped **before** the `CspNode` itself is dropped.
+///
+/// [`CspError::AlreadyInitialized`]: crate::CspError::AlreadyInitialized
 #[derive(Clone)]
 pub struct CspNode {
     /// Keeps the CSP runtime alive (calls `csp_free_resources` on last drop).
@@ -206,6 +230,7 @@ impl Drop for CspNodeInner {
     fn drop(&mut self) {
         // Safety: libcsp was successfully initialised.
         unsafe { sys::csp_free_resources() }
+        INITIALIZED.store(false, Ordering::SeqCst);
     }
 }
 
@@ -260,8 +285,11 @@ impl CspNode {
         timeout: u32,
         opts: u32,
     ) -> Option<Connection> {
+        let prio_u8 = prio as u8;
+        debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
         // Safety: libcsp is initialised.
-        let ptr = unsafe { sys::csp_connect(prio as u8, dst, dst_port, timeout, opts) };
+        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
+        let ptr = unsafe { sys::csp_connect(prio_u8, dst, dst_port, timeout, opts) };
         if ptr.is_null() {
             None
         } else {
@@ -296,10 +324,13 @@ impl CspNode {
         packet: Packet,
         timeout: u32,
     ) -> core::result::Result<(), (crate::CspError, Packet)> {
+        let prio_u8 = prio as u8;
+        debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
         let raw = packet.into_raw();
         // Safety: `raw` is a valid packet obtained from `Packet::get`.
         // CSP takes ownership of the buffer if it returns 1.
-        let ret = unsafe { sys::csp_sendto(prio as u8, dst, dst_port, src_port, opts, raw, timeout) };
+        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
+        let ret = unsafe { sys::csp_sendto(prio_u8, dst, dst_port, src_port, opts, raw, timeout) };
         if ret == 1 {
             // CSP owns `raw` now — do NOT reconstruct a Packet from it.
             Ok(())
@@ -333,10 +364,13 @@ impl CspNode {
         in_len: i32,
         opts: u32,
     ) -> Result<usize> {
+        let prio_u8 = prio as u8;
+        debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
         // Safety: libcsp is initialised. `out_buf` and `in_buf` are valid slices.
+        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
         let ret = unsafe {
             sys::csp_transaction_w_opts(
-                prio as u8,
+                prio_u8,
                 dst,
                 dst_port,
                 timeout,
@@ -384,6 +418,8 @@ impl CspNode {
     // ── Service calls ──────────────────────────────────────────────────────
 
     /// Send a ping to `node` and return the echo time in ms.
+    ///
+    /// Returns `Ok(latency_ms)` on success.
     pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> Result<u32> {
         // Safety: libcsp is initialised.
         let res = unsafe { sys::csp_ping(node, timeout, payload_size, opts) };
@@ -392,6 +428,23 @@ impl CspNode {
         } else {
             Err(crate::CspError::TransmitFailed)
         }
+    }
+
+    /// Send a ping without waiting for reply.
+    ///
+    /// Fire-and-forget ping. Useful for keepalive.
+    pub fn ping_noreply(&self, node: u8) {
+        // Safety: libcsp is initialised.
+        unsafe { sys::csp_ping_noreply(node) }
+    }
+
+    /// Request process/task list from `node`.
+    ///
+    /// The output is printed to stdout by the remote node's CSP service handler.
+    /// This function sends the request but doesn't return the output directly.
+    pub fn ps(&self, node: u8, timeout: u32) {
+        // Safety: libcsp is initialised.
+        unsafe { sys::csp_ps(node, timeout) }
     }
 
     /// Request and return free memory on `node`.
@@ -428,6 +481,82 @@ impl CspNode {
     pub fn shutdown(&self, node: u8) {
         // Safety: libcsp is initialised.
         unsafe { sys::csp_shutdown(node) }
+    }
+
+    // ── Protocol Configuration ────────────────────────────────────────────────
+
+    /// Configure RDP (Reliable Datagram Protocol) parameters.
+    ///
+    /// This sets global RDP configuration that affects all RDP connections.
+    ///
+    /// # Parameters
+    /// - `window_size` - Maximum number of unacknowledged packets (default: 20)
+    /// - `conn_timeout_ms` - Connection timeout in milliseconds (default: 10000)
+    /// - `packet_timeout_ms` - Packet timeout in milliseconds (default: 1000)
+    /// - `delayed_acks` - Enable delayed acknowledgments (default: 1)
+    /// - `ack_timeout` - ACK timeout in milliseconds (default: 1000)
+    /// - `ack_delay_count` - Number of packets to wait before sending ACK (default: 4)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use libcsp::CspConfig;
+    /// let node = CspConfig::new().init().unwrap();
+    /// // Fast RDP close for stress tests
+    /// node.rdp_set_opt(20, 500, 100, 1, 100, 2);
+    /// ```
+    ///
+    /// Requires the `rdp` feature (enabled by default).
+    #[cfg(feature = "rdp")]
+    pub fn rdp_set_opt(
+        &self,
+        window_size: u32,
+        conn_timeout_ms: u32,
+        packet_timeout_ms: u32,
+        delayed_acks: u32,
+        ack_timeout: u32,
+        ack_delay_count: u32,
+    ) {
+        // Safety: libcsp is initialised.
+        unsafe {
+            sys::csp_rdp_set_opt(
+                window_size,
+                conn_timeout_ms,
+                packet_timeout_ms,
+                delayed_acks,
+                ack_timeout,
+                ack_delay_count,
+            );
+        }
+    }
+
+    /// Get current RDP configuration.
+    ///
+    /// Returns a tuple of (window_size, conn_timeout_ms, packet_timeout_ms,
+    /// delayed_acks, ack_timeout, ack_delay_count).
+    ///
+    /// Requires the `rdp` feature (enabled by default).
+    #[cfg(feature = "rdp")]
+    pub fn rdp_get_opt(&self) -> (u32, u32, u32, u32, u32, u32) {
+        let mut window_size = 0;
+        let mut conn_timeout_ms = 0;
+        let mut packet_timeout_ms = 0;
+        let mut delayed_acks = 0;
+        let mut ack_timeout = 0;
+        let mut ack_delay_count = 0;
+
+        // Safety: libcsp is initialised.
+        unsafe {
+            sys::csp_rdp_get_opt(
+                &mut window_size,
+                &mut conn_timeout_ms,
+                &mut packet_timeout_ms,
+                &mut delayed_acks,
+                &mut ack_timeout,
+                &mut ack_delay_count,
+            );
+        }
+
+        (window_size, conn_timeout_ms, packet_timeout_ms, delayed_acks, ack_timeout, ack_delay_count)
     }
 
     // ── Security ──────────────────────────────────────────────────────────────

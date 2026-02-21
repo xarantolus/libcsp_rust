@@ -50,6 +50,8 @@ pub enum CspError {
     Crc32Failed,
     /// SFP protocol error or inconsistency (`CSP_ERR_SFP = -103`).
     SfpError,
+    /// A CspNode has already been initialized in this process.
+    AlreadyInitialized,
     /// An error code not covered by the variants above.
     Other(i32),
 }
@@ -107,6 +109,7 @@ impl fmt::Display for CspError {
             CspError::XteaFailed        => write!(f, "XTEA decryption failed"),
             CspError::Crc32Failed       => write!(f, "CRC32 check failed"),
             CspError::SfpError          => write!(f, "SFP protocol error"),
+            CspError::AlreadyInitialized => write!(f, "CSP is already initialized"),
             CspError::Other(code)       => write!(f, "libcsp error code {code}"),
         }
     }

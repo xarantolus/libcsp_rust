@@ -99,11 +99,16 @@ impl InterfaceHandle {
     ///
     /// Call this from your hardware RX interrupt or task when a new packet
     /// arrives.
+    ///
+    /// ## Ownership semantics
+    /// libcsp always takes ownership of the packet. If the internal router
+    /// queue is full, libcsp will free the packet automatically.
     pub fn rx(&self, packet: Packet) {
         // Safety: `self._inner` is valid. `packet.into_raw()` relinquishes ownership.
+        // libcsp always takes ownership of the raw packet and will free it if needed.
         unsafe {
             let raw = packet.into_raw();
-            sys::csp_qfifo_write(raw, self._inner.c_iface.get(), core::ptr::null_mut());
+            sys::csp_qfifo_write(raw, self._inner.c_iface.get() as *mut _, core::ptr::null_mut());
         }
     }
     

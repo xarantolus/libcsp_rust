@@ -47,7 +47,99 @@ loop {
 
 ---
 
-## 2. Packet Management (The `Packet` Struct)
+## 2. Port Architecture
+
+### Understanding CSP Ports
+
+CSP uses 6-bit port numbers (0-63), divided into three categories:
+
+```
+┌──────────────────────────────────────────────────┐
+│  CSP Port Space (0-63)                           │
+├──────────────────────────────────────────────────┤
+│  0-6:    Reserved Service Ports                 │
+│          - Port 0: CMP (Management Protocol)    │
+│          - Port 1: PING                         │
+│          - Port 2-6: Other services             │
+│                                                  │
+│  7 to port_max_bind:  Bindable Ports           │
+│          - Application servers bind here        │
+│          - Default: up to port 24               │
+│                                                  │
+│  (port_max_bind+1) to 63:  Ephemeral Ports    │
+│          - Auto-assigned for client connections │
+│          - CSP picks these automatically        │
+│                                                  │
+│  255 (CSP_ANY):  Wildcard                      │
+│          - Bind to accept on all ports          │
+└──────────────────────────────────────────────────┘
+```
+
+### Port Assignment
+
+**Key Difference from TCP/IP:** There is **NO** "port 0 = auto-assign"!
+
+**Servers** bind to specific ports:
+```rust
+let sock = Socket::new(socket_opts::NONE)?;
+sock.bind(10)?;  // Bind to port 10
+sock.listen(5)?;
+```
+
+**Clients** automatically get ephemeral source ports:
+```rust
+// CSP automatically assigns an ephemeral port from (port_max_bind+1) to 63
+let conn = node.connect(Priority::Norm, dest_addr, dest_port, timeout, opts)?;
+// No need to bind - source port is assigned automatically!
+```
+
+### Configuring Port Ranges
+
+```rust
+// Default: ports 0-24 bindable, 25-63 ephemeral (39 ephemeral ports)
+CspConfig::new()
+    .address(1)
+    .init()?;
+
+// Custom: ports 0-40 bindable, 41-63 ephemeral (23 ephemeral ports)
+CspConfig::new()
+    .address(1)
+    .port_max_bind(40)
+    .init()?;
+```
+
+**Important:** `port_max_bind` must be ≤ 62 to leave at least one ephemeral port for client connections. Setting it to 63 causes division by zero!
+
+### Port 0 is NOT for Auto-Assignment
+
+Port 0 is **CMP** (CSP Management Protocol) - a critical service port:
+
+```rust
+// ❌ WRONG - This binds to CMP service, not auto-assign!
+sock.bind(0)?;
+
+// ✅ CORRECT - Bind to a specific application port
+sock.bind(10)?;
+
+// ✅ CORRECT - Client gets automatic ephemeral port
+let conn = node.connect(Priority::Norm, dest_addr, 10, timeout, opts)?;
+```
+
+### Wildcard Binding
+
+To accept connections on all ports:
+
+```rust
+use libcsp::ANY_PORT;
+
+sock.bind(ANY_PORT)?;  // Port 255 = accept on any port
+```
+
+Specific port bindings take precedence over wildcard bindings.
+
+---
+
+## 3. Packet Management (The `Packet` Struct)
 
 The `Packet` struct is an RAII wrapper around `csp_packet_t`.
 
@@ -82,13 +174,13 @@ if pkt.is_rdp() { /* ... */ }
 
 ---
 
-## 3. Send Patterns
+## 5. Send Patterns
 
 This section shows the four common patterns for sending data: fire-and-forget, reliable, encrypted, and request/response.
 
 ---
 
-### 3.1 Fire-and-Forget Telemetry
+### 5.1 Fire-and-Forget Telemetry
 
 Use `node.sendto()` when you want to blast data out as fast as possible without consuming a connection slot. Think sensor readings, status beacons, or anything where a lost frame is acceptable.
 
@@ -139,7 +231,7 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 
 ---
 
-### 3.2 Reliable Data Transfer (RDP)
+### 5.2 Reliable Data Transfer (RDP)
 
 Use a connection opened with `conn_opts::RDP` when delivery must be guaranteed. CSP's Reliable Datagram Protocol adds sequence numbers, acknowledgements, and retransmission.
 
@@ -202,7 +294,7 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 
 ---
 
-### 3.3 Encrypted Transfer (XTEA)
+### 5.3 Encrypted Transfer (XTEA)
 
 Add `conn_opts::XTEA` to any connection to transparently encrypt the payload. The shared 128-bit key is pre-loaded into the C layer via `csp_xtea_set_key()`. You can combine flags — e.g. `conn_opts::RDP | conn_opts::XTEA` gives you both reliability and encryption.
 
@@ -265,7 +357,7 @@ let sock = Socket::new(socket_opts::XTEA_REQ).unwrap();
 
 ---
 
-### 3.4 Request / Response
+### 5.4 Request / Response
 
 #### One-Shot (Single Round-Trip)
 
@@ -395,7 +487,7 @@ server.register(Port::Custom(QUERY_PORT), |_conn, pkt| {
 server.run(libcsp::MAX_TIMEOUT); // blocks; run in a dedicated thread
 ```
 
-### 3.5 Large Payload Transfer (SFP)
+### 5.5 Large Payload Transfer (SFP)
 
 CSP's Simple Fragmentation Protocol (SFP) lets you send payloads larger than a single packet MTU. The sender fragments the data automatically; the receiver reassembles it into a single `Vec<u8>`. Use SFP whenever your payload is bigger than your packet buffer size (typically 128–256 bytes on embedded links).
 
@@ -444,7 +536,7 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 
 ---
 
-## 4. High-Level Networking
+## 6. High-Level Networking
 
 ### The `Port` Enum
 Avoid magic numbers by using the `Port` enum for standard services and custom ports.
@@ -534,7 +626,7 @@ node.poke(remote_addr, 0x2000_0000, &[0xDE, 0xAD, 0xBE, 0xEF], 1000)?;
 
 ---
 
-## 5. Custom Interfaces (Transports)
+## 6. Custom Interfaces (Transports)
 
 Implement the `CspInterface` trait to bridge CSP to custom hardware (e.g., STM32 CAN via `embassy`).
 
@@ -584,7 +676,7 @@ Internal mechanism: `handle.rx()` calls `csp_qfifo_write()`, which wakes up the 
 
 ---
 
-## 6. Sniffing Traffic
+## 7. Sniffing Traffic
 
 Use the RAII `Sniffer` handle to enable promiscuous mode. It disables automatically when dropped.
 
@@ -599,7 +691,7 @@ while let Some(pkt) = sniffer.read(1000) {
 
 ---
 
-## 7. Custom Arch and Time (RTOS/Bare-Metal)
+## 8. Custom Arch and Time (RTOS/Bare-Metal)
 
 In a `no_std` or custom RTOS environment (like `embassy` on STM32), libcsp needs primitives for time, mutexes, and queues.
 
@@ -652,7 +744,7 @@ When building for an embedded target (e.g. `thumbv7em-none-eabihf`), the `cc` cr
 
 ---
 
-## 8. Summary of Ownership
+## 9. Summary of Ownership
 
 | Action | Ownership |
 |--------|-----------|
@@ -665,7 +757,7 @@ When building for an embedded target (e.g. `thumbv7em-none-eabihf`), the `cc` cr
 | `CspInterface::nexthop` | Trait method takes ownership of `Packet`. |
 | `handle.rx(pkt)` | Ownership transferred to CSP router. |
 
-## 9. Pattern Comparison
+## 10. Pattern Comparison
 
 | Pattern | API | Overhead | Delivery |
 |---------|-----|----------|----------|

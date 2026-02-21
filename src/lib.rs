@@ -23,6 +23,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 //! This crate provides idiomatic, zero-unsafe Rust wrappers around the
 //! [Cubesat Space Protocol](https://github.com/libcsp/libcsp) C library.
 //!
+//! ## Important Limitation
+//!
+//! **Only one [`CspNode`] can exist at a time** in a process, due to global state
+//! in the underlying libcsp C library. Attempting to call [`CspConfig::init()`]
+//! twice will return [`CspError::AlreadyInitialized`].
+//!
+//! You can [`Clone`] a `CspNode` to share it across threads, but you cannot have
+//! two independent CSP stacks.
+//!
 //! ## Quick start
 //!
 //! ```no_run
@@ -114,6 +123,19 @@ pub mod promisc;
 pub mod interface;
 pub mod service;
 pub mod arch;
+
+#[cfg(feature = "debug")]
+pub mod debug;
+
+// When 'external-arch' is enabled, libcsp expects the user to provide the
+// architecture-specific implementation. To allow standard host tests and
+// examples to run with this feature enabled (e.g. via --all-features),
+// we provide a default stub implementation for host platforms.
+#[cfg(all(feature = "external-arch", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+mod arch_default_export {
+    use crate::arch::test_arch::{ARCH, TestArch};
+    crate::export_arch!(TestArch, ARCH);
+}
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
@@ -298,10 +320,41 @@ mod tests {
         assert_eq!(u8::from(Port::Ping), 1);
         assert_eq!(u8::from(Port::Any), 255);
         assert_eq!(u8::from(Port::Custom(10)), 10);
-        
+
         assert_eq!(Port::from(0), Port::Cmp);
         assert_eq!(Port::from(1), Port::Ping);
         assert_eq!(Port::from(255), Port::Any);
         assert_eq!(Port::from(10), Port::Custom(10));
+    }
+}
+
+// ── Test helpers ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use std::sync::Mutex;
+    use crate::CspConfig;
+
+    /// Global test lock to serialize CSP initialization across all tests.
+    /// Since libcsp only allows one node at a time, tests must run sequentially.
+    pub static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper to run a test with CSP initialized.
+    /// Automatically serializes test execution and cleans up after the test.
+    pub fn with_csp_node<F: FnOnce(&crate::CspNode)>(f: F) {
+        // Lock the mutex - DO NOT ignore poison panics as they indicate test failures
+        let _guard = TEST_LOCK.lock().unwrap();
+
+        // Initialize CSP for this test
+        let node = CspConfig::new()
+            .address(1)
+            .buffers(10, 256)
+            .init()
+            .expect("failed to init CSP for tests");
+
+        // Run the test with the node
+        f(&node);
+
+        // Node is dropped here, calling csp_free_resources
     }
 }

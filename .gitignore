@@ -38,3 +38,4 @@ libcsp/include/csp/csp_autoconfig.h
 *.key
 target/
 embassy-example/target/
+*.txt

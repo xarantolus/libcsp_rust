@@ -153,6 +153,7 @@ dependencies = [
  "bindgen",
  "bitflags",
  "cc",
+ "libc",
  "socketcan",
  "spin",
 ]

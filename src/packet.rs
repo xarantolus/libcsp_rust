@@ -12,8 +12,10 @@ version 2.1 of the License, or (at your option) any later version.
 //! RAII wrapper for `csp_packet_t`.
 
 use crate::sys;
+use crate::Priority;
 use core::ffi::c_void;
 use core::slice;
+use core::fmt;
 
 /// The byte offset at which the data payload begins inside `csp_packet_t`.
 ///
@@ -57,6 +59,13 @@ impl Packet {
         if ptr.is_null() {
             None
         } else {
+            // Initialize packet fields to safe defaults.
+            // libcsp's csp_buffer_get doesn't clear the buffer, so reused buffers
+            // may contain stale data from previous uses.
+            unsafe {
+                (*ptr).length = 0;
+                (*ptr).id.ext = 0;  // Clear the CSP header (src/dst addr, ports, flags)
+            }
             Some(Packet { inner: ptr })
         }
     }
@@ -93,10 +102,13 @@ impl Packet {
         unsafe { (*self.inner).id.ext = id; }
     }
 
-    /// Return the message priority (0-3).
-    pub fn priority(&self) -> u8 {
+    /// Return the message priority as a Priority enum.
+    pub fn priority(&self) -> Priority {
         // Safety: Priority is a 2-bit field (0-3) in the CSP header.
-        ((self.id_raw() & 0xC0000000) >> 30) as u8
+        let prio = ((self.id_raw() & 0xC0000000) >> 30) as u8;
+        debug_assert!(prio <= 3, "Invalid priority value: {}", prio);
+        // Safety: prio is 0-3, which are all valid Priority enum values
+        unsafe { core::mem::transmute(prio) }
     }
 
     /// Return the source address (0-31).
@@ -247,7 +259,7 @@ impl Drop for Packet {
 unsafe impl Send for Packet {}
 
 impl core::fmt::Debug for Packet {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Packet")
             .field("length", &self.length())
             .field("id_raw", &format_args!("0x{:08x}", self.id_raw()))
@@ -258,53 +270,167 @@ impl core::fmt::Debug for Packet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CspConfig;
-    use std::sync::Once;
+    use crate::test_helpers::with_csp_node;
 
-    static INIT: Once = Once::new();
+    #[test]
+    fn test_packet_get_write_read() {
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(32).expect("should get packet");
+            assert_eq!(pkt.length(), 0);
 
-    fn ensure_init() {
-        INIT.call_once(|| {
-            let node = CspConfig::new()
-                .address(1)
-                .buffers(10, 256)
-                .init()
-                .expect("failed to init CSP for tests");
-            // Leak the node so it stays alive and doesn't call csp_free_resources
-            core::mem::forget(node);
+            let data = b"test data";
+            pkt.write(data).expect("should write data");
+            assert_eq!(pkt.length(), data.len() as u16);
+            assert_eq!(pkt.data(), data);
+
+            // Check data_mut
+            pkt.data_mut()[0] = b'X';
+            assert_eq!(&pkt.data()[..1], b"X");
         });
     }
 
     #[test]
-    fn test_packet_get_write_read() {
-        ensure_init();
-        let mut pkt = Packet::get(32).expect("should get packet");
-        assert_eq!(pkt.length(), 0);
-
-        let data = b"test data";
-        pkt.write(data).expect("should write data");
-        assert_eq!(pkt.length(), data.len() as u16);
-        assert_eq!(pkt.data(), data);
-
-        // Check data_mut
-        pkt.data_mut()[0] = b'X';
-        assert_eq!(&pkt.data()[..1], b"X");
-    }
-
-    #[test]
     fn test_packet_overflow() {
-        ensure_init();
-        let mut pkt = Packet::get(10).expect("should get packet");
-        let big_data = vec![0u8; 1024];
-        assert!(pkt.write(&big_data).is_err());
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(10).expect("should get packet");
+            let big_data = vec![0u8; 1024];
+            assert!(pkt.write(&big_data).is_err());
+        });
     }
 
     #[test]
     fn test_data_offset() {
-        ensure_init();
-        let mut pkt = Packet::get(1).expect("should get packet");
-        let base = pkt.inner as usize;
-        let data_ptr = pkt.data_buf_mut().as_ptr() as usize;
-        assert_eq!(data_ptr - base, DATA_OFFSET, "DATA_OFFSET mismatch!");
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(1).expect("should get packet");
+            let base = pkt.inner as usize;
+            let data_ptr = pkt.data_buf_mut().as_ptr() as usize;
+            assert_eq!(data_ptr - base, DATA_OFFSET, "DATA_OFFSET mismatch!");
+        });
+    }
+
+    #[test]
+    fn test_packet_initialization() {
+        with_csp_node(|_node| {
+            // Verify that newly allocated packets are properly initialized
+            let pkt = Packet::get(64).expect("should get packet");
+
+            // These should all be zero after initialization
+            assert_eq!(pkt.length(), 0);
+            assert_eq!(pkt.id_raw(), 0);
+            assert_eq!(pkt.priority(), crate::Priority::Critical);  // 0 maps to Critical
+            assert_eq!(pkt.src_addr(), 0);
+            assert_eq!(pkt.dst_addr(), 0);
+            assert_eq!(pkt.src_port(), 0);
+            assert_eq!(pkt.dst_port(), 0);
+            assert_eq!(pkt.flags(), 0);
+        });
+    }
+
+    #[test]
+    fn test_packet_write_overwrites() {
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(64).expect("should get packet");
+
+            // Write some data
+            pkt.write(b"hello").expect("should write");
+            assert_eq!(pkt.length(), 5);
+            assert_eq!(pkt.data(), b"hello");
+
+            // Write again - this overwrites, doesn't append
+            pkt.write(b"world").expect("should write");
+            assert_eq!(pkt.length(), 5);
+            assert_eq!(pkt.data(), b"world");
+
+            // Write longer data
+            pkt.write(b"hello world").expect("should write");
+            assert_eq!(pkt.length(), 11);
+            assert_eq!(pkt.data(), b"hello world");
+        });
+    }
+
+    #[test]
+    fn test_packet_set_length() {
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(32).expect("should get packet");
+
+            // Manually set length
+            pkt.set_length(10);
+            assert_eq!(pkt.length(), 10);
+
+            // Length should be settable to 0
+            pkt.set_length(0);
+            assert_eq!(pkt.length(), 0);
+        });
+    }
+
+    #[test]
+    fn test_packet_id_manipulation() {
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(16).expect("should get packet");
+
+            // Test setting and reading the raw ID
+            let test_id: u32 = 0x12345678;
+            pkt.set_id_raw(test_id);
+            assert_eq!(pkt.id_raw(), test_id);
+
+            // Verify we can extract fields from the ID
+            // (actual values depend on the bit layout)
+            let _prio = pkt.priority();
+            let _src = pkt.src_addr();
+            let _dst = pkt.dst_addr();
+            let _sport = pkt.src_port();
+            let _dport = pkt.dst_port();
+            let _flags = pkt.flags();
+        });
+    }
+
+    #[test]
+    fn test_packet_flags() {
+        with_csp_node(|_node| {
+            let pkt = Packet::get(16).expect("should get packet");
+
+            // Initially all flags should be false
+            assert!(!pkt.is_rdp());
+            assert!(!pkt.is_xtea());
+            assert!(!pkt.is_hmac());
+            assert!(!pkt.is_crc32());
+            assert!(!pkt.is_frag());
+        });
+    }
+
+    #[test]
+    fn test_packet_data_mut() {
+        with_csp_node(|_node| {
+            let mut pkt = Packet::get(32).expect("should get packet");
+
+            // Write initial data
+            pkt.write(b"test").unwrap();
+
+            // Modify through data_mut
+            let data = pkt.data_mut();
+            data[0] = b'T';
+            data[1] = b'E';
+
+            assert_eq!(pkt.data(), b"TEst");
+        });
+    }
+
+    #[test]
+    fn test_packet_reuse_buffer() {
+        with_csp_node(|_node| {
+            // Allocate and free a packet
+            {
+                let mut pkt = Packet::get(32).expect("should get packet");
+                pkt.write(b"old data").unwrap();
+                // pkt is dropped here, returned to pool
+            }
+
+            // Allocate again - might get the same buffer
+            let pkt = Packet::get(32).expect("should get packet");
+
+            // Should be initialized to clean state despite buffer reuse
+            assert_eq!(pkt.length(), 0);
+            assert_eq!(pkt.id_raw(), 0);
+        });
     }
 }

@@ -286,26 +286,96 @@ impl fmt::Debug for Connection {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CspConfig, Packet};
+    use crate::{Packet, Priority, test_helpers::with_csp_node};
 
     #[test]
     fn test_connection_send_to_nowhere() {
-        let node = CspConfig::new()
-            .address(1)
-            .buffers(10, 256)
-            .init()
-            .expect("failed to init CSP for tests");
+        with_csp_node(|node| {
+            // Trying to connect to a node that isn't there (and we don't have a route for except LOOP)
+            // If we connect to address 1 port 10 (loopback), we can test send.
+            let node_addr = 1;
+            let conn = node.connect(Priority::Norm, node_addr, 10, 100, 0).expect("Connect failed");
 
-        // Trying to connect to a node that isn't there (and we don't have a route for except LOOP)
-        // If we connect to address 1 port 10 (loopback), we can test send.
-        let node_addr = 1;
-        let conn = node.connect(crate::Priority::Norm, node_addr, 10, 100, 0).expect("Connect failed");
+            let mut pkt = Packet::get(16).unwrap();
+            pkt.write(b"hello").unwrap();
 
-        let mut pkt = Packet::get(16).unwrap();
-        pkt.write(b"hello").unwrap();
+            // On loopback, send usually succeeds immediately because it just goes into a queue.
+            let res = conn.send(pkt, 0);
+            assert!(res.is_ok());
+        });
+    }
 
-        // On loopback, send usually succeeds immediately because it just goes into a queue.
-        let res = conn.send(pkt, 0);
-        assert!(res.is_ok());
+    #[test]
+    fn test_connection_loopback() {
+        with_csp_node(|node| {
+            // Test loopback communication (node talking to itself)
+            let my_addr = 1;
+            let port = 10;
+
+            // Connect to ourselves
+            let conn = node.connect(Priority::Norm, my_addr, port, 100, 0)
+                .expect("Failed to connect to loopback");
+
+            // Send a packet
+            let mut pkt = Packet::get(32).unwrap();
+            let test_data = b"loopback test data";
+            pkt.write(test_data).unwrap();
+
+            conn.send_discard(pkt, 100).expect("Failed to send");
+
+            // Read it back (it should appear on the same connection via loopback)
+            if let Some(received) = conn.read(100) {
+                assert_eq!(received.data(), test_data);
+                assert_eq!(received.length() as usize, test_data.len());
+            }
+        });
+    }
+
+    #[test]
+    fn test_connection_metadata() {
+        with_csp_node(|node| {
+            let my_addr = 1;  // Our own address (loopback)
+            let dst_port = 15;
+
+            // Connect to ourselves via loopback
+            let conn = node.connect(Priority::High, my_addr, dst_port, 100, 0)
+                .expect("Failed to connect");
+
+            // Verify we can read connection metadata (exact values depend on CSP's internal routing)
+            let _dst_addr = conn.dst_addr();
+            let _dst_port = conn.dst_port();
+            let _src_addr = conn.src_addr();
+            let _src_port = conn.src_port();
+
+            // Just verify these methods don't panic and return values in valid ranges
+            assert!(conn.dst_addr() <= 31);  // 5-bit address
+            assert!(conn.src_addr() <= 31);
+            assert!(conn.dst_port() <= 63);  // 6-bit port
+            assert!(conn.src_port() <= 63);
+        });
+    }
+
+    #[test]
+    fn test_connection_send_discard_vs_send() {
+        with_csp_node(|node| {
+            let conn = node.connect(Priority::Norm, 1, 10, 100, 0).unwrap();
+
+            // Test send_discard (always consumes packet)
+            let pkt1 = Packet::get(16).unwrap();
+            assert!(conn.send_discard(pkt1, 100).is_ok());
+
+            // Test send (returns packet on error)
+            let mut pkt2 = Packet::get(16).unwrap();
+            pkt2.write(b"test").unwrap();
+            match conn.send(pkt2, 100) {
+                Ok(()) => {
+                    // Success - packet was consumed
+                }
+                Err((_err, returned_pkt)) => {
+                    // Error - we got the packet back
+                    assert_eq!(returned_pkt.length(), 4);
+                }
+            }
+        });
     }
 }

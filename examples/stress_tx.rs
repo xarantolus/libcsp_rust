@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
     node.route_start_task(4096, 0)?;
 
     // Fast RDP close for stress tests
-    unsafe { libcsp::sys::csp_rdp_set_opt(20, 500, 100, 1, 100, 2); }
+    node.rdp_set_opt(20, 500, 100, 1, 100, 2);
 
     let mut count = 0u64;
     let mut bytes_sent = 0u64;

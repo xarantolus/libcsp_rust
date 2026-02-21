@@ -47,7 +47,7 @@ impl CspArch for MyCustomArch {
     fn queue_dequeue(&self, _queue: *mut c_void, _item: *mut c_void, _timeout_ms: u32) -> bool { true }
     fn queue_size(&self, _queue: *mut c_void) -> usize { 0 }
 
-    // ── Heap ──────────────────────────────────────────────────────────────
+    // ── Memory ──────────────────────────────────────────────────────────────
     // libcsp uses these for connection and packet-pool bookkeeping.
     fn malloc(&self, _size: usize) -> *mut c_void { core::ptr::null_mut() }
     fn free(&self, _ptr: *mut c_void) { }
