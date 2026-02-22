@@ -46,6 +46,9 @@ external-arch = []
 bitflags = "2"
 spin = "0.9"
 
+# Note: We don't use tinyrlibc because it exports symbols with no_mangle when features are enabled,
+# causing conflicts with our export_arch! macro. Instead, we implement the simple functions ourselves.
+
 # libc is used by test_arch on host platforms (Linux, macOS, Windows)
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 libc = "0.2"

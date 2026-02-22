@@ -423,6 +423,11 @@ fn compile_libcsp(
         build.file("csp_debug_wrapper.c");
     }
 
+    // Compile mini-scanf for external-arch (sscanf with varargs support)
+    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+        compile_mini_scanf();
+    }
+
     // Transport
     build.file(src_dir.join("transport/csp_rdp.c"));
     build.file(src_dir.join("transport/csp_udp.c"));
@@ -537,6 +542,34 @@ fn compile_libcsp(
     }
 
     build.compile("csp");
+}
+
+/// Compile mini-scanf for sscanf support in external-arch mode.
+/// mini-scanf is a minimal sscanf implementation designed for embedded systems.
+fn compile_mini_scanf() {
+    let mini_scanf_dir = PathBuf::from("libcsp-sys/mini-scanf");
+
+    // Verify submodule is initialized
+    if !mini_scanf_dir.join("c_scan.c").exists() {
+        panic!(
+            "mini-scanf submodule not initialized. Run: git submodule update --init --recursive"
+        );
+    }
+
+    let mut build = cc::Build::new();
+    build
+        .file(mini_scanf_dir.join("c_scan.c"))
+        .file("libcsp-sys/sscanf_wrapper.c")
+        .include(&mini_scanf_dir)
+        .flag("-std=c99")
+        .flag("-Os")
+        .flag("-Wall")
+        .define("C_SSCANF", None)  // Enable sscanf mode
+        .compile("mini_scanf");
+
+    println!("cargo:rerun-if-changed=libcsp-sys/mini-scanf/c_scan.c");
+    println!("cargo:rerun-if-changed=libcsp-sys/mini-scanf/c_scan.h");
+    println!("cargo:rerun-if-changed=libcsp-sys/sscanf_wrapper.c");
 }
 
 /// Return the GCC/clang built-in include directory so bindgen can find

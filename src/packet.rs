@@ -106,9 +106,21 @@ impl Packet {
     pub fn priority(&self) -> Priority {
         // Safety: Priority is a 2-bit field (0-3) in the CSP header.
         let prio = ((self.id_raw() & 0xC0000000) >> 30) as u8;
-        debug_assert!(prio <= 3, "Invalid priority value: {}", prio);
-        // Safety: prio is 0-3, which are all valid Priority enum values
-        unsafe { core::mem::transmute(prio) }
+        // Always validate, even in release builds, to prevent UB from transmute
+        match prio {
+            0 => Priority::Critical,
+            1 => Priority::High,
+            2 => Priority::Norm,
+            3 => Priority::Low,
+            // Defensive: if corrupted data somehow has invalid priority,
+            // return a safe default rather than causing UB
+            _ => {
+                #[cfg(debug_assertions)]
+                panic!("Invalid priority value: {}", prio);
+                #[cfg(not(debug_assertions))]
+                Priority::Norm  // Safe fallback in release builds
+            }
+        }
     }
 
     /// Return the source address (0-31).

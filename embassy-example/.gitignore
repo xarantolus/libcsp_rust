@@ -1,0 +1,3 @@
+# Generated firmware binaries
+*.elf
+*.bin

@@ -2,10 +2,18 @@
 //!
 //! When building for a bare-metal or custom-RTOS target with the
 //! `external-arch` feature enabled, libcsp cannot use its built-in
-//! POSIX/FreeRTOS primitives.  You must supply replacements by implementing
+//! POSIX/FreeRTOS primitives. You must supply replacements by implementing
 //! the [`CspArch`] trait and exporting it with the [`export_arch!`] macro.
 //!
-//! The stubs below return the safest possible no-op values.  On a real target
+//! The [`export_arch!`] macro automatically provides:
+//! - C string functions: strcpy, strncpy, strnlen, strncasecmp, strtok_r
+//! - sscanf (via mini-scanf C library with varargs support)
+//! - Stubs for rand, srand, _embassy_time_schedule_wake
+//!
+//! You only need to implement the OS primitives (time, semaphores, mutexes,
+//! queues, memory allocation). The C string functions work out of the box.
+//!
+//! The stubs below return the safest possible no-op values. On a real target
 //! you would back them with your RTOS's semaphore/mutex/queue/heap APIs.
 //!
 //! Run with: cargo run --example custom_arch
@@ -20,7 +28,9 @@ use core::ffi::c_void;
 /// Replace each method body with the appropriate RTOS call for your platform.
 struct MyCustomArch;
 
-impl CspArch for MyCustomArch {
+// Safety: Implementing CspArch requires correct handling of all raw pointer operations.
+// This example assumes proper RTOS primitives are used in place of the stub implementations.
+unsafe impl CspArch for MyCustomArch {
     // ── Time ─────────────────────────────────────────────────────────────
     // CSP uses these for RDP timeouts and debug timestamps.
     fn get_ms(&self) -> u32 { 0 /* replace with e.g. embassy_time::Instant::now().as_millis() as u32 */ }

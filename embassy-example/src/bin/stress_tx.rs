@@ -13,33 +13,12 @@ use embassy_time::{Duration, Instant, Timer, Ticker};
 use libcsp::{CspConfig, Packet, CspInterface, interface, InterfaceHandle, Priority, socket_opts, conn_opts, Connection};
 use panic_probe as _;
 use static_cell::StaticCell;
+use embassy_example::Prng;
 
 // --- SHARED STRESS LOGIC ---
 const PRNG_SEED: u32 = 0x12345678;
 const DATA_PORT: u8 = 10;
 const SFP_PORT: u8 = 11;
-
-pub struct Prng { state: u32 }
-impl Prng {
-    pub fn new(seed: u32) -> Self { Self { state: if seed == 0 { 1 } else { seed } } }
-    pub fn next(&mut self) -> u32 {
-        let mut x = self.state;
-        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-        self.state = x; x
-    }
-    pub fn fill(&mut self, buf: &mut [u8]) {
-        for chunk in buf.chunks_exact_mut(4) {
-            let val = self.next();
-            chunk.copy_from_slice(&val.to_le_bytes());
-        }
-        let remaining = buf.len() % 4;
-        if remaining > 0 {
-            let val = self.next().to_le_bytes();
-            let start = buf.len() - remaining;
-            buf[start..].copy_from_slice(&val[..remaining]);
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolMode { Normal, Rdp, SFP, RdpSfp }
@@ -66,29 +45,6 @@ use embassy_example::ARCH;
 
 // Use the export_arch! macro to generate all CSP arch C shims automatically
 libcsp::export_arch!(embassy_example::EmbassyArch, ARCH);
-#[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
-#[no_mangle] pub extern "C" fn srand(_s: u32) {}
-#[no_mangle] pub unsafe extern "C" fn strncpy(d: *mut i8, s: *const i8, n: usize) -> *mut i8 {
-    let mut i = 0; while i < n && *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
-    while i < n { *d.add(i) = 0; i += 1; } d
-}
-#[no_mangle] pub unsafe extern "C" fn strcpy(d: *mut i8, s: *const i8) -> *mut i8 {
-    let mut i = 0; while *s.add(i) != 0 { *d.add(i) = *s.add(i); i += 1; }
-    *d.add(i) = 0; d
-}
-#[no_mangle] pub unsafe extern "C" fn strnlen(s: *const i8, m: usize) -> usize {
-    let mut l = 0; while l < m && *s.add(l) != 0 { l += 1; } l
-}
-#[no_mangle] pub unsafe extern "C" fn strncasecmp(s1: *const i8, s2: *const i8, n: usize) -> i32 {
-    for i in 0..n {
-        let c1 = (*s1.add(i) as u8).to_ascii_lowercase();
-        let c2 = (*s2.add(i) as u8).to_ascii_lowercase();
-        if c1 != c2 || c1 == 0 { return (c1 as i32) - (c2 as i32); }
-    } 0
-}
-#[no_mangle] pub unsafe extern "C" fn strtok_r(_s: *mut i8, _d: *const i8, _p: *mut *mut i8) -> *mut i8 { core::ptr::null_mut() }
-#[no_mangle] pub unsafe extern "C" fn sscanf(_s: *const i8, _f: *const i8) -> i32 { 0 }
-#[no_mangle] pub extern "C" fn _embassy_time_schedule_wake(_at: u64) {}
 
 struct Stm32CanIface { tx: embassy_stm32::can::CanTx<'static, 'static, CAN1> }
 impl CspInterface for Stm32CanIface {

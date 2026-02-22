@@ -3,7 +3,14 @@ use core::ffi::{c_void, c_char};
 
 pub struct TestArch;
 
-impl CspArch for TestArch {
+// Allow clippy::not_unsafe_ptr_arg_deref because:
+// - The CspArch trait is already marked `unsafe trait`
+// - All methods are only called from unsafe contexts (export_arch! macro)
+// - Marking individual methods unsafe would complicate the API
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+// Safety: This implementation uses POSIX/libc primitives correctly.
+// All pointer operations are validated and follow the platform's ABI.
+unsafe impl CspArch for TestArch {
     fn get_ms(&self) -> u32 {
         let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
         // Safety: `ts` is a valid pointer.

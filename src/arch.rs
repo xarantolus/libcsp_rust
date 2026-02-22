@@ -44,7 +44,14 @@ use core::ffi::{c_void, c_char};
 /// [`sleep_ms`]: CspArch::sleep_ms
 /// [`CspNode::route_start_task`]: crate::CspNode::route_start_task
 /// [`CspNode::route_work`]: crate::CspNode::route_work
-pub trait CspArch: Send + Sync {
+///
+/// # Safety
+///
+/// Implementing this trait requires correctly implementing all the architecture-specific
+/// primitives with valid pointer handling. Many methods take raw pointers that must be
+/// valid for the operation being performed. Incorrect implementations can lead to
+/// undefined behavior, memory corruption, or crashes.
+pub unsafe trait CspArch: Send + Sync {
     // ── Time (REQUIRED) ─────────────────────────────────────────────────────
 
     /// Return system time in milliseconds.
@@ -293,6 +300,161 @@ pub trait CspArch: Send + Sync {
     /// On embedded systems with an RTOS, this should call the OS delay function.
     /// On POSIX systems, use `nanosleep()`.
     fn sleep_ms(&self, _ms: u32) {}
+
+    // ── C String Functions (OPTIONAL) ───────────────────────────────────────
+    // These are required by libcsp's C code but may not be available in no_std environments.
+    // Default implementations are provided via tinyrlibc (when external-arch is enabled)
+    // or simple Rust implementations. Override these if you need locale-aware or more
+    // sophisticated string handling.
+
+    /// Copy up to `n` bytes from `src` to `dest`, padding with zeros if `src` is shorter.
+    ///
+    /// **Optional.** Used by CSP services (CMP ident). Default implementation provided.
+    /// This is `strncpy` from the C standard library.
+    ///
+    /// # Safety
+    /// Caller must ensure `dest` and `src` are valid pointers and `dest` has enough space.
+    fn strncpy(&self, dest: *mut c_char, src: *const c_char, n: usize) -> *mut c_char {
+        unsafe {
+            let mut i = 0;
+            // Copy until null or n bytes
+            while i < n && *src.add(i) != 0 {
+                *dest.add(i) = *src.add(i);
+                i += 1;
+            }
+            // Pad remaining with zeros
+            while i < n {
+                *dest.add(i) = 0;
+                i += 1;
+            }
+            dest
+        }
+    }
+
+    /// Copy string from `src` to `dest` including null terminator.
+    ///
+    /// **Optional.** Used by CSP services (PS error messages). Default implementation provided.
+    /// This is `strcpy` from the C standard library.
+    ///
+    /// # Safety
+    /// Caller must ensure `dest` and `src` are valid pointers and `dest` has enough space.
+    fn strcpy(&self, dest: *mut c_char, src: *const c_char) -> *mut c_char {
+        unsafe {
+            let mut i = 0;
+            loop {
+                *dest.add(i) = *src.add(i);
+                if *src.add(i) == 0 {
+                    break;
+                }
+                i += 1;
+            }
+            dest
+        }
+    }
+
+    /// Get the length of a string, up to `maxlen` bytes.
+    ///
+    /// **Optional.** Used by CSP routing and services. Default implementation provided.
+    /// This is `strnlen` from the C standard library.
+    ///
+    /// # Safety
+    /// Caller must ensure `s` is a valid pointer.
+    fn strnlen(&self, s: *const c_char, maxlen: usize) -> usize {
+        unsafe {
+            let mut len = 0;
+            while len < maxlen && *s.add(len) != 0 {
+                len += 1;
+            }
+            len
+        }
+    }
+
+    /// Compare two strings case-insensitively, up to `n` bytes.
+    ///
+    /// **Optional.** Used by CSP interface lookup. Default implementation provided.
+    /// This is `strncasecmp` from the C standard library.
+    /// Returns 0 if equal, <0 if s1 < s2, >0 if s1 > s2.
+    ///
+    /// # Safety
+    /// Caller must ensure `s1` and `s2` are valid pointers.
+    fn strncasecmp(&self, s1: *const c_char, s2: *const c_char, n: usize) -> i32 {
+        unsafe {
+            for i in 0..n {
+                let c1 = (*s1.add(i) as u8).to_ascii_lowercase();
+                let c2 = (*s2.add(i) as u8).to_ascii_lowercase();
+                if c1 != c2 || c1 == 0 {
+                    return (c1 as i32) - (c2 as i32);
+                }
+            }
+            0
+        }
+    }
+
+    /// Tokenize a string with a delimiter.
+    ///
+    /// **Optional, CRITICAL for route_load().** Used by CSP routing table parser. Default implementation provided.
+    /// This is `strtok_r` from the C standard library.
+    ///
+    /// On first call, pass the string to tokenize as `s`. On subsequent calls, pass `null` to continue tokenizing.
+    /// `delim` is the set of delimiter characters. `saveptr` stores state between calls.
+    ///
+    /// # Safety
+    /// Caller must ensure `s`, `delim`, and `saveptr` are valid pointers (or `s` is null for continuation).
+    fn strtok_r(&self, s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char {
+        unsafe {
+            let mut str = if s.is_null() { *saveptr } else { s };
+            if str.is_null() {
+                return core::ptr::null_mut();
+            }
+
+            // Skip leading delimiters
+            while *str != 0 {
+                let mut is_delim = false;
+                let mut d = delim;
+                while *d != 0 {
+                    if *str == *d {
+                        is_delim = true;
+                        break;
+                    }
+                    d = d.add(1);
+                }
+                if !is_delim {
+                    break;
+                }
+                str = str.add(1);
+            }
+
+            if *str == 0 {
+                *saveptr = core::ptr::null_mut();
+                return core::ptr::null_mut();
+            }
+
+            let token = str;
+
+            // Find end of token
+            while *str != 0 {
+                let mut is_delim = false;
+                let mut d = delim;
+                while *d != 0 {
+                    if *str == *d {
+                        is_delim = true;
+                        break;
+                    }
+                    d = d.add(1);
+                }
+                if is_delim {
+                    *str = 0;
+                    str = str.add(1);
+                    break;
+                }
+                str = str.add(1);
+            }
+
+            *saveptr = str;
+            token
+        }
+    }
+
 }
 
 // test_arch is a POSIX-based implementation for host platforms.
@@ -314,42 +476,60 @@ macro_rules! export_arch {
         #[no_mangle] pub unsafe extern "C" fn csp_sleep_ms(ms: u32) { <$impl_type as $crate::CspArch>::sleep_ms(&$instance, ms) }
 
         #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_create(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+            // Safety: Defensive null check prevents UB if C code passes null
+            if sem.is_null() { return 0; }
             let s = <$impl_type as $crate::CspArch>::bin_sem_create(&$instance);
-            // Safety: `sem` is a valid pointer provided by libcsp.
+            // Safety: `sem` is a valid pointer (checked above).
             if s.is_null() { 0 } else { unsafe { *sem = s }; 1 }
         }
         #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_remove(sem: *mut *mut ::core::ffi::c_void) -> i32 {
-            // Safety: `sem` is a valid pointer to a handle created by this macro.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if sem.is_null() { return 0; }
+            // Safety: `sem` is a valid pointer (checked above).
             unsafe { <$impl_type as $crate::CspArch>::bin_sem_remove(&$instance, *sem) }; 1
         }
         #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_wait(sem: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
-            // Safety: `sem` is a valid pointer.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if sem.is_null() { return 0; }
+            // Safety: `sem` is a valid pointer (checked above).
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_wait(&$instance, *sem, timeout) } { 1 } else { 0 }
         }
         #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_post(sem: *mut *mut ::core::ffi::c_void) -> i32 {
-            // Safety: `sem` is a valid pointer.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if sem.is_null() { return 0; }
+            // Safety: `sem` is a valid pointer (checked above).
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
         }
         #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_post_isr(sem: *mut *mut ::core::ffi::c_void, _px: *mut i32) -> i32 {
-            // Safety: `sem` is a valid pointer.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if sem.is_null() { return 0; }
+            // Safety: `sem` is a valid pointer (checked above).
             if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
         }
 
         #[no_mangle] pub unsafe extern "C" fn csp_mutex_create(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
+            // Safety: Defensive null check prevents UB if C code passes null
+            if mutex.is_null() { return 0; }
             let m = <$impl_type as $crate::CspArch>::mutex_create(&$instance);
-            // Safety: `mutex` is a valid pointer provided by libcsp.
+            // Safety: `mutex` is a valid pointer (checked above).
             if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 }
         }
         #[no_mangle] pub unsafe extern "C" fn csp_mutex_remove(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
-            // Safety: `mutex` is a valid pointer to a handle created by this macro.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if mutex.is_null() { return 0; }
+            // Safety: `mutex` is a valid pointer (checked above).
             unsafe { <$impl_type as $crate::CspArch>::mutex_remove(&$instance, *mutex) }; 1
         }
         #[no_mangle] pub unsafe extern "C" fn csp_mutex_lock(mutex: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
-            // Safety: `mutex` is a valid pointer.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if mutex.is_null() { return 0; }
+            // Safety: `mutex` is a valid pointer (checked above).
             if unsafe { <$impl_type as $crate::CspArch>::mutex_lock(&$instance, *mutex, timeout) } { 1 } else { 0 }
         }
         #[no_mangle] pub unsafe extern "C" fn csp_mutex_unlock(mutex: *mut *mut ::core::ffi::c_void, _timeout: u32) -> i32 {
-            // Safety: `mutex` is a valid pointer.
+            // Safety: Defensive null check prevents UB if C code passes null
+            if mutex.is_null() { return 0; }
+            // Safety: `mutex` is a valid pointer (checked above).
             if unsafe { <$impl_type as $crate::CspArch>::mutex_unlock(&$instance, *mutex) } { 1 } else { 0 }
         }
 
@@ -421,5 +601,36 @@ macro_rules! export_arch {
 
             <$impl_type as $crate::CspArch>::thread_create(&$instance, wrapper, name, stack, arg, prio, handle)
         }
+
+        // C String Functions - Required by libcsp's C code
+        #[no_mangle] pub unsafe extern "C" fn strncpy(dest: *mut ::core::ffi::c_char, src: *const ::core::ffi::c_char, n: usize) -> *mut ::core::ffi::c_char {
+            <$impl_type as $crate::CspArch>::strncpy(&$instance, dest, src, n)
+        }
+        #[no_mangle] pub unsafe extern "C" fn strcpy(dest: *mut ::core::ffi::c_char, src: *const ::core::ffi::c_char) -> *mut ::core::ffi::c_char {
+            <$impl_type as $crate::CspArch>::strcpy(&$instance, dest, src)
+        }
+        #[no_mangle] pub unsafe extern "C" fn strnlen(s: *const ::core::ffi::c_char, maxlen: usize) -> usize {
+            <$impl_type as $crate::CspArch>::strnlen(&$instance, s, maxlen)
+        }
+        #[no_mangle] pub unsafe extern "C" fn strncasecmp(s1: *const ::core::ffi::c_char, s2: *const ::core::ffi::c_char, n: usize) -> i32 {
+            <$impl_type as $crate::CspArch>::strncasecmp(&$instance, s1, s2, n)
+        }
+        #[no_mangle] pub unsafe extern "C" fn strtok_r(s: *mut ::core::ffi::c_char, delim: *const ::core::ffi::c_char, saveptr: *mut *mut ::core::ffi::c_char) -> *mut ::core::ffi::c_char {
+            <$impl_type as $crate::CspArch>::strtok_r(&$instance, s, delim, saveptr)
+        }
+        // NOTE: sscanf is provided by mini-scanf (compiled from C with varargs support)
+        // when external-arch feature is enabled. It's linked automatically.
+        // On POSIX platforms, the system libc sscanf is used.
+
+        // Additional C library stubs that may be needed by some platforms
+        #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
+        #[no_mangle] pub extern "C" fn srand(_seed: u32) {}
+        #[no_mangle] pub extern "C" fn _embassy_time_schedule_wake(_at: u64) {}
     };
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "arch_tests.rs"]
+mod arch_tests;

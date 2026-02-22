@@ -105,8 +105,12 @@ pub fn toggle_debug_level(level: DebugLevel) {
 /// - `message`: The formatted log message as a string
 pub type DebugHookFn = fn(DebugLevel, &str);
 
-/// Global storage for the Rust debug hook (if any)
-static mut RUST_DEBUG_HOOK: Option<DebugHookFn> = None;
+/// Global storage for the Rust debug hook (if any).
+///
+/// Uses AtomicPtr instead of static mut to prevent data races.
+/// The pointer stores the function pointer value, not a heap allocation.
+use core::sync::atomic::{AtomicUsize, Ordering};
+static RUST_DEBUG_HOOK: AtomicUsize = AtomicUsize::new(0);
 
 /// External C functions from csp_debug_wrapper.c
 #[cfg(feature = "debug")]
@@ -122,25 +126,31 @@ extern "C" {
 /// the va_list arguments into a string.
 #[cfg(feature = "debug")]
 extern "C" fn rust_debug_callback(level: c_uint, message: *const c_char) {
-    unsafe {
-        if let Some(hook) = RUST_DEBUG_HOOK {
-            // Convert C string to Rust string
-            if !message.is_null() {
-                if let Ok(msg) = CStr::from_ptr(message).to_str() {
-                    // Map the C level to Rust enum
-                    let debug_level = match level {
-                        sys::csp_debug_level_t_CSP_ERROR => DebugLevel::Error,
-                        sys::csp_debug_level_t_CSP_WARN => DebugLevel::Warn,
-                        sys::csp_debug_level_t_CSP_INFO => DebugLevel::Info,
-                        sys::csp_debug_level_t_CSP_BUFFER => DebugLevel::Buffer,
-                        sys::csp_debug_level_t_CSP_PACKET => DebugLevel::Packet,
-                        sys::csp_debug_level_t_CSP_PROTOCOL => DebugLevel::Protocol,
-                        sys::csp_debug_level_t_CSP_LOCK => DebugLevel::Lock,
-                        _ => DebugLevel::Info, // Fallback
-                    };
+    // Load the function pointer atomically
+    let hook_ptr = RUST_DEBUG_HOOK.load(Ordering::Acquire);
+    if hook_ptr != 0 {
+        // Safety: The function pointer was stored via set_debug_hook and is valid
+        // as long as it's non-zero. We trust that set_debug_hook only stores
+        // valid DebugHookFn function pointers.
+        let hook: DebugHookFn = unsafe { core::mem::transmute(hook_ptr) };
 
-                    hook(debug_level, msg);
-                }
+        // Convert C string to Rust string
+        if !message.is_null() {
+            // Safety: message is a valid C string from the C wrapper
+            if let Ok(msg) = unsafe { CStr::from_ptr(message) }.to_str() {
+                // Map the C level to Rust enum
+                let debug_level = match level {
+                    sys::csp_debug_level_t_CSP_ERROR => DebugLevel::Error,
+                    sys::csp_debug_level_t_CSP_WARN => DebugLevel::Warn,
+                    sys::csp_debug_level_t_CSP_INFO => DebugLevel::Info,
+                    sys::csp_debug_level_t_CSP_BUFFER => DebugLevel::Buffer,
+                    sys::csp_debug_level_t_CSP_PACKET => DebugLevel::Packet,
+                    sys::csp_debug_level_t_CSP_PROTOCOL => DebugLevel::Protocol,
+                    sys::csp_debug_level_t_CSP_LOCK => DebugLevel::Lock,
+                    _ => DebugLevel::Info, // Fallback
+                };
+
+                hook(debug_level, msg);
             }
         }
     }
@@ -174,10 +184,14 @@ extern "C" fn rust_debug_callback(level: c_uint, message: *const c_char) {
 /// # Safety
 ///
 /// Only one debug hook can be active at a time. Setting a new hook replaces the previous one.
+/// The hook function must be valid for the entire lifetime of the debug system.
 #[cfg(feature = "debug")]
 pub fn set_debug_hook(hook: DebugHookFn) {
+    // Store the function pointer atomically
+    RUST_DEBUG_HOOK.store(hook as usize, Ordering::Release);
+
+    // Safety: The C functions are valid FFI functions from the wrapper
     unsafe {
-        RUST_DEBUG_HOOK = Some(hook);
         // Set our Rust callback in the C wrapper
         csp_debug_set_rust_callback(Some(rust_debug_callback));
         // Install the C wrapper as the CSP debug hook
@@ -190,8 +204,11 @@ pub fn set_debug_hook(hook: DebugHookFn) {
 /// This is only available when the `debug` feature is enabled.
 #[cfg(feature = "debug")]
 pub fn clear_debug_hook() {
+    // Clear the function pointer atomically
+    RUST_DEBUG_HOOK.store(0, Ordering::Release);
+
+    // Safety: The C functions are valid FFI functions from the wrapper
     unsafe {
-        RUST_DEBUG_HOOK = None;
         csp_debug_set_rust_callback(None);
         csp_debug_hook_clear();
     }

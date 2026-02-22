@@ -4,12 +4,14 @@
 
 extern crate alloc;
 
+mod queue;
+
 use alloc::boxed::Box;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, Ordering};
-use cortex_m::interrupt;
 use embassy_time::Instant;
 use libcsp::CspArch;
+use queue::Queue;
 
 #[global_allocator]
 pub static HEAP: embedded_alloc::Heap = embedded_alloc::Heap::empty();
@@ -22,7 +24,9 @@ pub struct EmbassyArch;
 unsafe impl Send for EmbassyArch {}
 unsafe impl Sync for EmbassyArch {}
 
-impl CspArch for EmbassyArch {
+// Safety: This implementation correctly handles all raw pointers and implements
+// the architecture primitives using Embassy's async runtime and critical sections.
+unsafe impl CspArch for EmbassyArch {
     // ── Time ──────────────────────────────────────────────────────────────────
     fn get_ms(&self) -> u32 {
         Instant::now().as_millis() as u32
@@ -82,65 +86,165 @@ impl CspArch for EmbassyArch {
     }
 
     fn mutex_lock(&self, _mutex: *mut c_void, _timeout_ms: u32) -> bool {
-        // Enter critical section (disables interrupts)
-        // This is safe because we're single-core with critical-section-single-core feature
-        interrupt::free(|_cs| {
-            // Critical section held until drop
-        });
+        // Disable interrupts - the mutex IS the critical section
+        cortex_m::interrupt::disable();
         true
     }
 
     fn mutex_unlock(&self, _mutex: *mut c_void) -> bool {
-        // Critical section is released automatically when the CS token drops
+        // Re-enable interrupts
+        unsafe { cortex_m::interrupt::enable(); }
         true
     }
 
     // ── Queues ────────────────────────────────────────────────────────────────
     // CSP queues are used for the router FIFO and per-connection RX queues.
-    // For now we use a minimal stub — a real implementation would use a ringbuffer.
-    // TODO: Implement proper FIFO queues with blocking semantics.
-    fn queue_create(&self, _length: usize, _item_size: usize) -> *mut c_void {
-        // Placeholder: just allocate a marker
-        Box::into_raw(Box::new(0usize)) as *mut c_void
+    // We use a circular buffer implementation with critical section protection.
+    fn queue_create(&self, length: usize, item_size: usize) -> *mut c_void {
+        // Allocate buffer for the queue data
+        let buffer_size = length * item_size;
+        let buffer = self.malloc(buffer_size);
+        if buffer.is_null() {
+            return core::ptr::null_mut();
+        }
+
+        // Create the Queue struct
+        // Safety: We just allocated the buffer above
+        let queue = unsafe { Queue::new(buffer as *mut u8, length, item_size) };
+        Box::into_raw(Box::new(queue)) as *mut c_void
     }
 
     fn queue_remove(&self, queue: *mut c_void) {
-        unsafe { drop(Box::from_raw(queue as *mut usize)); }
+        if queue.is_null() {
+            return;
+        }
+        // Safety: queue was created by queue_create
+        unsafe {
+            let q = Box::from_raw(queue as *mut Queue);
+            // Free the buffer that was allocated in queue_create
+            let buffer = *q.buffer.get();
+            self.free(buffer as *mut c_void);
+            // Queue struct is dropped here
+        }
     }
 
-    fn queue_enqueue(&self, _queue: *mut c_void, _item: *const c_void, _timeout_ms: u32) -> bool {
-        // TODO: Real queue logic
-        true
+    fn queue_enqueue(&self, queue: *mut c_void, item: *const c_void, timeout_ms: u32) -> bool {
+        if queue.is_null() || item.is_null() {
+            return false;
+        }
+        // Safety: queue was created by queue_create, item points to valid data
+        unsafe {
+            let q = &*(queue as *const Queue);
+            q.enqueue(item as *const u8, timeout_ms)
+        }
     }
 
-    fn queue_dequeue(&self, _queue: *mut c_void, _item: *mut c_void, _timeout_ms: u32) -> bool {
-        // TODO: Real queue logic
-        true
+    fn queue_dequeue(&self, queue: *mut c_void, item: *mut c_void, timeout_ms: u32) -> bool {
+        if queue.is_null() || item.is_null() {
+            return false;
+        }
+        // Safety: queue was created by queue_create, item points to valid data
+        unsafe {
+            let q = &*(queue as *const Queue);
+            q.dequeue(item as *mut u8, timeout_ms)
+        }
     }
 
-    fn queue_size(&self, _queue: *mut c_void) -> usize {
-        0
+    fn queue_size(&self, queue: *mut c_void) -> usize {
+        if queue.is_null() {
+            return 0;
+        }
+        // Safety: queue was created by queue_create
+        unsafe {
+            let q = &*(queue as *const Queue);
+            q.size()
+        }
     }
 
     // ── Heap ──────────────────────────────────────────────────────────────────
     fn malloc(&self, size: usize) -> *mut c_void {
-        // Safety: Layout::from_size_align_unchecked requires size <= isize::MAX
-        // and align is a power of 2. We use align=4, which is valid.
+        // Store size in a header before the returned pointer so we can free it later
+        const HEADER: usize = core::mem::size_of::<usize>();
+        let total = HEADER + size;
         unsafe {
-            core::alloc::GlobalAlloc::alloc(
-                &HEAP,
-                core::alloc::Layout::from_size_align_unchecked(size, 4),
-            ) as *mut c_void
+            let layout = core::alloc::Layout::from_size_align_unchecked(total, 8);
+            let ptr = core::alloc::GlobalAlloc::alloc(&HEAP, layout);
+            if ptr.is_null() {
+                return core::ptr::null_mut();
+            }
+            // Store the size in the header
+            *(ptr as *mut usize) = size;
+            // Return pointer after the header
+            ptr.add(HEADER) as *mut c_void
         }
     }
 
-    fn free(&self, _ptr: *mut c_void) {
-        // We don't know the original size — this is a limitation of the C API.
-        // For embedded-alloc, we need to provide a layout. Since we don't have
-        // the size, we skip the dealloc (leak). A real embedded allocator would
-        // store metadata with each allocation.
-        // TODO: Use an allocator that tracks sizes (e.g., linked_list_allocator)
+    fn free(&self, ptr: *mut c_void) {
+        if ptr.is_null() {
+            return;
+        }
+        const HEADER: usize = core::mem::size_of::<usize>();
+        unsafe {
+            // Get the original pointer (before the header)
+            let original = (ptr as *mut u8).sub(HEADER);
+            // Read the size from the header
+            let size = *(original as *const usize);
+            // Deallocate with the correct layout
+            let layout = core::alloc::Layout::from_size_align_unchecked(HEADER + size, 8);
+            core::alloc::GlobalAlloc::dealloc(&HEAP, original, layout);
+        }
     }
 }
 
 pub static ARCH: EmbassyArch = EmbassyArch;
+
+// NOTE: C string functions (strcpy, strncpy, strnlen, strncasecmp, strtok_r)
+// and other stubs (rand, srand, _embassy_time_schedule_wake) are provided
+// automatically by libcsp::export_arch! macro. No need to define them here!
+
+// sscanf is provided by mini-scanf (compiled from C with varargs support)
+
+// ── PRNG ──────────────────────────────────────────────────────────────────────
+// Simple xorshift32 PRNG for stress test data generation
+
+pub struct Prng {
+    state: u32,
+}
+
+impl Prng {
+    pub fn new(seed: u32) -> Self {
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
+    }
+
+    pub fn next(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        x
+    }
+
+    pub fn next_with_seed(seed: u32) -> u32 {
+        let mut x = if seed == 0 { 1 } else { seed };
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        x
+    }
+
+    pub fn fill(&mut self, buf: &mut [u8]) {
+        for chunk in buf.chunks_exact_mut(4) {
+            let val = self.next();
+            chunk.copy_from_slice(&val.to_le_bytes());
+        }
+        let remaining = buf.len() % 4;
+        if remaining > 0 {
+            let val = self.next().to_le_bytes();
+            let start = buf.len() - remaining;
+            buf[start..].copy_from_slice(&val[..remaining]);
+        }
+    }
+}
