@@ -34,36 +34,36 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// required for the three C-string fields (`hostname`, `model`, `revision`);
 /// all numeric fields are stack-allocated.
 pub struct CspConfig {
-    address:           u8,
-    hostname:          CString,
-    model:             CString,
-    revision:          CString,
-    conn_max:          u8,
+    address: u8,
+    hostname: CString,
+    model: CString,
+    revision: CString,
+    conn_max: u8,
     conn_queue_length: u8,
-    fifo_length:       u8,
-    port_max_bind:     u8,
-    rdp_max_window:    u8,
-    buffers:           u16,
-    buffer_data_size:  u16,
-    conn_dfl_so:       u32,
+    fifo_length: u8,
+    port_max_bind: u8,
+    rdp_max_window: u8,
+    buffers: u16,
+    buffer_data_size: u16,
+    conn_dfl_so: u32,
 }
 
 impl Default for CspConfig {
     /// Defaults mirror `csp_conf_get_defaults()` from `csp.h`.
     fn default() -> Self {
         CspConfig {
-            address:           1,
-            hostname:          CString::new("hostname").unwrap(),
-            model:             CString::new("model").unwrap(),
-            revision:          CString::new("1.0").unwrap(),
-            conn_max:          10,
+            address: 1,
+            hostname: CString::new("hostname").unwrap(),
+            model: CString::new("model").unwrap(),
+            revision: CString::new("1.0").unwrap(),
+            conn_max: 10,
             conn_queue_length: 10,
-            fifo_length:       25,
-            port_max_bind:     24,
-            rdp_max_window:    20,
-            buffers:           10,
-            buffer_data_size:  256,
-            conn_dfl_so:       0,
+            fifo_length: 25,
+            port_max_bind: 24,
+            rdp_max_window: 20,
+            buffers: 10,
+            buffer_data_size: 256,
+            conn_dfl_so: 0,
         }
     }
 }
@@ -168,25 +168,27 @@ impl CspConfig {
         // Build the C struct. The pointer fields point into self's CStrings.
         // Those must remain valid until csp_free_resources() is called.
         let conf = sys::csp_conf_t {
-            address:           self.address,
-            hostname:          self.hostname.as_ptr() as *const c_char,
-            model:             self.model.as_ptr() as *const c_char,
-            revision:          self.revision.as_ptr() as *const c_char,
-            conn_max:          self.conn_max,
+            address: self.address,
+            hostname: self.hostname.as_ptr() as *const c_char,
+            model: self.model.as_ptr() as *const c_char,
+            revision: self.revision.as_ptr() as *const c_char,
+            conn_max: self.conn_max,
             conn_queue_length: self.conn_queue_length,
-            fifo_length:       self.fifo_length,
-            port_max_bind:     self.port_max_bind,
-            rdp_max_window:    self.rdp_max_window,
-            buffers:           self.buffers,
-            buffer_data_size:  self.buffer_data_size,
-            conn_dfl_so:       self.conn_dfl_so,
+            fifo_length: self.fifo_length,
+            port_max_bind: self.port_max_bind,
+            rdp_max_window: self.rdp_max_window,
+            buffers: self.buffers,
+            buffer_data_size: self.buffer_data_size,
+            conn_dfl_so: self.conn_dfl_so,
         };
 
         // Safety: `conf` is a valid struct pointing to C-strings owned by `self`.
         csp_result(unsafe { sys::csp_init(&conf) })?;
 
         // Move self into the node so the CStrings live as long as the node.
-        Ok(CspNode { _inner: Arc::new(CspNodeInner { _config: self }) })
+        Ok(CspNode {
+            _inner: Arc::new(CspNodeInner { _config: self }),
+        })
     }
 }
 
@@ -556,7 +558,14 @@ impl CspNode {
             );
         }
 
-        (window_size, conn_timeout_ms, packet_timeout_ms, delayed_acks, ack_timeout, ack_delay_count)
+        (
+            window_size,
+            conn_timeout_ms,
+            packet_timeout_ms,
+            delayed_acks,
+            ack_timeout,
+            ack_delay_count,
+        )
     }
 
     // ── Security ──────────────────────────────────────────────────────────────
@@ -575,7 +584,9 @@ impl CspNode {
     #[cfg(feature = "xtea")]
     pub fn set_xtea_key(&self, key: &[u32; 4]) {
         // Safety: `key` is a valid array of four 32-bit words.
-        unsafe { sys::csp_xtea_set_key(key.as_ptr() as *const core::ffi::c_void, 4); }
+        unsafe {
+            sys::csp_xtea_set_key(key.as_ptr() as *const core::ffi::c_void, 4);
+        }
     }
 
     // ── Drivers ───────────────────────────────────────────────────────────────
@@ -594,7 +605,7 @@ impl CspNode {
     ) -> Result<*mut sys::csp_iface_t> {
         let c_device = CString::new(device).map_err(|_| crate::CspError::InvalidArgument)?;
         let mut iface_ptr: *mut sys::csp_iface_t = core::ptr::null_mut();
-        
+
         // Safety: `c_device` is a valid C-string. `iface_ptr` will be populated by libcsp.
         csp_result(unsafe {
             sys::csp_can_socketcan_open_and_add_interface(
@@ -605,7 +616,7 @@ impl CspNode {
                 &mut iface_ptr,
             )
         })?;
-        
+
         Ok(iface_ptr)
     }
 }

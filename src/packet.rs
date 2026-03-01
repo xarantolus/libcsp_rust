@@ -14,8 +14,8 @@ version 2.1 of the License, or (at your option) any later version.
 use crate::sys;
 use crate::Priority;
 use core::ffi::c_void;
-use core::slice;
 use core::fmt;
+use core::slice;
 
 /// The byte offset at which the data payload begins inside `csp_packet_t`.
 ///
@@ -53,9 +53,7 @@ impl Packet {
     pub fn get(data_size: usize) -> Option<Self> {
         // Safety: `sys::csp_buffer_get` is thread-safe and returns a valid
         // pointer or NULL.
-        let ptr = unsafe {
-            sys::csp_buffer_get(data_size) as *mut sys::csp_packet_t
-        };
+        let ptr = unsafe { sys::csp_buffer_get(data_size) as *mut sys::csp_packet_t };
         if ptr.is_null() {
             None
         } else {
@@ -64,7 +62,7 @@ impl Packet {
             // may contain stale data from previous uses.
             unsafe {
                 (*ptr).length = 0;
-                (*ptr).id.ext = 0;  // Clear the CSP header (src/dst addr, ports, flags)
+                (*ptr).id.ext = 0; // Clear the CSP header (src/dst addr, ports, flags)
             }
             Some(Packet { inner: ptr })
         }
@@ -85,7 +83,9 @@ impl Packet {
     #[inline]
     pub fn set_length(&mut self, len: u16) {
         // Safety: `inner` is a valid packet pointer.
-        unsafe { (*self.inner).length = len; }
+        unsafe {
+            (*self.inner).length = len;
+        }
     }
 
     /// Return the raw 32-bit CSP header (priority, addresses, ports, flags).
@@ -99,7 +99,9 @@ impl Packet {
     #[inline]
     pub fn set_id_raw(&mut self, id: u32) {
         // Safety: `inner` is a valid packet pointer.
-        unsafe { (*self.inner).id.ext = id; }
+        unsafe {
+            (*self.inner).id.ext = id;
+        }
     }
 
     /// Return the message priority as a Priority enum.
@@ -118,7 +120,7 @@ impl Packet {
                 #[cfg(debug_assertions)]
                 panic!("Invalid priority value: {}", prio);
                 #[cfg(not(debug_assertions))]
-                Priority::Norm  // Safe fallback in release builds
+                Priority::Norm // Safe fallback in release builds
             }
         }
     }
@@ -187,24 +189,14 @@ impl Packet {
         // Safety: `inner` was obtained from csp_buffer_get which guarantees
         // at least `data_size` bytes follow the fixed header fields.
         // DATA_OFFSET is the deterministic offset of the data union.
-        unsafe {
-            slice::from_raw_parts(
-                (self.inner as *const u8).add(DATA_OFFSET),
-                len,
-            )
-        }
+        unsafe { slice::from_raw_parts((self.inner as *const u8).add(DATA_OFFSET), len) }
     }
 
     /// Mutable view of the **used** payload (`[0..length()]`).
     pub fn data_mut(&mut self) -> &mut [u8] {
         let len = self.length() as usize;
         // Safety: `inner` is valid, and the data buffer is large enough for `len` bytes.
-        unsafe {
-            slice::from_raw_parts_mut(
-                (self.inner as *mut u8).add(DATA_OFFSET),
-                len,
-            )
-        }
+        unsafe { slice::from_raw_parts_mut((self.inner as *mut u8).add(DATA_OFFSET), len) }
     }
 
     /// Mutable view of the **entire** data buffer (capacity = `csp_buffer_data_size()`).
@@ -214,12 +206,7 @@ impl Packet {
         // Safety: libcsp is initialised.
         let cap = unsafe { sys::csp_buffer_data_size() };
         // Safety: `inner` is valid, and the data buffer is exactly `cap` bytes.
-        unsafe {
-            slice::from_raw_parts_mut(
-                (self.inner as *mut u8).add(DATA_OFFSET),
-                cap as usize,
-            )
-        }
+        unsafe { slice::from_raw_parts_mut((self.inner as *mut u8).add(DATA_OFFSET), cap as usize) }
     }
 
     /// Write `bytes` into the payload buffer and set the length field.
@@ -329,7 +316,7 @@ mod tests {
             // These should all be zero after initialization
             assert_eq!(pkt.length(), 0);
             assert_eq!(pkt.id_raw(), 0);
-            assert_eq!(pkt.priority(), crate::Priority::Critical);  // 0 maps to Critical
+            assert_eq!(pkt.priority(), crate::Priority::Critical); // 0 maps to Critical
             assert_eq!(pkt.src_addr(), 0);
             assert_eq!(pkt.dst_addr(), 0);
             assert_eq!(pkt.src_port(), 0);

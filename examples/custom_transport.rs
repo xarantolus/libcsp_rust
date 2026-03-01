@@ -3,7 +3,7 @@
 //! This demonstrates how to bridge a custom hardware driver (e.g., an STM32 CAN
 //! peripheral) into the CSP stack using the `CspInterface` trait.
 
-use libcsp::{CspConfig, Packet, Priority, CspInterface, interface};
+use libcsp::{interface, CspConfig, CspInterface, Packet, Priority};
 
 /// Our custom device implementation.
 struct MyHardware {
@@ -12,12 +12,7 @@ struct MyHardware {
 
 impl CspInterface for MyHardware {
     fn nexthop(&mut self, via: u8, pkt: Packet) {
-        println!(
-            "[{}] TX: {} bytes to via={}",
-            self.name,
-            pkt.length(),
-            via
-        );
+        println!("[{}] TX: {} bytes to via={}", self.name, pkt.length(), via);
         // Packet is dropped and freed here
     }
 
@@ -35,7 +30,9 @@ fn main() {
         .expect("init failed");
 
     // 2. Register the custom interface
-    let my_hw = MyHardware { name: "MY_CAN".to_string() };
+    let my_hw = MyHardware {
+        name: "MY_CAN".to_string(),
+    };
     let handle = interface::register(my_hw);
 
     // 3. Set a route through our interface

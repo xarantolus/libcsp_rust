@@ -1,8 +1,7 @@
 /// Test to validate that CMP IDENT responses contain actual node information
 /// This addresses the user's requirement: "Ensure that the ident response actually contains the name of the node"
-
-use libcsp::{CspConfig, Socket, socket_opts, ports, CspNode};
-use std::sync::{OnceLock, Mutex, mpsc};
+use libcsp::{ports, socket_opts, CspConfig, CspNode, Socket};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 
 static NODE: OnceLock<CspNode> = OnceLock::new();
@@ -13,15 +12,18 @@ fn ensure_init() -> CspNode {
         // Initialize with a specific hostname to validate later
         let node = CspConfig::new()
             .address(1)
-            .hostname("test-satellite")  // Specific hostname for validation
+            .hostname("test-satellite") // Specific hostname for validation
             .buffers(20, 256)
-            .port_max_bind(58)  // Allow binding to ports 0-58, leaving 59-63 for ephemeral ports
+            .port_max_bind(58) // Allow binding to ports 0-58, leaving 59-63 for ephemeral ports
             .init()
             .expect("init failed");
-        node.route_start_task(4096, 0).expect("Failed to start route task");
-        node.route_load("0/0 LOOP").expect("Failed to load loopback route");
+        node.route_start_task(4096, 0)
+            .expect("Failed to start route task");
+        node.route_load("0/0 LOOP")
+            .expect("Failed to load loopback route");
         node
-    }).clone()
+    })
+    .clone()
 }
 
 fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
@@ -61,32 +63,54 @@ fn test_ident_contains_hostname() {
     // Request ident from ourselves (loopback)
     let ident_result = node.ident(1, 1000);
 
-    assert!(ident_result.is_ok(), "Ident request should succeed: {:?}", ident_result.err());
+    assert!(
+        ident_result.is_ok(),
+        "Ident request should succeed: {:?}",
+        ident_result.err()
+    );
 
     let ident = ident_result.expect("Failed to get ident");
 
     // CRITICAL VALIDATION: Verify hostname matches what we configured
-    assert_eq!(ident.hostname, "test-satellite",
-        "Ident hostname should match configured hostname, got: '{}'", ident.hostname);
+    assert_eq!(
+        ident.hostname, "test-satellite",
+        "Ident hostname should match configured hostname, got: '{}'",
+        ident.hostname
+    );
 
     // Verify other fields are populated (not empty)
     // The C library populates these with compile-time information
     assert!(!ident.model.is_empty(), "Ident model should not be empty");
-    assert!(!ident.revision.is_empty(), "Ident revision should not be empty");
+    assert!(
+        !ident.revision.is_empty(),
+        "Ident revision should not be empty"
+    );
     assert!(!ident.date.is_empty(), "Ident date should not be empty");
     assert!(!ident.time.is_empty(), "Ident time should not be empty");
 
     // Verify all fields are valid UTF-8 (String type guarantees this)
     // and check they contain reasonable ASCII content
     assert!(ident.hostname.is_ascii(), "Hostname should be ASCII");
-    assert!(ident.model.chars().all(|c| c.is_ascii()),
-        "Model should be ASCII, got: '{}'", ident.model);
-    assert!(ident.revision.chars().all(|c| c.is_ascii()),
-        "Revision should be ASCII, got: '{}'", ident.revision);
-    assert!(ident.date.chars().all(|c| c.is_ascii()),
-        "Date should be ASCII, got: '{}'", ident.date);
-    assert!(ident.time.chars().all(|c| c.is_ascii()),
-        "Time should be ASCII, got: '{}'", ident.time);
+    assert!(
+        ident.model.chars().all(|c| c.is_ascii()),
+        "Model should be ASCII, got: '{}'",
+        ident.model
+    );
+    assert!(
+        ident.revision.chars().all(|c| c.is_ascii()),
+        "Revision should be ASCII, got: '{}'",
+        ident.revision
+    );
+    assert!(
+        ident.date.chars().all(|c| c.is_ascii()),
+        "Date should be ASCII, got: '{}'",
+        ident.date
+    );
+    assert!(
+        ident.time.chars().all(|c| c.is_ascii()),
+        "Time should be ASCII, got: '{}'",
+        ident.time
+    );
 
     // Log the ident for debugging
     println!("Ident response:");
@@ -113,14 +137,12 @@ fn test_ident_struct_type_safety() {
     // future to test edge cases like non-ASCII UTF-8 if the C library ever supports it.
 
     // Type-level proof: these fields MUST be String (UTF-8 guaranteed)
-    let _: fn() -> libcsp::service::Ident = || {
-        libcsp::service::Ident {
-            hostname: String::new(),
-            model: String::new(),
-            revision: String::new(),
-            date: String::new(),
-            time: String::new(),
-        }
+    let _: fn() -> libcsp::service::Ident = || libcsp::service::Ident {
+        hostname: String::new(),
+        model: String::new(),
+        revision: String::new(),
+        date: String::new(),
+        time: String::new(),
     };
 
     // If this compiles, the Ident struct uses String, proving UTF-8 safety
@@ -133,7 +155,7 @@ fn test_ident_timeout_without_service() {
 
     // Try to get ident without a service handler running
     // Should timeout
-    let result = node.ident(1, 100);  // Short timeout
+    let result = node.ident(1, 100); // Short timeout
 
     assert!(result.is_err(), "Ident without service handler should fail");
 

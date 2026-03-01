@@ -5,12 +5,12 @@
 //! Usage: cargo run --example sniffer [interface_name]
 //! Default interface: vcan0
 
-use libcsp::{CspConfig, Packet, CspInterface, interface, promisc};
-use socketcan::{CanSocket, Socket, EmbeddedFrame, Frame};
+use libcsp::{interface, promisc, CspConfig, CspInterface, Packet};
+use socketcan::{CanSocket, EmbeddedFrame, Frame, Socket};
+use std::collections::HashSet;
+use std::env;
 use std::sync::Arc;
 use std::thread;
-use std::env;
-use std::collections::HashSet;
 
 /// Custom interface that bridges Rust `socketcan` to CSP.
 struct RustCanIface {
@@ -19,7 +19,9 @@ struct RustCanIface {
 }
 
 impl CspInterface for RustCanIface {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
     fn nexthop(&mut self, _via: u8, _pkt: Packet) {}
 }
 
@@ -29,12 +31,13 @@ fn main() -> anyhow::Result<()> {
 
     println!("Starting CSP Sniffer on {}...", iface_name);
 
-    let socket = Arc::new(CanSocket::open(iface_name).map_err(|e| {
-        anyhow::anyhow!("Failed to open {}: {}. Ensure it exists.", iface_name, e)
-    })?);
+    let socket =
+        Arc::new(CanSocket::open(iface_name).map_err(|e| {
+            anyhow::anyhow!("Failed to open {}: {}. Ensure it exists.", iface_name, e)
+        })?);
 
     let node = CspConfig::new()
-        .address(10) 
+        .address(10)
         .buffers(100, 256)
         .init()
         .expect("CSP init failed");
@@ -46,15 +49,13 @@ fn main() -> anyhow::Result<()> {
 
     let rx_handle = handle.clone();
     let rx_socket = Arc::clone(&socket);
-    thread::spawn(move || {
-        loop {
-            if let Ok(frame) = rx_socket.read_frame() {
-                let data = EmbeddedFrame::data(&frame);
-                if let Some(mut pkt) = Packet::get(data.len()) {
-                    pkt.set_id_raw(frame.raw_id());
-                    pkt.write(data).unwrap();
-                    rx_handle.rx(pkt);
-                }
+    thread::spawn(move || loop {
+        if let Ok(frame) = rx_socket.read_frame() {
+            let data = EmbeddedFrame::data(&frame);
+            if let Some(mut pkt) = Packet::get(data.len()) {
+                pkt.set_id_raw(frame.raw_id());
+                pkt.write(data).unwrap();
+                rx_handle.rx(pkt);
             }
         }
     });
@@ -73,7 +74,7 @@ fn main() -> anyhow::Result<()> {
             let sport = pkt.src_port();
             let dport = pkt.dst_port();
             let size = pkt.length();
-            
+
             let prio = match pkt.priority() {
                 libcsp::Priority::Critical => "CRIT",
                 libcsp::Priority::High => "HIGH",
@@ -82,11 +83,21 @@ fn main() -> anyhow::Result<()> {
             };
 
             let mut flags = Vec::new();
-            if pkt.is_rdp()   { flags.push("RDP"); }
-            if pkt.is_xtea()  { flags.push("XTEA"); }
-            if pkt.is_hmac()  { flags.push("HMAC"); }
-            if pkt.is_crc32() { flags.push("CRC"); }
-            if pkt.is_frag()  { flags.push("FRAG"); }
+            if pkt.is_rdp() {
+                flags.push("RDP");
+            }
+            if pkt.is_xtea() {
+                flags.push("XTEA");
+            }
+            if pkt.is_hmac() {
+                flags.push("HMAC");
+            }
+            if pkt.is_crc32() {
+                flags.push("CRC");
+            }
+            if pkt.is_frag() {
+                flags.push("FRAG");
+            }
 
             let mut event = String::new();
             let conn_key = (src, dst, sport, dport);
@@ -105,8 +116,10 @@ fn main() -> anyhow::Result<()> {
             println!(
                 "[{:<4}] | {:>2}:{:0>2} ──▶ {:>2}:{:0>2} | SIZE: {:>4}B | FLAGS: [{:<15}] | {}",
                 prio,
-                src, sport,
-                dst, dport,
+                src,
+                sport,
+                dst,
+                dport,
                 size,
                 flags.join(","),
                 event

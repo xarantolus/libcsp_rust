@@ -3,10 +3,10 @@
 //! This shows how to implement a fully custom transport (TX and RX) using
 //! safe Rust libraries instead of the built-in C drivers.
 
-use libcsp::{CspConfig, Packet, Priority, CspInterface, interface};
-use socketcan::{CanSocket, Socket, CanFrame, EmbeddedFrame, ExtendedId, Id, Frame};
-use std::thread;
+use libcsp::{interface, CspConfig, CspInterface, Packet, Priority};
+use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Frame, Id, Socket};
 use std::sync::Arc;
+use std::thread;
 
 struct RustCanIface {
     name: String,
@@ -21,12 +21,12 @@ impl CspInterface for RustCanIface {
     fn nexthop(&mut self, _via: u8, pkt: Packet) {
         // 1. Convert CSP packet to CAN frame(s)
         let can_id = pkt.id_raw();
-        
+
         let id = Id::Extended(ExtendedId::new(can_id).unwrap());
         if let Some(frame) = CanFrame::new(id, pkt.data()) {
             let _ = self.socket.write_frame(&frame);
         }
-        
+
         // Packet pkt is dropped and freed here automatically.
     }
 }
@@ -51,7 +51,7 @@ fn main() -> anyhow::Result<()> {
         socket: Arc::clone(&socket),
     };
     let handle = interface::register(can_iface);
-    
+
     // 4. Start RX thread
     let rx_handle = handle.clone();
     let rx_socket = Arc::clone(&socket);
@@ -77,7 +77,8 @@ fn main() -> anyhow::Result<()> {
     println!("Sending test packet to node 2...");
 
     // 6. Test TX — send a test packet to node 2 port 10.
-    let conn = node.connect(Priority::Norm, 2, 10, 1000, libcsp::conn_opts::NONE)
+    let conn = node
+        .connect(Priority::Norm, 2, 10, 1000, libcsp::conn_opts::NONE)
         .expect("Connect failed");
     let mut pkt = Packet::get(16).unwrap();
     pkt.write(b"Rust SocketCAN!").unwrap();

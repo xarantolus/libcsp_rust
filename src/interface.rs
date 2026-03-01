@@ -4,12 +4,12 @@
 //! or custom hardware) by implementing the [`CspInterface`] trait.
 
 extern crate alloc;
-use alloc::ffi::CString;
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::ffi::CString;
 use alloc::string::ToString;
-use core::ffi::c_void;
+use alloc::sync::Arc;
 use core::cell::UnsafeCell;
+use core::ffi::c_void;
 
 use crate::sys;
 use crate::Packet;
@@ -66,7 +66,7 @@ unsafe impl Sync for InterfaceState {}
 pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     let name = interface.name().to_string();
     let c_name = CString::new(name).unwrap();
-    
+
     // Safety: Creating a zeroed struct is safe as it's passed to C.
     let mut c_iface: sys::csp_iface_t = unsafe { core::mem::zeroed() };
     c_iface.name = c_name.as_ptr();
@@ -108,10 +108,14 @@ impl InterfaceHandle {
         // libcsp always takes ownership of the raw packet and will free it if needed.
         unsafe {
             let raw = packet.into_raw();
-            sys::csp_qfifo_write(raw, self._inner.c_iface.get() as *mut _, core::ptr::null_mut());
+            sys::csp_qfifo_write(
+                raw,
+                self._inner.c_iface.get() as *mut _,
+                core::ptr::null_mut(),
+            );
         }
     }
-    
+
     /// Get the raw C interface pointer (for use with `sys::csp_rtable_set` etc).
     pub fn c_iface_ptr(&self) -> *mut sys::csp_iface_t {
         self._inner.c_iface.get()
@@ -119,16 +123,19 @@ impl InterfaceHandle {
 }
 
 /// C-compatible shim that forwards the nexthop call to the Rust trait.
-unsafe extern "C" fn nexthop_shim(route: *const sys::csp_route_t, packet: *mut sys::csp_packet_t) -> i32 {
+unsafe extern "C" fn nexthop_shim(
+    route: *const sys::csp_route_t,
+    packet: *mut sys::csp_packet_t,
+) -> i32 {
     // Safety: `route` and `packet` are valid pointers provided by libcsp.
     // `interface_data` is a valid pointer to `InterfaceState`.
     let iface = (*route).iface;
     // Note: (*iface).interface_data was set to `*mut InterfaceState` in register().
     let state_ptr = (*iface).interface_data as *mut InterfaceState;
     let state = &*state_ptr;
-    
+
     let pkt = Packet::from_raw(packet);
     state.user_iface.lock().nexthop((*route).via, pkt);
-    
+
     0 // CSP_ERR_NONE
 }

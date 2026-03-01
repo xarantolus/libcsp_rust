@@ -1,5 +1,5 @@
 use crate::arch::CspArch;
-use core::ffi::{c_void, c_char};
+use core::ffi::{c_char, c_void};
 
 pub struct TestArch;
 
@@ -12,10 +12,15 @@ pub struct TestArch;
 // All pointer operations are validated and follow the platform's ABI.
 unsafe impl CspArch for TestArch {
     fn get_ms(&self) -> u32 {
-        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         // Safety: `ts` is a valid pointer.
         unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-        (ts.tv_sec as u32).wrapping_mul(1000).wrapping_add((ts.tv_nsec / 1_000_000) as u32)
+        (ts.tv_sec as u32)
+            .wrapping_mul(1000)
+            .wrapping_add((ts.tv_nsec / 1_000_000) as u32)
     }
     fn get_s(&self) -> u32 {
         self.get_ms() / 1000
@@ -42,7 +47,10 @@ unsafe impl CspArch for TestArch {
             if timeout == 0xFFFF_FFFF {
                 libc::sem_wait(sem as *mut libc::sem_t) == 0
             } else {
-                let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
                 libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
                 ts.tv_sec += (timeout / 1000) as libc::time_t;
                 ts.tv_nsec += ((timeout % 1000) * 1_000_000) as libc::c_long;
@@ -60,7 +68,8 @@ unsafe impl CspArch for TestArch {
 
     fn mutex_create(&self) -> *mut c_void {
         unsafe {
-            let mutex = libc::malloc(core::mem::size_of::<libc::pthread_mutex_t>()) as *mut libc::pthread_mutex_t;
+            let mutex = libc::malloc(core::mem::size_of::<libc::pthread_mutex_t>())
+                as *mut libc::pthread_mutex_t;
             if libc::pthread_mutex_init(mutex, core::ptr::null()) == 0 {
                 mutex as *mut c_void
             } else {
@@ -86,8 +95,8 @@ unsafe impl CspArch for TestArch {
     fn queue_create(&self, length: usize, item_size: usize) -> *mut c_void {
         // A simple queue implementation for testing using std primitives.
         // In a real system, this would be backed by an RTOS queue.
-        use std::sync::{Mutex, Condvar};
         use std::collections::VecDeque;
+        use std::sync::{Condvar, Mutex};
 
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
@@ -109,8 +118,8 @@ unsafe impl CspArch for TestArch {
 
     fn queue_remove(&self, queue: *mut c_void) {
         if !queue.is_null() {
-            use std::sync::{Mutex, Condvar};
             use std::collections::VecDeque;
+            use std::sync::{Condvar, Mutex};
 
             struct TestQueue {
                 data: Mutex<VecDeque<Vec<u8>>>,
@@ -128,8 +137,8 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_enqueue(&self, queue: *mut c_void, item: *const c_void, timeout: u32) -> bool {
-        use std::sync::{Mutex, Condvar};
         use std::collections::VecDeque;
+        use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
 
         struct TestQueue {
@@ -165,7 +174,8 @@ unsafe impl CspArch for TestArch {
                         return false;
                     }
                     let timeout_remaining = deadline - now;
-                    let (new_data, timeout_result) = q.not_full.wait_timeout(data, timeout_remaining).unwrap();
+                    let (new_data, timeout_result) =
+                        q.not_full.wait_timeout(data, timeout_remaining).unwrap();
                     data = new_data;
                     if timeout_result.timed_out() {
                         return false;
@@ -186,8 +196,8 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_dequeue(&self, queue: *mut c_void, item: *mut c_void, timeout: u32) -> bool {
-        use std::sync::{Mutex, Condvar};
         use std::collections::VecDeque;
+        use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
 
         struct TestQueue {
@@ -221,7 +231,8 @@ unsafe impl CspArch for TestArch {
                         return false;
                     }
                     let timeout_remaining = deadline - now;
-                    let (new_data, timeout_result) = q.not_empty.wait_timeout(data, timeout_remaining).unwrap();
+                    let (new_data, timeout_result) =
+                        q.not_empty.wait_timeout(data, timeout_remaining).unwrap();
                     data = new_data;
                     if timeout_result.timed_out() {
                         return false;
@@ -248,8 +259,8 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_size(&self, queue: *mut c_void) -> usize {
-        use std::sync::{Mutex, Condvar};
         use std::collections::VecDeque;
+        use std::sync::{Condvar, Mutex};
 
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
@@ -270,24 +281,45 @@ unsafe impl CspArch for TestArch {
         }
     }
 
-    fn malloc(&self, size: usize) -> *mut c_void { unsafe { libc::malloc(size) } }
-    fn free(&self, ptr: *mut c_void) { unsafe { libc::free(ptr) } }
-    
-    fn memfree(&self) -> u32 { 0 }
-    fn reboot(&self) -> i32 { 0 }
-    fn shutdown(&self) -> i32 { 0 }
+    fn malloc(&self, size: usize) -> *mut c_void {
+        unsafe { libc::malloc(size) }
+    }
+    fn free(&self, ptr: *mut c_void) {
+        unsafe { libc::free(ptr) }
+    }
+
+    fn memfree(&self) -> u32 {
+        0
+    }
+    fn reboot(&self) -> i32 {
+        0
+    }
+    fn shutdown(&self) -> i32 {
+        0
+    }
     fn clock_get_time(&self, _time: *mut c_void) {}
     fn clock_set_time(&self, _time: *mut c_void) {}
-    fn sys_tasklist_size(&self) -> i32 { 0 }
+    fn sys_tasklist_size(&self) -> i32 {
+        0
+    }
     fn sys_tasklist(&self, _out: *mut c_char) {}
     fn sys_set_color(&self, _color: crate::sys::csp_color_t) {}
-    fn thread_create(&self, f: unsafe extern "C" fn(*mut c_void), _name: *const c_char, _stack: u32, arg: *mut c_void, _prio: u32, handle: *mut *mut c_void) -> i32 {
+    fn thread_create(
+        &self,
+        f: unsafe extern "C" fn(*mut c_void),
+        _name: *const c_char,
+        _stack: u32,
+        arg: *mut c_void,
+        _prio: u32,
+        handle: *mut *mut c_void,
+    ) -> i32 {
         // pthread_create expects extern "C" fn (safe), but CSP gives us unsafe extern "C" fn
         // We need to create a wrapper since we can't cast directly
-        use std::sync::Mutex;
         use std::collections::HashMap;
+        use std::sync::Mutex;
 
-        static THREAD_FN_MAP: Mutex<Option<HashMap<usize, unsafe extern "C" fn(*mut c_void)>>> = Mutex::new(None);
+        static THREAD_FN_MAP: Mutex<Option<HashMap<usize, unsafe extern "C" fn(*mut c_void)>>> =
+            Mutex::new(None);
 
         extern "C" fn thread_wrapper(arg: *mut c_void) -> *mut c_void {
             let fn_ptr = arg as usize;
@@ -311,7 +343,12 @@ unsafe impl CspArch for TestArch {
             drop(map_lock);
 
             let mut thread: libc::pthread_t = core::mem::zeroed();
-            let ret = libc::pthread_create(&mut thread, core::ptr::null(), thread_wrapper, fn_id as *mut c_void);
+            let ret = libc::pthread_create(
+                &mut thread,
+                core::ptr::null(),
+                thread_wrapper,
+                fn_id as *mut c_void,
+            );
             if ret == 0 {
                 if !handle.is_null() {
                     *handle = thread as *mut c_void;
@@ -332,7 +369,9 @@ unsafe impl CspArch for TestArch {
             libc::nanosleep(&ts, core::ptr::null_mut());
         }
     }
-    fn get_ms_isr(&self) -> u32 { self.get_ms() }
+    fn get_ms_isr(&self) -> u32 {
+        self.get_ms()
+    }
 }
 
 pub static ARCH: TestArch = TestArch;

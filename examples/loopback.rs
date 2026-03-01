@@ -5,7 +5,7 @@
 //!
 //! Run with: cargo run --example loopback
 
-use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, conn_opts};
+use libcsp::{conn_opts, socket_opts, CspConfig, Packet, Priority, Socket};
 use std::thread;
 use std::time::Duration;
 
@@ -22,7 +22,8 @@ fn main() {
     node.route_start_task(4096, 0).expect("router task failed");
 
     // 3. Route all traffic through the loopback interface.
-    node.route_load("0/0 LOOP").expect("failed to load loopback route");
+    node.route_load("0/0 LOOP")
+        .expect("failed to load loopback route");
 
     // Verify iteration works
     let mut found_loop = false;

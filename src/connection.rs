@@ -65,8 +65,8 @@ impl Connection {
         timeout: u32,
     ) -> core::result::Result<(), (CspError, Packet)> {
         let raw = packet.into_raw(); // Rust forgets ownership
-        // Safety: `raw` is a valid packet obtained from `Packet::get`.
-        // CSP takes ownership of the buffer if it returns 1.
+                                     // Safety: `raw` is a valid packet obtained from `Packet::get`.
+                                     // CSP takes ownership of the buffer if it returns 1.
         let ret = unsafe { sys::csp_send(self.inner, raw, timeout) };
         if ret == 1 {
             // CSP owns `raw` now — do NOT reconstruct a Packet from it.
@@ -96,8 +96,7 @@ impl Connection {
     /// by the caller and will be freed when dropped.
     pub fn read(&self, timeout: u32) -> Option<Packet> {
         // Safety: `inner` is a valid connection pointer.
-        let ptr =
-            unsafe { sys::csp_read(self.inner, timeout) };
+        let ptr = unsafe { sys::csp_read(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {
@@ -198,7 +197,11 @@ impl Connection {
     /// Data is chopped into chunks of at most `mtu` bytes.
     pub fn sfp_send(&self, data: &[u8], mtu: u32, timeout: u32) -> Result<()> {
         extern "C" {
-            fn memcpy(dest: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
+            fn memcpy(
+                dest: *mut core::ffi::c_void,
+                src: *const core::ffi::c_void,
+                n: usize,
+            ) -> *mut core::ffi::c_void;
         }
         // Safety: `inner` is a valid connection pointer. `data` is a valid slice.
         let ret = unsafe {
@@ -238,7 +241,8 @@ impl Connection {
 
         if ret == (sys::CSP_ERR_NONE as i32) && !data_ptr.is_null() {
             // Safety: `data_ptr` was allocated by libcsp and `data_size` is valid.
-            let slice = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, data_size as usize) };
+            let slice =
+                unsafe { core::slice::from_raw_parts(data_ptr as *const u8, data_size as usize) };
             let vec = slice.to_vec();
             // Safety: The buffer must be freed using `sys::csp_free`.
             unsafe { sys::csp_free(data_ptr) };
@@ -286,7 +290,7 @@ impl fmt::Debug for Connection {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Packet, Priority, test_helpers::with_csp_node};
+    use crate::{test_helpers::with_csp_node, Packet, Priority};
 
     #[test]
     fn test_connection_send_to_nowhere() {
@@ -294,7 +298,9 @@ mod tests {
             // Trying to connect to a node that isn't there (and we don't have a route for except LOOP)
             // If we connect to address 1 port 10 (loopback), we can test send.
             let node_addr = 1;
-            let conn = node.connect(Priority::Norm, node_addr, 10, 100, 0).expect("Connect failed");
+            let conn = node
+                .connect(Priority::Norm, node_addr, 10, 100, 0)
+                .expect("Connect failed");
 
             let mut pkt = Packet::get(16).unwrap();
             pkt.write(b"hello").unwrap();
@@ -313,7 +319,8 @@ mod tests {
             let port = 10;
 
             // Connect to ourselves
-            let conn = node.connect(Priority::Norm, my_addr, port, 100, 0)
+            let conn = node
+                .connect(Priority::Norm, my_addr, port, 100, 0)
                 .expect("Failed to connect to loopback");
 
             // Send a packet
@@ -334,11 +341,12 @@ mod tests {
     #[test]
     fn test_connection_metadata() {
         with_csp_node(|node| {
-            let my_addr = 1;  // Our own address (loopback)
+            let my_addr = 1; // Our own address (loopback)
             let dst_port = 15;
 
             // Connect to ourselves via loopback
-            let conn = node.connect(Priority::High, my_addr, dst_port, 100, 0)
+            let conn = node
+                .connect(Priority::High, my_addr, dst_port, 100, 0)
                 .expect("Failed to connect");
 
             // Verify we can read connection metadata (exact values depend on CSP's internal routing)
@@ -348,9 +356,9 @@ mod tests {
             let _src_port = conn.src_port();
 
             // Just verify these methods don't panic and return values in valid ranges
-            assert!(conn.dst_addr() <= 31);  // 5-bit address
+            assert!(conn.dst_addr() <= 31); // 5-bit address
             assert!(conn.src_addr() <= 31);
-            assert!(conn.dst_port() <= 63);  // 6-bit port
+            assert!(conn.dst_port() <= 63); // 6-bit port
             assert!(conn.src_port() <= 63);
         });
     }

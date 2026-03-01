@@ -19,9 +19,9 @@
 //! Run with: cargo run --example custom_arch
 
 extern crate alloc;
+use core::ffi::c_void;
 use libcsp::arch::CspArch;
 use libcsp::export_arch;
-use core::ffi::c_void;
 
 /// Minimal architecture shim backed by no-ops.
 ///
@@ -33,34 +33,60 @@ struct MyCustomArch;
 unsafe impl CspArch for MyCustomArch {
     // ── Time ─────────────────────────────────────────────────────────────
     // CSP uses these for RDP timeouts and debug timestamps.
-    fn get_ms(&self) -> u32 { 0 /* replace with e.g. embassy_time::Instant::now().as_millis() as u32 */ }
-    fn get_s(&self)  -> u32 { 0 }
+    fn get_ms(&self) -> u32 {
+        0 /* replace with e.g. embassy_time::Instant::now().as_millis() as u32 */
+    }
+    fn get_s(&self) -> u32 {
+        0
+    }
 
     // ── Binary semaphores ─────────────────────────────────────────────────
     // Used to synchronise the router and protocol state machines.
-    fn bin_sem_create(&self) -> *mut c_void { core::ptr::null_mut() }
-    fn bin_sem_remove(&self, _sem: *mut c_void) { }
-    fn bin_sem_wait(&self, _sem: *mut c_void, _timeout_ms: u32) -> bool { true }
-    fn bin_sem_post(&self, _sem: *mut c_void) -> bool { true }
+    fn bin_sem_create(&self) -> *mut c_void {
+        core::ptr::null_mut()
+    }
+    fn bin_sem_remove(&self, _sem: *mut c_void) {}
+    fn bin_sem_wait(&self, _sem: *mut c_void, _timeout_ms: u32) -> bool {
+        true
+    }
+    fn bin_sem_post(&self, _sem: *mut c_void) -> bool {
+        true
+    }
 
     // ── Mutexes ───────────────────────────────────────────────────────────
-    fn mutex_create(&self) -> *mut c_void { core::ptr::null_mut() }
-    fn mutex_remove(&self, _mutex: *mut c_void) { }
-    fn mutex_lock(&self, _mutex: *mut c_void, _timeout_ms: u32) -> bool { true }
-    fn mutex_unlock(&self, _mutex: *mut c_void) -> bool { true }
+    fn mutex_create(&self) -> *mut c_void {
+        core::ptr::null_mut()
+    }
+    fn mutex_remove(&self, _mutex: *mut c_void) {}
+    fn mutex_lock(&self, _mutex: *mut c_void, _timeout_ms: u32) -> bool {
+        true
+    }
+    fn mutex_unlock(&self, _mutex: *mut c_void) -> bool {
+        true
+    }
 
     // ── Queues ────────────────────────────────────────────────────────────
     // CSP's router FIFO and per-connection RX queues are backed by these.
-    fn queue_create(&self, _length: usize, _item_size: usize) -> *mut c_void { core::ptr::null_mut() }
-    fn queue_remove(&self, _queue: *mut c_void) { }
-    fn queue_enqueue(&self, _queue: *mut c_void, _item: *const c_void, _timeout_ms: u32) -> bool { true }
-    fn queue_dequeue(&self, _queue: *mut c_void, _item: *mut c_void, _timeout_ms: u32) -> bool { true }
-    fn queue_size(&self, _queue: *mut c_void) -> usize { 0 }
+    fn queue_create(&self, _length: usize, _item_size: usize) -> *mut c_void {
+        core::ptr::null_mut()
+    }
+    fn queue_remove(&self, _queue: *mut c_void) {}
+    fn queue_enqueue(&self, _queue: *mut c_void, _item: *const c_void, _timeout_ms: u32) -> bool {
+        true
+    }
+    fn queue_dequeue(&self, _queue: *mut c_void, _item: *mut c_void, _timeout_ms: u32) -> bool {
+        true
+    }
+    fn queue_size(&self, _queue: *mut c_void) -> usize {
+        0
+    }
 
     // ── Memory ──────────────────────────────────────────────────────────────
     // libcsp uses these for connection and packet-pool bookkeeping.
-    fn malloc(&self, _size: usize) -> *mut c_void { core::ptr::null_mut() }
-    fn free(&self, _ptr: *mut c_void) { }
+    fn malloc(&self, _size: usize) -> *mut c_void {
+        core::ptr::null_mut()
+    }
+    fn free(&self, _ptr: *mut c_void) {}
 }
 
 // A single static instance is sufficient — the trait takes &self.

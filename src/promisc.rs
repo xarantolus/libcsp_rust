@@ -4,7 +4,7 @@
 //! and places them in a dedicated queue for monitoring and sniffing.
 
 use crate::sys;
-use crate::{Packet, error::csp_result};
+use crate::{error::csp_result, Packet};
 
 /// An active promiscuous mode handle.
 ///

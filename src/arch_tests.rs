@@ -12,22 +12,58 @@ mod tests {
     // Test helper struct
     struct TestArch;
     unsafe impl CspArch for TestArch {
-        fn get_ms(&self) -> u32 { 0 }
-        fn get_s(&self) -> u32 { 0 }
-        fn bin_sem_create(&self) -> *mut core::ffi::c_void { ptr::null_mut() }
+        fn get_ms(&self) -> u32 {
+            0
+        }
+        fn get_s(&self) -> u32 {
+            0
+        }
+        fn bin_sem_create(&self) -> *mut core::ffi::c_void {
+            ptr::null_mut()
+        }
         fn bin_sem_remove(&self, _: *mut core::ffi::c_void) {}
-        fn bin_sem_wait(&self, _: *mut core::ffi::c_void, _: u32) -> bool { true }
-        fn bin_sem_post(&self, _: *mut core::ffi::c_void) -> bool { true }
-        fn mutex_create(&self) -> *mut core::ffi::c_void { ptr::null_mut() }
+        fn bin_sem_wait(&self, _: *mut core::ffi::c_void, _: u32) -> bool {
+            true
+        }
+        fn bin_sem_post(&self, _: *mut core::ffi::c_void) -> bool {
+            true
+        }
+        fn mutex_create(&self) -> *mut core::ffi::c_void {
+            ptr::null_mut()
+        }
         fn mutex_remove(&self, _: *mut core::ffi::c_void) {}
-        fn mutex_lock(&self, _: *mut core::ffi::c_void, _: u32) -> bool { true }
-        fn mutex_unlock(&self, _: *mut core::ffi::c_void) -> bool { true }
-        fn queue_create(&self, _: usize, _: usize) -> *mut core::ffi::c_void { ptr::null_mut() }
+        fn mutex_lock(&self, _: *mut core::ffi::c_void, _: u32) -> bool {
+            true
+        }
+        fn mutex_unlock(&self, _: *mut core::ffi::c_void) -> bool {
+            true
+        }
+        fn queue_create(&self, _: usize, _: usize) -> *mut core::ffi::c_void {
+            ptr::null_mut()
+        }
         fn queue_remove(&self, _: *mut core::ffi::c_void) {}
-        fn queue_enqueue(&self, _: *mut core::ffi::c_void, _: *const core::ffi::c_void, _: u32) -> bool { true }
-        fn queue_dequeue(&self, _: *mut core::ffi::c_void, _: *mut core::ffi::c_void, _: u32) -> bool { true }
-        fn queue_size(&self, _: *mut core::ffi::c_void) -> usize { 0 }
-        fn malloc(&self, _: usize) -> *mut core::ffi::c_void { ptr::null_mut() }
+        fn queue_enqueue(
+            &self,
+            _: *mut core::ffi::c_void,
+            _: *const core::ffi::c_void,
+            _: u32,
+        ) -> bool {
+            true
+        }
+        fn queue_dequeue(
+            &self,
+            _: *mut core::ffi::c_void,
+            _: *mut core::ffi::c_void,
+            _: u32,
+        ) -> bool {
+            true
+        }
+        fn queue_size(&self, _: *mut core::ffi::c_void) -> usize {
+            0
+        }
+        fn malloc(&self, _: usize) -> *mut core::ffi::c_void {
+            ptr::null_mut()
+        }
         fn free(&self, _: *mut core::ffi::c_void) {}
     }
 
@@ -133,7 +169,11 @@ mod tests {
         );
 
         let token2 = unsafe {
-            ARCH.strtok_r(ptr::null_mut(), delim.as_ptr() as *const c_char, &mut saveptr)
+            ARCH.strtok_r(
+                ptr::null_mut(),
+                delim.as_ptr() as *const c_char,
+                &mut saveptr,
+            )
         };
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),
@@ -141,7 +181,11 @@ mod tests {
         );
 
         let token3 = unsafe {
-            ARCH.strtok_r(ptr::null_mut(), delim.as_ptr() as *const c_char, &mut saveptr)
+            ARCH.strtok_r(
+                ptr::null_mut(),
+                delim.as_ptr() as *const c_char,
+                &mut saveptr,
+            )
         };
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token3) }.to_bytes(),
@@ -187,7 +231,11 @@ mod tests {
         );
 
         let token2 = unsafe {
-            ARCH.strtok_r(ptr::null_mut(), delim.as_ptr() as *const c_char, &mut saveptr)
+            ARCH.strtok_r(
+                ptr::null_mut(),
+                delim.as_ptr() as *const c_char,
+                &mut saveptr,
+            )
         };
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),
@@ -195,7 +243,11 @@ mod tests {
         );
 
         let token3 = unsafe {
-            ARCH.strtok_r(ptr::null_mut(), delim.as_ptr() as *const c_char, &mut saveptr)
+            ARCH.strtok_r(
+                ptr::null_mut(),
+                delim.as_ptr() as *const c_char,
+                &mut saveptr,
+            )
         };
         assert!(token3.is_null());
     }
@@ -252,7 +304,11 @@ mod tests {
         );
 
         let token2 = unsafe {
-            ARCH.strtok_r(ptr::null_mut(), delim.as_ptr() as *const c_char, &mut saveptr)
+            ARCH.strtok_r(
+                ptr::null_mut(),
+                delim.as_ptr() as *const c_char,
+                &mut saveptr,
+            )
         };
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),

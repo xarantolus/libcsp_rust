@@ -29,8 +29,8 @@ version 2.1 of the License, or (at your option) any later version.
 //! });
 //! ```
 
-use core::ffi::{c_char, c_uint, CStr};
 use crate::sys;
+use core::ffi::{c_char, c_uint, CStr};
 
 /// CSP debug/log levels.
 ///
@@ -83,9 +83,7 @@ pub fn set_debug_level(level: DebugLevel, enabled: bool) {
 /// This is only available when the `debug` feature is enabled.
 #[cfg(feature = "debug")]
 pub fn get_debug_level(level: DebugLevel) -> bool {
-    unsafe {
-        sys::csp_debug_get_level(level as u32) != 0
-    }
+    unsafe { sys::csp_debug_get_level(level as u32) != 0 }
 }
 
 /// Toggle a debug level (enable if disabled, disable if enabled).
@@ -282,7 +280,10 @@ mod tests {
         assert_eq!(DebugLevel::Info as u32, sys::csp_debug_level_t_CSP_INFO);
         assert_eq!(DebugLevel::Buffer as u32, sys::csp_debug_level_t_CSP_BUFFER);
         assert_eq!(DebugLevel::Packet as u32, sys::csp_debug_level_t_CSP_PACKET);
-        assert_eq!(DebugLevel::Protocol as u32, sys::csp_debug_level_t_CSP_PROTOCOL);
+        assert_eq!(
+            DebugLevel::Protocol as u32,
+            sys::csp_debug_level_t_CSP_PROTOCOL
+        );
         assert_eq!(DebugLevel::Lock as u32, sys::csp_debug_level_t_CSP_LOCK);
     }
 

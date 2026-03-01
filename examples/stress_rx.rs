@@ -3,17 +3,20 @@
 //! Run with: cargo run --example stress_rx --features socketcan -- vcan0
 
 mod stress;
-use stress::{Prng, PRNG_SEED, DATA_PORT, SFP_PORT};
+use stress::{Prng, DATA_PORT, PRNG_SEED, SFP_PORT};
 
-use libcsp::{CspConfig, Socket, socket_opts};
-use std::time::{Instant, Duration};
+use libcsp::{socket_opts, CspConfig, Socket};
 use std::thread;
+use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let iface_name = args.next().unwrap_or_else(|| "vcan0".to_string());
 
-    println!("[RX] Starting CSP Stress Test RECEIVER on {}...", iface_name);
+    println!(
+        "[RX] Starting CSP Stress Test RECEIVER on {}...",
+        iface_name
+    );
 
     let node = CspConfig::new()
         .address(2)
@@ -40,7 +43,10 @@ fn main() -> anyhow::Result<()> {
     let mut bytes_recv = 0u64;
     let mut errors = 0u64;
 
-    println!("[RX] Ready to receive on ports {} (DATA) and {} (SFP)...", DATA_PORT, SFP_PORT);
+    println!(
+        "[RX] Ready to receive on ports {} (DATA) and {} (SFP)...",
+        DATA_PORT, SFP_PORT
+    );
 
     loop {
         // ── Data port (Normal / RDP) ──────────────────────────────────────
@@ -72,16 +78,23 @@ fn main() -> anyhow::Result<()> {
                 packet_prng.fill(&mut expected[8..]);
 
                 if data != expected {
-                    eprintln!("[RX] DATA ERROR from {}:{} at count {}! Got {} bytes",
-                        src_addr, src_port, pkt_count, data.len());
+                    eprintln!(
+                        "[RX] DATA ERROR from {}:{} at count {}! Got {} bytes",
+                        src_addr,
+                        src_port,
+                        pkt_count,
+                        data.len()
+                    );
                     errors += 1;
                 }
                 bytes_recv += data.len() as u64;
                 count += 1;
 
                 if count % 100 == 0 {
-                    println!("[RX] Received 100 packets (latest count={}, from {}:{})",
-                        pkt_count, src_addr, src_port);
+                    println!(
+                        "[RX] Received 100 packets (latest count={}, from {}:{})",
+                        pkt_count, src_addr, src_port
+                    );
                 }
             }
 
@@ -125,13 +138,22 @@ fn main() -> anyhow::Result<()> {
                         blob_prng.fill(&mut expected[8..]);
 
                         if data != expected {
-                            eprintln!("[RX] SFP DATA ERROR from {} at count {}! Got {} bytes",
-                                src_addr, pkt_count, data.len());
+                            eprintln!(
+                                "[RX] SFP DATA ERROR from {} at count {}! Got {} bytes",
+                                src_addr,
+                                pkt_count,
+                                data.len()
+                            );
                             errors += 1;
                         }
                         bytes_recv += data.len() as u64;
                         count += 1;
-                        println!("[RX] SFP blob {}: {} bytes from {}", pkt_count, data.len(), src_addr);
+                        println!(
+                            "[RX] SFP blob {}: {} bytes from {}",
+                            pkt_count,
+                            data.len(),
+                            src_addr
+                        );
                     }
                     Err(_) => {
                         // Timeout with no new blob — TX has either paused or
@@ -146,7 +168,6 @@ fn main() -> anyhow::Result<()> {
                 println!("[RX] SFP/RDP session closed from {}", src_addr);
             }
         }
-
         // ── Idle sleep ────────────────────────────────────────────────────
         //
         // Both accept(0) calls returned None — nothing arrived on either
@@ -163,7 +184,8 @@ fn main() -> anyhow::Result<()> {
 
         if last_log.elapsed() >= Duration::from_secs(5) {
             let elapsed = start_time.elapsed().as_secs_f64();
-            println!("[Stats] Recv {} MB total, Errors: {}, Avg Rate: {:.2} KB/s",
+            println!(
+                "[Stats] Recv {} MB total, Errors: {}, Avg Rate: {:.2} KB/s",
                 bytes_recv / 1024 / 1024,
                 errors,
                 (bytes_recv as f64 / 1024.0) / elapsed

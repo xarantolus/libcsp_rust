@@ -13,7 +13,9 @@ pub struct Prng {
 
 impl Prng {
     pub fn new(seed: u32) -> Self {
-        Self { state: if seed == 0 { 1 } else { seed } }
+        Self {
+            state: if seed == 0 { 1 } else { seed },
+        }
     }
 
     pub fn next(&mut self) -> u32 {

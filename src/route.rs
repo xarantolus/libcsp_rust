@@ -31,9 +31,9 @@ version 2.1 of the License, or (at your option) any later version.
 extern crate alloc;
 
 use alloc::ffi::CString;
-use alloc::vec::Vec;
 #[allow(unused_imports)]
-use alloc::vec; // bring vec! macro into scope for no_std
+use alloc::vec;
+use alloc::vec::Vec; // bring vec! macro into scope for no_std
 
 use crate::error::csp_result;
 use crate::sys;
@@ -130,9 +130,7 @@ pub fn save(buf_size: usize) -> Result<alloc::string::String> {
     let mut buf: Vec<u8> = vec![0u8; buf_size];
 
     // Safety: `buf` is a valid vector. `sys::csp_rtable_save` is thread-safe.
-    let ret = unsafe {
-        sys::csp_rtable_save(buf.as_mut_ptr() as *mut core::ffi::c_char, buf_size)
-    };
+    let ret = unsafe { sys::csp_rtable_save(buf.as_mut_ptr() as *mut core::ffi::c_char, buf_size) };
     csp_result(ret)?;
 
     // Find the NUL terminator and truncate.
@@ -231,7 +229,10 @@ where
     let mut f_ref = f;
     // Safety: `sys::csp_rtable_iterate` is thread-safe.
     unsafe {
-        sys::csp_rtable_iterate(Some(shim::<F>), &mut f_ref as *mut F as *mut core::ffi::c_void);
+        sys::csp_rtable_iterate(
+            Some(shim::<F>),
+            &mut f_ref as *mut F as *mut core::ffi::c_void,
+        );
     }
 }
 
@@ -239,7 +240,14 @@ impl core::fmt::Debug for RouteEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let via = self.via();
         f.debug_struct("RouteEntry")
-            .field("via", &if via == NO_VIA { "DIRECT".into() } else { alloc::format!("{via}") })
+            .field(
+                "via",
+                &if via == NO_VIA {
+                    "DIRECT".into()
+                } else {
+                    alloc::format!("{via}")
+                },
+            )
             .finish()
     }
 }

@@ -113,16 +113,16 @@ extern crate alloc;
 /// for advanced use cases (e.g. custom interfaces, direct `csp_rtable_*` calls).
 pub mod sys;
 
+pub mod arch;
+mod connection;
 mod error;
 mod init;
-mod packet;
-mod connection;
-mod socket;
-pub mod route;
-pub mod promisc;
 pub mod interface;
+mod packet;
+pub mod promisc;
+pub mod route;
 pub mod service;
-pub mod arch;
+mod socket;
 
 #[cfg(feature = "debug")]
 pub mod debug;
@@ -131,22 +131,25 @@ pub mod debug;
 // architecture-specific implementation. To allow standard host tests and
 // examples to run with this feature enabled (e.g. via --all-features),
 // we provide a default stub implementation for host platforms.
-#[cfg(all(feature = "external-arch", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(all(
+    feature = "external-arch",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 mod arch_default_export {
-    use crate::arch::test_arch::{ARCH, TestArch};
+    use crate::arch::test_arch::{TestArch, ARCH};
     crate::export_arch!(TestArch, ARCH);
 }
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
+pub use arch::CspArch;
+pub use connection::Connection;
 pub use error::CspError;
 pub use init::{CspConfig, CspNode};
-pub use packet::Packet;
-pub use connection::Connection;
-pub use socket::Socket;
 pub use interface::{CspInterface, InterfaceHandle};
-pub use service::{Ident, IfStats, Dispatcher};
-pub use arch::CspArch;
+pub use packet::Packet;
+pub use service::{Dispatcher, Ident, IfStats};
+pub use socket::Socket;
 
 #[macro_use]
 pub mod arch_macro {
@@ -167,11 +170,11 @@ pub enum Priority {
     /// Critical priority (0 — highest).
     Critical = 0,
     /// High priority (1).
-    High     = 1,
+    High = 1,
     /// Normal priority (2 — default).
-    Norm     = 2,
+    Norm = 2,
     /// Low priority (3 — lowest).
-    Low      = 3,
+    Low = 3,
 }
 
 // ── Socket / connection option constants ──────────────────────────────────────
@@ -182,25 +185,25 @@ pub enum Priority {
 /// combined with `|`.
 pub mod socket_opts {
     /// No options.
-    pub const NONE: u32           = 0x0000;
+    pub const NONE: u32 = 0x0000;
     /// Require RDP.
-    pub const RDP_REQ: u32        = 0x0001;
+    pub const RDP_REQ: u32 = 0x0001;
     /// Prohibit RDP.
-    pub const RDP_PROHIB: u32     = 0x0002;
+    pub const RDP_PROHIB: u32 = 0x0002;
     /// Require HMAC.
-    pub const HMAC_REQ: u32       = 0x0004;
+    pub const HMAC_REQ: u32 = 0x0004;
     /// Prohibit HMAC.
-    pub const HMAC_PROHIB: u32    = 0x0008;
+    pub const HMAC_PROHIB: u32 = 0x0008;
     /// Require XTEA.
-    pub const XTEA_REQ: u32       = 0x0010;
+    pub const XTEA_REQ: u32 = 0x0010;
     /// Prohibit XTEA.
-    pub const XTEA_PROHIB: u32    = 0x0020;
+    pub const XTEA_PROHIB: u32 = 0x0020;
     /// Require CRC32.
-    pub const CRC32_REQ: u32      = 0x0040;
+    pub const CRC32_REQ: u32 = 0x0040;
     /// Prohibit CRC32.
-    pub const CRC32_PROHIB: u32   = 0x0080;
+    pub const CRC32_PROHIB: u32 = 0x0080;
     /// Enable connection-less mode.
-    pub const CONN_LESS: u32      = 0x0100;
+    pub const CONN_LESS: u32 = 0x0100;
 }
 
 /// Connection options aliases (`CSP_O_*`).
@@ -209,10 +212,8 @@ pub mod socket_opts {
 /// for clarity at call sites.
 pub mod conn_opts {
     pub use super::socket_opts::{
-        NONE, RDP_REQ as RDP, RDP_PROHIB as NORDP,
-        HMAC_REQ as HMAC, HMAC_PROHIB as NOHMAC,
-        XTEA_REQ as XTEA, XTEA_PROHIB as NOXTEA,
-        CRC32_REQ as CRC32, CRC32_PROHIB as NOCRC32,
+        CRC32_PROHIB as NOCRC32, CRC32_REQ as CRC32, HMAC_PROHIB as NOHMAC, HMAC_REQ as HMAC, NONE,
+        RDP_PROHIB as NORDP, RDP_REQ as RDP, XTEA_PROHIB as NOXTEA, XTEA_REQ as XTEA,
     };
 }
 
@@ -295,19 +296,19 @@ impl Port {
 /// Reserved CSP service port numbers (`csp_service_port_t`).
 pub mod ports {
     /// CSP Management Protocol.
-    pub const CMP:     u8 = 0;
+    pub const CMP: u8 = 0;
     /// Ping / echo.
-    pub const PING:    u8 = 1;
+    pub const PING: u8 = 1;
     /// Process list.
-    pub const PS:      u8 = 2;
+    pub const PS: u8 = 2;
     /// Free memory query.
     pub const MEMFREE: u8 = 3;
     /// Reboot / shutdown.
-    pub const REBOOT:  u8 = 4;
+    pub const REBOOT: u8 = 4;
     /// Free buffer count.
     pub const BUF_FREE: u8 = 5;
     /// Uptime query.
-    pub const UPTIME:  u8 = 6;
+    pub const UPTIME: u8 = 6;
 }
 
 #[cfg(test)]
@@ -332,8 +333,8 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use std::sync::Mutex;
     use crate::CspConfig;
+    use std::sync::Mutex;
 
     /// Global test lock to serialize CSP initialization across all tests.
     /// Since libcsp only allows one node at a time, tests must run sequentially.

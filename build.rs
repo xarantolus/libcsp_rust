@@ -110,8 +110,8 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     // OS defines
     let os_define = match target_os.as_str() {
         "windows" => "#define CSP_WINDOWS 1\n#define CSP_POSIX  0\n#define CSP_MACOSX 0",
-        "macos"   => "#define CSP_MACOSX 1\n#define CSP_POSIX  0\n#define CSP_WINDOWS 0",
-        _         => "#define CSP_POSIX  1\n#define CSP_WINDOWS 0\n#define CSP_MACOSX 0",
+        "macos" => "#define CSP_MACOSX 1\n#define CSP_POSIX  0\n#define CSP_WINDOWS 0",
+        _ => "#define CSP_POSIX  1\n#define CSP_WINDOWS 0\n#define CSP_MACOSX 0",
     };
 
     // Endianness
@@ -123,18 +123,22 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
 
     // Feature flags — controlled by Cargo features
     let feat = |env: &str| -> &'static str {
-        if env::var(env).is_ok() { "1" } else { "0" }
+        if env::var(env).is_ok() {
+            "1"
+        } else {
+            "0"
+        }
     };
-    let use_rdp        = feat("CARGO_FEATURE_RDP");
-    let use_rdp_fc     = feat("CARGO_FEATURE_RDP_FAST_CLOSE");
-    let use_crc32      = feat("CARGO_FEATURE_CRC32");
-    let use_hmac       = feat("CARGO_FEATURE_HMAC");
-    let use_xtea       = feat("CARGO_FEATURE_XTEA");
-    let use_qos        = feat("CARGO_FEATURE_QOS");
-    let use_promisc    = feat("CARGO_FEATURE_PROMISC");
-    let use_dedup      = feat("CARGO_FEATURE_DEDUP");
-    let debug          = feat("CARGO_FEATURE_DEBUG");
-    let debug_ts       = feat("CARGO_FEATURE_DEBUG_TIMESTAMP");
+    let use_rdp = feat("CARGO_FEATURE_RDP");
+    let use_rdp_fc = feat("CARGO_FEATURE_RDP_FAST_CLOSE");
+    let use_crc32 = feat("CARGO_FEATURE_CRC32");
+    let use_hmac = feat("CARGO_FEATURE_HMAC");
+    let use_xtea = feat("CARGO_FEATURE_XTEA");
+    let use_qos = feat("CARGO_FEATURE_QOS");
+    let use_promisc = feat("CARGO_FEATURE_PROMISC");
+    let use_dedup = feat("CARGO_FEATURE_DEDUP");
+    let debug = feat("CARGO_FEATURE_DEBUG");
+    let debug_ts = feat("CARGO_FEATURE_DEBUG_TIMESTAMP");
 
     // Log levels: in release (no debug feature) only ERROR is enabled
     let (log_debug, log_info, log_warn, log_error) = if debug == "1" {
@@ -144,15 +148,15 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     };
 
     // Sizing — overridable via env vars
-    let buf_size   = cfg_u32("LIBCSP_BUFFER_SIZE",      256);
-    let buf_count  = cfg_u32("LIBCSP_BUFFER_COUNT",      10);
-    let conn_max   = cfg_u32("LIBCSP_CONN_MAX",          10);
-    let conn_rxq   = cfg_u32("LIBCSP_CONN_RXQUEUE_LEN",  10);
-    let qfifo_len  = cfg_u32("LIBCSP_QFIFO_LEN",         25);
-    let port_max   = cfg_u32("LIBCSP_PORT_MAX_BIND",      24);
-    let rtable_sz  = cfg_u32("LIBCSP_RTABLE_SIZE",        10);
-    let max_iface  = cfg_u32("LIBCSP_MAX_INTERFACES",      8);
-    let rdp_win    = cfg_u32("LIBCSP_RDP_MAX_WINDOW",     20);
+    let buf_size = cfg_u32("LIBCSP_BUFFER_SIZE", 256);
+    let buf_count = cfg_u32("LIBCSP_BUFFER_COUNT", 10);
+    let conn_max = cfg_u32("LIBCSP_CONN_MAX", 10);
+    let conn_rxq = cfg_u32("LIBCSP_CONN_RXQUEUE_LEN", 10);
+    let qfifo_len = cfg_u32("LIBCSP_QFIFO_LEN", 25);
+    let port_max = cfg_u32("LIBCSP_PORT_MAX_BIND", 24);
+    let rtable_sz = cfg_u32("LIBCSP_RTABLE_SIZE", 10);
+    let max_iface = cfg_u32("LIBCSP_MAX_INTERFACES", 8);
+    let rdp_win = cfg_u32("LIBCSP_RDP_MAX_WINDOW", 20);
 
     let content = format!(
         r#"/*
@@ -331,7 +335,8 @@ void     csp_sleep_ms(uint32_t ms);
 int      csp_thread_create(csp_thread_func_t func, const char * const name, unsigned int stack_size, void * parameter, unsigned int priority, csp_thread_handle_t * handle);
 
 #endif"#;
-    fs::write(dest_dir.join("csp_external_arch.h"), content).expect("failed to write csp_external_arch.h");
+    fs::write(dest_dir.join("csp_external_arch.h"), content)
+        .expect("failed to write csp_external_arch.h");
 }
 
 /// Compile all libcsp C sources as a single static library `libcsp.a`.
@@ -345,11 +350,11 @@ fn compile_libcsp(
     let mut build = cc::Build::new();
 
     // ── Include paths ──────────────────────────────────────────────────────
-    build.include(include_dir);                        // libcsp/include
-    build.include(src_dir);                            // private headers in src/
+    build.include(include_dir); // libcsp/include
+    build.include(src_dir); // private headers in src/
     build.include(src_dir.join("transport"));
     build.include(src_dir.join("interfaces"));
-    build.include(gen_include_dir);                    // OUT_DIR/include (csp_autoconfig.h)
+    build.include(gen_include_dir); // OUT_DIR/include (csp_autoconfig.h)
 
     // ── Compiler flags ─────────────────────────────────────────────────────
     build
@@ -368,16 +373,24 @@ fn compile_libcsp(
         b.define(name, val);
     };
 
-    feat_define(&mut build, "CARGO_FEATURE_RDP",            "CSP_USE_RDP");
-    feat_define(&mut build, "CARGO_FEATURE_RDP_FAST_CLOSE", "CSP_USE_RDP_FAST_CLOSE");
-    feat_define(&mut build, "CARGO_FEATURE_CRC32",          "CSP_USE_CRC32");
-    feat_define(&mut build, "CARGO_FEATURE_HMAC",           "CSP_USE_HMAC");
-    feat_define(&mut build, "CARGO_FEATURE_XTEA",           "CSP_USE_XTEA");
-    feat_define(&mut build, "CARGO_FEATURE_QOS",            "CSP_USE_QOS");
-    feat_define(&mut build, "CARGO_FEATURE_PROMISC",        "CSP_USE_PROMISC");
-    feat_define(&mut build, "CARGO_FEATURE_DEDUP",          "CSP_USE_DEDUP");
-    feat_define(&mut build, "CARGO_FEATURE_DEBUG",          "CSP_DEBUG");
-    feat_define(&mut build, "CARGO_FEATURE_DEBUG_TIMESTAMP","CSP_DEBUG_TIMESTAMP");
+    feat_define(&mut build, "CARGO_FEATURE_RDP", "CSP_USE_RDP");
+    feat_define(
+        &mut build,
+        "CARGO_FEATURE_RDP_FAST_CLOSE",
+        "CSP_USE_RDP_FAST_CLOSE",
+    );
+    feat_define(&mut build, "CARGO_FEATURE_CRC32", "CSP_USE_CRC32");
+    feat_define(&mut build, "CARGO_FEATURE_HMAC", "CSP_USE_HMAC");
+    feat_define(&mut build, "CARGO_FEATURE_XTEA", "CSP_USE_XTEA");
+    feat_define(&mut build, "CARGO_FEATURE_QOS", "CSP_USE_QOS");
+    feat_define(&mut build, "CARGO_FEATURE_PROMISC", "CSP_USE_PROMISC");
+    feat_define(&mut build, "CARGO_FEATURE_DEDUP", "CSP_USE_DEDUP");
+    feat_define(&mut build, "CARGO_FEATURE_DEBUG", "CSP_DEBUG");
+    feat_define(
+        &mut build,
+        "CARGO_FEATURE_DEBUG_TIMESTAMP",
+        "CSP_DEBUG_TIMESTAMP",
+    );
 
     if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
         // Force-include our external arch header.
@@ -387,10 +400,14 @@ fn compile_libcsp(
 
     build.define("CSP_USE_RTABLE", "1");
 
-    let debug = if env::var("CARGO_FEATURE_DEBUG").is_ok() { "1" } else { "0" };
+    let debug = if env::var("CARGO_FEATURE_DEBUG").is_ok() {
+        "1"
+    } else {
+        "0"
+    };
     build.define("CSP_LOG_LEVEL_DEBUG", if debug == "1" { "1" } else { "0" });
-    build.define("CSP_LOG_LEVEL_INFO",  if debug == "1" { "1" } else { "0" });
-    build.define("CSP_LOG_LEVEL_WARN",  if debug == "1" { "1" } else { "0" });
+    build.define("CSP_LOG_LEVEL_INFO", if debug == "1" { "1" } else { "0" });
+    build.define("CSP_LOG_LEVEL_WARN", if debug == "1" { "1" } else { "0" });
     build.define("CSP_LOG_LEVEL_ERROR", "1");
 
     // ── Core source files ──────────────────────────────────────────────────
@@ -564,7 +581,7 @@ fn compile_mini_scanf() {
         .flag("-std=c99")
         .flag("-Os")
         .flag("-Wall")
-        .define("C_SSCANF", None)  // Enable sscanf mode
+        .define("C_SSCANF", None) // Enable sscanf mode
         .compile("mini_scanf");
 
     println!("cargo:rerun-if-changed=libcsp-sys/mini-scanf/c_scan.c");
@@ -585,7 +602,10 @@ fn gcc_builtin_include() -> Vec<String> {
         .arg("-print-file-name=include")
         .output()
     {
-        let path = std::str::from_utf8(&output.stdout).unwrap_or_default().trim().to_owned();
+        let path = std::str::from_utf8(&output.stdout)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         if !path.is_empty() && path != "include" {
             paths.push(path);
         }
@@ -641,8 +661,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
     let os_define = match target_os.as_str() {
         "windows" => "CSP_WINDOWS=1",
-        "macos"   => "CSP_MACOSX=1",
-        _         => "CSP_POSIX=1",
+        "macos" => "CSP_MACOSX=1",
+        _ => "CSP_POSIX=1",
     };
 
     let endian_define = if target_endian == "big" {

@@ -1,7 +1,7 @@
-use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, CspNode};
-use std::thread;
-use std::sync::{OnceLock, Mutex, mpsc};
+use libcsp::{socket_opts, CspConfig, CspNode, Packet, Priority, Socket};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
 
 static NODE: OnceLock<CspNode> = OnceLock::new();
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -17,7 +17,8 @@ fn ensure_init() -> CspNode {
         node.route_start_task(4096, 0).unwrap();
         node.route_load("0/0 LOOP").unwrap();
         node
-    }).clone()
+    })
+    .clone()
 }
 
 fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
@@ -66,7 +67,8 @@ fn test_csp_server_client_loopback() {
 
     // Start Client logic
     for count in 0..5 {
-        let conn = node.connect(Priority::Norm, SERVER_ADDR, MY_SERVER_PORT, 1000, 0)
+        let conn = node
+            .connect(Priority::Norm, SERVER_ADDR, MY_SERVER_PORT, 1000, 0)
             .expect("Connection failed");
 
         let mut pkt = Packet::get(100).expect("Failed to get buffer");
@@ -78,7 +80,11 @@ fn test_csp_server_client_loopback() {
 
     server_handle.join().expect("Server thread panicked");
 
-    assert_eq!(SERVER_RECEIVED.load(Ordering::SeqCst), 5, "Server should have received exactly 5 packets");
+    assert_eq!(
+        SERVER_RECEIVED.load(Ordering::SeqCst),
+        5,
+        "Server should have received exactly 5 packets"
+    );
 }
 
 #[test]
@@ -92,7 +98,8 @@ fn test_csp_ping() {
     // Start a thread to handle pings (CSP service port is 1)
     let service_handle = thread::spawn(move || {
         let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
-        sock.bind(libcsp::ports::PING).expect("Failed to bind ping port");
+        sock.bind(libcsp::ports::PING)
+            .expect("Failed to bind ping port");
         sock.listen(5).expect("Failed to listen");
 
         // Signal that service is ready
@@ -113,7 +120,11 @@ fn test_csp_ping() {
     let res = node.ping(node_addr, 1000, 100, 0).expect("Ping failed");
 
     // Validate that ping returned a reasonable round-trip time
-    assert!(res < 1000, "Ping RTT should be less than timeout (1000ms), got {} ms", res);
+    assert!(
+        res < 1000,
+        "Ping RTT should be less than timeout (1000ms), got {} ms",
+        res
+    );
 
     service_handle.join().expect("Service thread panicked");
 }

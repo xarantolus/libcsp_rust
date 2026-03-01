@@ -3,7 +3,7 @@
 //! This demonstrates how to register callbacks for specific ports instead
 //! of manual accept/read loops.
 
-use libcsp::{CspConfig, Packet, Priority, Dispatcher, Port};
+use libcsp::{CspConfig, Dispatcher, Packet, Port, Priority};
 use std::thread;
 
 fn main() -> libcsp::Result<()> {
@@ -54,7 +54,10 @@ fn main() -> libcsp::Result<()> {
         conn.send_discard(pkt, 100).unwrap();
 
         if let Some(reply) = conn.read(500) {
-            println!("Client: Got echo reply: {:?}", std::str::from_utf8(reply.data()));
+            println!(
+                "Client: Got echo reply: {:?}",
+                std::str::from_utf8(reply.data())
+            );
         }
     }
 

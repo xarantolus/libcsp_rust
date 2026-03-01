@@ -1,6 +1,6 @@
 //! Traits and helpers for providing custom architecture implementations.
 
-use core::ffi::{c_void, c_char};
+use core::ffi::{c_char, c_void};
 
 /// Trait for implementing OS-specific primitives for libcsp.
 ///
@@ -73,14 +73,18 @@ pub unsafe trait CspArch: Send + Sync {
     /// **Optional.** Defaults to [`get_ms`].
     ///
     /// [`get_ms`]: CspArch::get_ms
-    fn get_ms_isr(&self) -> u32 { self.get_ms() }
+    fn get_ms_isr(&self) -> u32 {
+        self.get_ms()
+    }
 
     /// Return uptime in seconds.
     ///
     /// **Optional.** Defaults to [`get_s`].
     ///
     /// [`get_s`]: CspArch::get_s
-    fn get_uptime_s(&self) -> u32 { self.get_s() }
+    fn get_uptime_s(&self) -> u32 {
+        self.get_s()
+    }
 
     // ── Binary Semaphores (REQUIRED) ────────────────────────────────────────
 
@@ -175,7 +179,12 @@ pub unsafe trait CspArch: Send + Sync {
     /// **Optional.** Defaults to [`queue_enqueue`] with timeout=0.
     ///
     /// [`queue_enqueue`]: CspArch::queue_enqueue
-    fn queue_enqueue_isr(&self, queue: *mut c_void, item: *const c_void, _task_woken: *mut i32) -> bool {
+    fn queue_enqueue_isr(
+        &self,
+        queue: *mut c_void,
+        item: *const c_void,
+        _task_woken: *mut i32,
+    ) -> bool {
         self.queue_enqueue(queue, item, 0)
     }
 
@@ -184,7 +193,12 @@ pub unsafe trait CspArch: Send + Sync {
     /// **Optional.** Defaults to [`queue_dequeue`] with timeout=0.
     ///
     /// [`queue_dequeue`]: CspArch::queue_dequeue
-    fn queue_dequeue_isr(&self, queue: *mut c_void, item: *mut c_void, _task_woken: *mut i32) -> bool {
+    fn queue_dequeue_isr(
+        &self,
+        queue: *mut c_void,
+        item: *mut c_void,
+        _task_woken: *mut i32,
+    ) -> bool {
         self.queue_dequeue(queue, item, 0)
     }
 
@@ -226,7 +240,7 @@ pub unsafe trait CspArch: Send + Sync {
         }
         ptr
     }
-    
+
     // ── System Services (OPTIONAL) ──────────────────────────────────────────
     // These are used by CSP service handlers. If you don't use those services,
     // the default no-op implementations are fine.
@@ -234,24 +248,32 @@ pub unsafe trait CspArch: Send + Sync {
     /// Return free heap memory in bytes.
     ///
     /// **Optional.** Used by the MEMFREE service. Defaults to 0.
-    fn memfree(&self) -> u32 { 0 }
+    fn memfree(&self) -> u32 {
+        0
+    }
 
     /// Reboot the system.
     ///
     /// **Optional.** Used by the REBOOT service. Defaults to no-op that returns CSP_ERR_NONE (0).
     /// @return CSP_ERR_NONE (0) on success, or error code.
-    fn reboot(&self) -> i32 { 0 /* CSP_ERR_NONE */ }
+    fn reboot(&self) -> i32 {
+        0 /* CSP_ERR_NONE */
+    }
 
     /// Shutdown the system.
     ///
     /// **Optional.** Used by the SHUTDOWN service. Defaults to no-op that returns CSP_ERR_NONE (0).
     /// @return CSP_ERR_NONE (0) on success, or error code.
-    fn shutdown(&self) -> i32 { 0 /* CSP_ERR_NONE */ }
+    fn shutdown(&self) -> i32 {
+        0 /* CSP_ERR_NONE */
+    }
 
     /// Get task list size.
     ///
     /// **Optional.** Used by the PS service. Defaults to 0.
-    fn sys_tasklist_size(&self) -> i32 { 0 }
+    fn sys_tasklist_size(&self) -> i32 {
+        0
+    }
 
     /// Write task list to buffer.
     ///
@@ -290,7 +312,17 @@ pub unsafe trait CspArch: Send + Sync {
     ///
     /// [`CspNode::route_start_task`]: crate::CspNode::route_start_task
     /// [`CspNode::route_work`]: crate::CspNode::route_work
-    fn thread_create(&self, _f: unsafe extern "C" fn(*mut c_void), _name: *const c_char, _stack: u32, _arg: *mut c_void, _prio: u32, _handle: *mut *mut c_void) -> i32 { 0 }
+    fn thread_create(
+        &self,
+        _f: unsafe extern "C" fn(*mut c_void),
+        _name: *const c_char,
+        _stack: u32,
+        _arg: *mut c_void,
+        _prio: u32,
+        _handle: *mut *mut c_void,
+    ) -> i32 {
+        0
+    }
 
     /// Sleep for milliseconds.
     ///
@@ -400,7 +432,12 @@ pub unsafe trait CspArch: Send + Sync {
     ///
     /// # Safety
     /// Caller must ensure `s`, `delim`, and `saveptr` are valid pointers (or `s` is null for continuation).
-    fn strtok_r(&self, s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char {
+    fn strtok_r(
+        &self,
+        s: *mut c_char,
+        delim: *const c_char,
+        saveptr: *mut *mut c_char,
+    ) -> *mut c_char {
         unsafe {
             let mut str = if s.is_null() { *saveptr } else { s };
             if str.is_null() {
@@ -454,7 +491,6 @@ pub unsafe trait CspArch: Send + Sync {
             token
         }
     }
-
 }
 
 // test_arch is a POSIX-based implementation for host platforms.
@@ -469,116 +505,280 @@ pub mod test_arch;
 #[macro_export]
 macro_rules! export_arch {
     ($impl_type:ty, $instance:expr) => {
-        #[no_mangle] pub unsafe extern "C" fn csp_get_ms() -> u32 { <$impl_type as $crate::CspArch>::get_ms(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_get_s() -> u32 { <$impl_type as $crate::CspArch>::get_s(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_get_uptime_s() -> u32 { <$impl_type as $crate::CspArch>::get_uptime_s(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_get_ms_isr() -> u32 { <$impl_type as $crate::CspArch>::get_ms_isr(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_sleep_ms(ms: u32) { <$impl_type as $crate::CspArch>::sleep_ms(&$instance, ms) }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_ms() -> u32 {
+            <$impl_type as $crate::CspArch>::get_ms(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_s() -> u32 {
+            <$impl_type as $crate::CspArch>::get_s(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_uptime_s() -> u32 {
+            <$impl_type as $crate::CspArch>::get_uptime_s(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_ms_isr() -> u32 {
+            <$impl_type as $crate::CspArch>::get_ms_isr(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sleep_ms(ms: u32) {
+            <$impl_type as $crate::CspArch>::sleep_ms(&$instance, ms)
+        }
 
-        #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_create(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_bin_sem_create(sem: *mut *mut ::core::ffi::c_void) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if sem.is_null() { return 0; }
+            if sem.is_null() {
+                return 0;
+            }
             let s = <$impl_type as $crate::CspArch>::bin_sem_create(&$instance);
             // Safety: `sem` is a valid pointer (checked above).
-            if s.is_null() { 0 } else { unsafe { *sem = s }; 1 }
+            if s.is_null() {
+                0
+            } else {
+                unsafe { *sem = s };
+                1
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_remove(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_bin_sem_remove(sem: *mut *mut ::core::ffi::c_void) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if sem.is_null() { return 0; }
+            if sem.is_null() {
+                return 0;
+            }
             // Safety: `sem` is a valid pointer (checked above).
-            unsafe { <$impl_type as $crate::CspArch>::bin_sem_remove(&$instance, *sem) }; 1
+            unsafe { <$impl_type as $crate::CspArch>::bin_sem_remove(&$instance, *sem) };
+            1
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_wait(sem: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_bin_sem_wait(
+            sem: *mut *mut ::core::ffi::c_void,
+            timeout: u32,
+        ) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if sem.is_null() { return 0; }
+            if sem.is_null() {
+                return 0;
+            }
             // Safety: `sem` is a valid pointer (checked above).
-            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_wait(&$instance, *sem, timeout) } { 1 } else { 0 }
+            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_wait(&$instance, *sem, timeout) } {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_post(sem: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_bin_sem_post(sem: *mut *mut ::core::ffi::c_void) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if sem.is_null() { return 0; }
+            if sem.is_null() {
+                return 0;
+            }
             // Safety: `sem` is a valid pointer (checked above).
-            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
+            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_bin_sem_post_isr(sem: *mut *mut ::core::ffi::c_void, _px: *mut i32) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_bin_sem_post_isr(
+            sem: *mut *mut ::core::ffi::c_void,
+            _px: *mut i32,
+        ) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if sem.is_null() { return 0; }
+            if sem.is_null() {
+                return 0;
+            }
             // Safety: `sem` is a valid pointer (checked above).
-            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } { 1 } else { 0 }
+            if unsafe { <$impl_type as $crate::CspArch>::bin_sem_post(&$instance, *sem) } {
+                1
+            } else {
+                0
+            }
         }
 
-        #[no_mangle] pub unsafe extern "C" fn csp_mutex_create(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_mutex_create(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if mutex.is_null() { return 0; }
+            if mutex.is_null() {
+                return 0;
+            }
             let m = <$impl_type as $crate::CspArch>::mutex_create(&$instance);
             // Safety: `mutex` is a valid pointer (checked above).
-            if m.is_null() { 0 } else { unsafe { *mutex = m }; 1 }
+            if m.is_null() {
+                0
+            } else {
+                unsafe { *mutex = m };
+                1
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_mutex_remove(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_mutex_remove(mutex: *mut *mut ::core::ffi::c_void) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if mutex.is_null() { return 0; }
+            if mutex.is_null() {
+                return 0;
+            }
             // Safety: `mutex` is a valid pointer (checked above).
-            unsafe { <$impl_type as $crate::CspArch>::mutex_remove(&$instance, *mutex) }; 1
+            unsafe { <$impl_type as $crate::CspArch>::mutex_remove(&$instance, *mutex) };
+            1
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_mutex_lock(mutex: *mut *mut ::core::ffi::c_void, timeout: u32) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_mutex_lock(
+            mutex: *mut *mut ::core::ffi::c_void,
+            timeout: u32,
+        ) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if mutex.is_null() { return 0; }
+            if mutex.is_null() {
+                return 0;
+            }
             // Safety: `mutex` is a valid pointer (checked above).
-            if unsafe { <$impl_type as $crate::CspArch>::mutex_lock(&$instance, *mutex, timeout) } { 1 } else { 0 }
+            if unsafe { <$impl_type as $crate::CspArch>::mutex_lock(&$instance, *mutex, timeout) } {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_mutex_unlock(mutex: *mut *mut ::core::ffi::c_void, _timeout: u32) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_mutex_unlock(
+            mutex: *mut *mut ::core::ffi::c_void,
+            _timeout: u32,
+        ) -> i32 {
             // Safety: Defensive null check prevents UB if C code passes null
-            if mutex.is_null() { return 0; }
+            if mutex.is_null() {
+                return 0;
+            }
             // Safety: `mutex` is a valid pointer (checked above).
-            if unsafe { <$impl_type as $crate::CspArch>::mutex_unlock(&$instance, *mutex) } { 1 } else { 0 }
+            if unsafe { <$impl_type as $crate::CspArch>::mutex_unlock(&$instance, *mutex) } {
+                1
+            } else {
+                0
+            }
         }
 
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_create(length: i32, item_size: usize) -> *mut ::core::ffi::c_void {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_create(
+            length: i32,
+            item_size: usize,
+        ) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::queue_create(&$instance, length as usize, item_size)
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_remove(queue: *mut ::core::ffi::c_void) {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_remove(queue: *mut ::core::ffi::c_void) {
             <$impl_type as $crate::CspArch>::queue_remove(&$instance, queue)
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_enqueue(queue: *mut ::core::ffi::c_void, item: *const ::core::ffi::c_void, timeout: u32) -> i32 {
-            if <$impl_type as $crate::CspArch>::queue_enqueue(&$instance, queue, item, timeout) { 1 } else { 0 }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_enqueue(
+            queue: *mut ::core::ffi::c_void,
+            item: *const ::core::ffi::c_void,
+            timeout: u32,
+        ) -> i32 {
+            if <$impl_type as $crate::CspArch>::queue_enqueue(&$instance, queue, item, timeout) {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_enqueue_isr(queue: *mut ::core::ffi::c_void, item: *const ::core::ffi::c_void, _px: *mut i32) -> i32 {
-            if <$impl_type as $crate::CspArch>::queue_enqueue(&$instance, queue, item, 0) { 1 } else { 0 }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_enqueue_isr(
+            queue: *mut ::core::ffi::c_void,
+            item: *const ::core::ffi::c_void,
+            _px: *mut i32,
+        ) -> i32 {
+            if <$impl_type as $crate::CspArch>::queue_enqueue(&$instance, queue, item, 0) {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_dequeue(queue: *mut ::core::ffi::c_void, item: *mut ::core::ffi::c_void, timeout: u32) -> i32 {
-            if <$impl_type as $crate::CspArch>::queue_dequeue(&$instance, queue, item, timeout) { 1 } else { 0 }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_dequeue(
+            queue: *mut ::core::ffi::c_void,
+            item: *mut ::core::ffi::c_void,
+            timeout: u32,
+        ) -> i32 {
+            if <$impl_type as $crate::CspArch>::queue_dequeue(&$instance, queue, item, timeout) {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_dequeue_isr(queue: *mut ::core::ffi::c_void, item: *mut ::core::ffi::c_void, _px: *mut i32) -> i32 {
-            if <$impl_type as $crate::CspArch>::queue_dequeue(&$instance, queue, item, 0) { 1 } else { 0 }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_dequeue_isr(
+            queue: *mut ::core::ffi::c_void,
+            item: *mut ::core::ffi::c_void,
+            _px: *mut i32,
+        ) -> i32 {
+            if <$impl_type as $crate::CspArch>::queue_dequeue(&$instance, queue, item, 0) {
+                1
+            } else {
+                0
+            }
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_size(queue: *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_size(queue: *mut ::core::ffi::c_void) -> i32 {
             <$impl_type as $crate::CspArch>::queue_size(&$instance, queue) as i32
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_queue_size_isr(queue: *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_size_isr(queue: *mut ::core::ffi::c_void) -> i32 {
             <$impl_type as $crate::CspArch>::queue_size(&$instance, queue) as i32
         }
 
-        #[no_mangle] pub unsafe extern "C" fn csp_malloc(size: usize) -> *mut ::core::ffi::c_void {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_malloc(size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::malloc(&$instance, size)
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_calloc(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_calloc(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
         }
-        #[no_mangle] pub unsafe extern "C" fn csp_free(ptr: *mut ::core::ffi::c_void) {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_free(ptr: *mut ::core::ffi::c_void) {
             <$impl_type as $crate::CspArch>::free(&$instance, ptr)
         }
 
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_memfree() -> u32 { <$impl_type as $crate::CspArch>::memfree(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_reboot() -> i32 { <$impl_type as $crate::CspArch>::reboot(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_shutdown() -> i32 { <$impl_type as $crate::CspArch>::shutdown(&$instance) }
-        
-        #[no_mangle] pub unsafe extern "C" fn csp_clock_get_time(time: *mut ::core::ffi::c_void) { <$impl_type as $crate::CspArch>::clock_get_time(&$instance, time) }
-        #[no_mangle] pub unsafe extern "C" fn csp_clock_set_time(time: *mut ::core::ffi::c_void) { <$impl_type as $crate::CspArch>::clock_set_time(&$instance, time) }
-        
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_tasklist_size() -> i32 { <$impl_type as $crate::CspArch>::sys_tasklist_size(&$instance) }
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_tasklist(out: *mut ::core::ffi::c_char) { <$impl_type as $crate::CspArch>::sys_tasklist(&$instance, out) }
-        #[no_mangle] pub unsafe extern "C" fn csp_sys_set_color(color: $crate::sys::csp_color_t) { <$impl_type as $crate::CspArch>::sys_set_color(&$instance, color) }
-        #[no_mangle] pub unsafe extern "C" fn csp_thread_create(f: unsafe extern "C" fn(*mut ::core::ffi::c_void), name: *const ::core::ffi::c_char, stack: u32, arg: *mut ::core::ffi::c_void, prio: u32, handle: *mut *mut ::core::ffi::c_void) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_memfree() -> u32 {
+            <$impl_type as $crate::CspArch>::memfree(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_reboot() -> i32 {
+            <$impl_type as $crate::CspArch>::reboot(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_shutdown() -> i32 {
+            <$impl_type as $crate::CspArch>::shutdown(&$instance)
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_clock_get_time(time: *mut ::core::ffi::c_void) {
+            <$impl_type as $crate::CspArch>::clock_get_time(&$instance, time)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_clock_set_time(time: *mut ::core::ffi::c_void) {
+            <$impl_type as $crate::CspArch>::clock_set_time(&$instance, time)
+        }
+
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_tasklist_size() -> i32 {
+            <$impl_type as $crate::CspArch>::sys_tasklist_size(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_tasklist(out: *mut ::core::ffi::c_char) {
+            <$impl_type as $crate::CspArch>::sys_tasklist(&$instance, out)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_sys_set_color(color: $crate::sys::csp_color_t) {
+            <$impl_type as $crate::CspArch>::sys_set_color(&$instance, color)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_thread_create(
+            f: unsafe extern "C" fn(*mut ::core::ffi::c_void),
+            name: *const ::core::ffi::c_char,
+            stack: u32,
+            arg: *mut ::core::ffi::c_void,
+            prio: u32,
+            handle: *mut *mut ::core::ffi::c_void,
+        ) -> i32 {
             // Wrap the unsafe function pointer in a safe wrapper
             extern "C" fn wrapper(arg: *mut ::core::ffi::c_void) {
                 // Safety: This is the actual thread entry point from libcsp.
@@ -589,33 +789,57 @@ macro_rules! export_arch {
                     // between function pointer types with different safety.
                     let f_ptr = THREAD_ENTRY_POINT.load(core::sync::atomic::Ordering::Acquire);
                     if f_ptr != 0 {
-                        let f: unsafe extern "C" fn(*mut ::core::ffi::c_void) = core::mem::transmute(f_ptr);
+                        let f: unsafe extern "C" fn(*mut ::core::ffi::c_void) =
+                            core::mem::transmute(f_ptr);
                         f(arg);
                     }
                 }
             }
 
             // Store the function pointer in a static for the wrapper to access
-            static THREAD_ENTRY_POINT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+            static THREAD_ENTRY_POINT: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
             THREAD_ENTRY_POINT.store(f as usize, core::sync::atomic::Ordering::Release);
 
-            <$impl_type as $crate::CspArch>::thread_create(&$instance, wrapper, name, stack, arg, prio, handle)
+            <$impl_type as $crate::CspArch>::thread_create(
+                &$instance, wrapper, name, stack, arg, prio, handle,
+            )
         }
 
         // C String Functions - Required by libcsp's C code
-        #[no_mangle] pub unsafe extern "C" fn strncpy(dest: *mut ::core::ffi::c_char, src: *const ::core::ffi::c_char, n: usize) -> *mut ::core::ffi::c_char {
+        #[no_mangle]
+        pub unsafe extern "C" fn strncpy(
+            dest: *mut ::core::ffi::c_char,
+            src: *const ::core::ffi::c_char,
+            n: usize,
+        ) -> *mut ::core::ffi::c_char {
             <$impl_type as $crate::CspArch>::strncpy(&$instance, dest, src, n)
         }
-        #[no_mangle] pub unsafe extern "C" fn strcpy(dest: *mut ::core::ffi::c_char, src: *const ::core::ffi::c_char) -> *mut ::core::ffi::c_char {
+        #[no_mangle]
+        pub unsafe extern "C" fn strcpy(
+            dest: *mut ::core::ffi::c_char,
+            src: *const ::core::ffi::c_char,
+        ) -> *mut ::core::ffi::c_char {
             <$impl_type as $crate::CspArch>::strcpy(&$instance, dest, src)
         }
-        #[no_mangle] pub unsafe extern "C" fn strnlen(s: *const ::core::ffi::c_char, maxlen: usize) -> usize {
+        #[no_mangle]
+        pub unsafe extern "C" fn strnlen(s: *const ::core::ffi::c_char, maxlen: usize) -> usize {
             <$impl_type as $crate::CspArch>::strnlen(&$instance, s, maxlen)
         }
-        #[no_mangle] pub unsafe extern "C" fn strncasecmp(s1: *const ::core::ffi::c_char, s2: *const ::core::ffi::c_char, n: usize) -> i32 {
+        #[no_mangle]
+        pub unsafe extern "C" fn strncasecmp(
+            s1: *const ::core::ffi::c_char,
+            s2: *const ::core::ffi::c_char,
+            n: usize,
+        ) -> i32 {
             <$impl_type as $crate::CspArch>::strncasecmp(&$instance, s1, s2, n)
         }
-        #[no_mangle] pub unsafe extern "C" fn strtok_r(s: *mut ::core::ffi::c_char, delim: *const ::core::ffi::c_char, saveptr: *mut *mut ::core::ffi::c_char) -> *mut ::core::ffi::c_char {
+        #[no_mangle]
+        pub unsafe extern "C" fn strtok_r(
+            s: *mut ::core::ffi::c_char,
+            delim: *const ::core::ffi::c_char,
+            saveptr: *mut *mut ::core::ffi::c_char,
+        ) -> *mut ::core::ffi::c_char {
             <$impl_type as $crate::CspArch>::strtok_r(&$instance, s, delim, saveptr)
         }
         // NOTE: sscanf is provided by mini-scanf (compiled from C with varargs support)
@@ -623,9 +847,14 @@ macro_rules! export_arch {
         // On POSIX platforms, the system libc sscanf is used.
 
         // Additional C library stubs that may be needed by some platforms
-        #[no_mangle] pub extern "C" fn rand() -> i32 { 0 }
-        #[no_mangle] pub extern "C" fn srand(_seed: u32) {}
-        #[no_mangle] pub extern "C" fn _embassy_time_schedule_wake(_at: u64) {}
+        #[no_mangle]
+        pub extern "C" fn rand() -> i32 {
+            0
+        }
+        #[no_mangle]
+        pub extern "C" fn srand(_seed: u32) {}
+        #[no_mangle]
+        pub extern "C" fn _embassy_time_schedule_wake(_at: u64) {}
     };
 }
 

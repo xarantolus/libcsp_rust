@@ -1,6 +1,6 @@
-use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, CspNode};
+use libcsp::{socket_opts, CspConfig, CspNode, Packet, Priority, Socket};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
-use std::sync::{OnceLock, Mutex, mpsc};
 
 static NODE: OnceLock<CspNode> = OnceLock::new();
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -15,7 +15,8 @@ fn ensure_init() -> CspNode {
         node.route_start_task(4096, 0).unwrap();
         node.route_load("0/0 LOOP").unwrap();
         node
-    }).clone()
+    })
+    .clone()
 }
 
 fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
@@ -54,7 +55,8 @@ fn test_basic_client_server() {
     // Wait for server to be ready
     ready_rx.recv().expect("Server failed to start");
 
-    let conn = node.connect(Priority::Norm, 1, 10, 1000, 0)
+    let conn = node
+        .connect(Priority::Norm, 1, 10, 1000, 0)
         .expect("connect failed");
 
     let mut pkt = Packet::get(4).expect("Failed to get packet");
@@ -73,7 +75,8 @@ fn test_connectionless() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::CONN_LESS).expect("Failed to create connectionless socket");
+        let sock =
+            Socket::new(socket_opts::CONN_LESS).expect("Failed to create connectionless socket");
         sock.bind(20).expect("Failed to bind");
 
         // Signal ready
@@ -90,7 +93,8 @@ fn test_connectionless() {
     // Wait for server to be ready
     ready_rx.recv().expect("Server failed to start");
 
-    let conn = node.connect(Priority::Norm, 1, 20, 1000, socket_opts::CONN_LESS)
+    let conn = node
+        .connect(Priority::Norm, 1, 20, 1000, socket_opts::CONN_LESS)
         .expect("connect failed");
 
     let mut pkt = Packet::get(10).expect("Failed to get packet");

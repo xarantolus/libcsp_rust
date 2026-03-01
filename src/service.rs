@@ -1,13 +1,13 @@
 //! High-level service and protocol support.
 
 extern crate alloc;
-use alloc::string::String;
-use alloc::vec::Vec;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::ffi::CStr;
 
-use crate::{sys, Packet, CspError, Result, Connection, Socket, Port};
+use crate::{sys, Connection, CspError, Packet, Port, Result, Socket};
 
 // ── CMP (CSP Management Protocol) ───────────────────────────────────────────
 
@@ -42,19 +42,37 @@ impl crate::CspNode {
         // CMP_SIZE(ident) = 2 (type+code) + sizeof(ident struct)
         // Safety: Union access is safe here because we're just calculating size.
         let size = 2 + core::mem::size_of_val(unsafe { &msg.__bindgen_anon_1.ident });
-        
+
         // Safety: CSP_CMP_IDENT is 1, size fits in i32. `msg` is valid.
-        let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_IDENT as u8, size as i32, &mut msg) };
+        let ret = unsafe {
+            sys::csp_cmp(
+                node,
+                timeout,
+                sys::CSP_CMP_IDENT as u8,
+                size as i32,
+                &mut msg,
+            )
+        };
         if ret == 0 {
             // Safety: The command succeeded, so the ident union field is valid.
             let ident = unsafe { &msg.__bindgen_anon_1.ident };
             Ok(Ident {
                 // Safety: libcsp guarantees these strings are NUL-terminated.
-                hostname: unsafe { CStr::from_ptr(ident.hostname.as_ptr()) }.to_string_lossy().into_owned(),
-                model:    unsafe { CStr::from_ptr(ident.model.as_ptr()) }.to_string_lossy().into_owned(),
-                revision: unsafe { CStr::from_ptr(ident.revision.as_ptr()) }.to_string_lossy().into_owned(),
-                date:     unsafe { CStr::from_ptr(ident.date.as_ptr()) }.to_string_lossy().into_owned(),
-                time:     unsafe { CStr::from_ptr(ident.time.as_ptr()) }.to_string_lossy().into_owned(),
+                hostname: unsafe { CStr::from_ptr(ident.hostname.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+                model: unsafe { CStr::from_ptr(ident.model.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+                revision: unsafe { CStr::from_ptr(ident.revision.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+                date: unsafe { CStr::from_ptr(ident.date.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
+                time: unsafe { CStr::from_ptr(ident.time.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned(),
             })
         } else {
             Err(CspError::from_code(ret))
@@ -72,10 +90,23 @@ impl crate::CspNode {
 
         let size = 2 + 4 + 1 + len as usize;
         // Safety: CMP codes and sizes fit in their target types. `msg` is valid.
-        let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_PEEK as u8, size as i32, &mut msg) };
+        let ret = unsafe {
+            sys::csp_cmp(
+                node,
+                timeout,
+                sys::CSP_CMP_PEEK as u8,
+                size as i32,
+                &mut msg,
+            )
+        };
         if ret == 0 {
             // Safety: The command succeeded, so the peek union field is valid.
-            Ok(unsafe { msg.__bindgen_anon_1.peek.data[..len as usize].iter().map(|&c| c as u8).collect() })
+            Ok(unsafe {
+                msg.__bindgen_anon_1.peek.data[..len as usize]
+                    .iter()
+                    .map(|&c| c as u8)
+                    .collect()
+            })
         } else {
             Err(CspError::from_code(ret))
         }
@@ -91,13 +122,27 @@ impl crate::CspNode {
         msg.__bindgen_anon_1.poke.len = data.len() as u8;
         for (i, &b) in data.iter().enumerate() {
             // Safety: b fits in c_char. Union access is safe for initialization.
-            unsafe { msg.__bindgen_anon_1.poke.data[i] = b as core::ffi::c_char; }
+            unsafe {
+                msg.__bindgen_anon_1.poke.data[i] = b as core::ffi::c_char;
+            }
         }
 
         let size = 2 + 4 + 1 + data.len();
         // Safety: CMP codes and sizes fit in their target types. `msg` is valid.
-        let ret = unsafe { sys::csp_cmp(node, timeout, sys::CSP_CMP_POKE as u8, size as i32, &mut msg) };
-        if ret == 0 { Ok(()) } else { Err(CspError::from_code(ret)) }
+        let ret = unsafe {
+            sys::csp_cmp(
+                node,
+                timeout,
+                sys::CSP_CMP_POKE as u8,
+                size as i32,
+                &mut msg,
+            )
+        };
+        if ret == 0 {
+            Ok(())
+        } else {
+            Err(CspError::from_code(ret))
+        }
     }
 }
 
@@ -119,7 +164,13 @@ pub type ServiceHandler = Box<dyn FnMut(&Connection, Packet) -> Option<Packet> +
 /// [`ServiceHandler`]: type.ServiceHandler.html
 /// [`Dispatcher::on_error`]: struct.Dispatcher.html#method.on_error
 #[cfg(feature = "std")]
-pub type ServiceHandlerResult = Box<dyn FnMut(&Connection, Packet) -> core::result::Result<Option<Packet>, Box<dyn std::error::Error>> + Send>;
+pub type ServiceHandlerResult = Box<
+    dyn FnMut(
+            &Connection,
+            Packet,
+        ) -> core::result::Result<Option<Packet>, Box<dyn std::error::Error>>
+        + Send,
+>;
 
 /// Error callback type for [`Dispatcher`].
 ///
@@ -206,7 +257,11 @@ impl Dispatcher {
     /// }).unwrap();
     /// ```
     #[cfg(feature = "std")]
-    pub fn register_with_result<P: Into<Port>, F, E>(&mut self, port: P, mut handler: F) -> Result<()>
+    pub fn register_with_result<P: Into<Port>, F, E>(
+        &mut self,
+        port: P,
+        mut handler: F,
+    ) -> Result<()>
     where
         F: FnMut(&Connection, Packet) -> core::result::Result<Option<Packet>, E> + Send + 'static,
         E: std::error::Error + 'static,
@@ -288,7 +343,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_helpers::with_csp_node, Packet, Priority, Port};
+    use crate::{test_helpers::with_csp_node, Packet, Port, Priority};
 
     // NOTE: CMP service tests (ident, ping, peek/poke) require a service handler
     // to be running. Full integration tests should use Dispatcher or a service thread.
@@ -299,7 +354,7 @@ mod tests {
         with_csp_node(|node| {
             // Test that the ident API is callable
             // Will timeout without a service handler, but that's expected for a unit test
-            let result = node.ident(1, 10);  // Short timeout
+            let result = node.ident(1, 10); // Short timeout
 
             // Should timeout without a service handler (expected behavior)
             // If it doesn't timeout, validate the ident structure
@@ -324,9 +379,9 @@ mod tests {
         with_csp_node(|node| {
             // Test that the ping API is callable
             // Will timeout without a service handler, but that's expected for a unit test
-            let result = node.ping(1, 10, 100, 0);  // Short timeout
-            // Any result is acceptable - we're just testing the API is callable
-            let _ = result;  // Ignore the result
+            let result = node.ping(1, 10, 100, 0); // Short timeout
+                                                   // Any result is acceptable - we're just testing the API is callable
+            let _ = result; // Ignore the result
         });
     }
 
@@ -352,20 +407,27 @@ mod tests {
 
             // Register a simple echo handler on a unique port
             let port = 15;
-            dispatcher.register(port, |_conn, pkt| {
-                // Echo back the packet
-                Some(pkt)
-            }).expect("Failed to register handler on port 15");
+            dispatcher
+                .register(port, |_conn, pkt| {
+                    // Echo back the packet
+                    Some(pkt)
+                })
+                .expect("Failed to register handler on port 15");
 
             // Verify we can bind another handler on a different port
-            dispatcher.register(16, |_conn, _pkt| {
-                // No reply
-                None
-            }).expect("Failed to register handler on port 16");
+            dispatcher
+                .register(16, |_conn, _pkt| {
+                    // No reply
+                    None
+                })
+                .expect("Failed to register handler on port 16");
 
             // Attempting to register on an already-bound port should fail
             let duplicate_result = dispatcher.register(15, |_conn, pkt| Some(pkt));
-            assert!(duplicate_result.is_err(), "Should not allow duplicate port binding");
+            assert!(
+                duplicate_result.is_err(),
+                "Should not allow duplicate port binding"
+            );
         });
     }
 
@@ -381,13 +443,18 @@ mod tests {
             });
 
             // Register a handler that can return errors
-            dispatcher.register_with_result(16, |_conn, pkt| {
-                if pkt.length() == 0 {
-                    Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Empty packet"))
-                } else {
-                    Ok(Some(pkt))
-                }
-            }).expect("Failed to register result handler");
+            dispatcher
+                .register_with_result(16, |_conn, pkt| {
+                    if pkt.length() == 0 {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Empty packet",
+                        ))
+                    } else {
+                        Ok(Some(pkt))
+                    }
+                })
+                .expect("Failed to register result handler");
         });
     }
 
@@ -397,7 +464,9 @@ mod tests {
             let mut dispatcher = Dispatcher::new().expect("Failed to create dispatcher");
 
             // Bind to a service port without a custom handler (uses built-in)
-            dispatcher.bind_service(Port::Ping).expect("Failed to bind service port");
+            dispatcher
+                .bind_service(Port::Ping)
+                .expect("Failed to bind service port");
         });
     }
 
@@ -405,7 +474,8 @@ mod tests {
     fn test_packet_service_handler() {
         with_csp_node(|node| {
             // Connect to ourselves on a service port
-            let conn = node.connect(Priority::Norm, 1, Port::Ping.into(), 100, 0)
+            let conn = node
+                .connect(Priority::Norm, 1, Port::Ping.into(), 100, 0)
                 .expect("Failed to connect");
 
             // Create a packet

@@ -86,8 +86,7 @@ impl Socket {
     /// Returns `None` on timeout or error.
     pub fn recvfrom(&self, timeout: u32) -> Option<Packet> {
         // Safety: `inner` is a valid socket pointer.
-        let ptr =
-            unsafe { sys::csp_recvfrom(self.inner, timeout) };
+        let ptr = unsafe { sys::csp_recvfrom(self.inner, timeout) };
         if ptr.is_null() {
             None
         } else {
@@ -121,7 +120,7 @@ impl core::fmt::Debug for Socket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{test_helpers::with_csp_node, Priority, Packet, socket_opts};
+    use crate::{socket_opts, test_helpers::with_csp_node, Packet, Priority};
 
     #[test]
     fn test_socket_create_bind_listen() {
@@ -156,7 +155,10 @@ mod tests {
 
             // Try to receive with a short timeout (will timeout, which is expected)
             let result = sock.recvfrom(10);
-            assert!(result.is_none(), "Expected timeout with no incoming packets");
+            assert!(
+                result.is_none(),
+                "Expected timeout with no incoming packets"
+            );
 
             // Full connectionless send/receive testing requires proper routing configuration
             // which is beyond the scope of a unit test
@@ -196,5 +198,4 @@ mod tests {
             assert!(result.is_none(), "Expected timeout when no connections");
         });
     }
-
 }

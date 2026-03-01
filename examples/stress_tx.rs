@@ -3,11 +3,11 @@
 //! Cycles through Normal, RDP, SFP, and RDP+SFP modes with clean transitions.
 
 mod stress;
-use stress::{Prng, ProtocolMode, PRNG_SEED, DATA_PORT, SFP_PORT};
+use stress::{Prng, ProtocolMode, DATA_PORT, PRNG_SEED, SFP_PORT};
 
-use libcsp::{CspConfig, Packet, Priority, socket_opts, conn_opts, Connection};
-use std::time::{Instant, Duration};
+use libcsp::{conn_opts, socket_opts, Connection, CspConfig, Packet, Priority};
 use std::thread;
+use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     let start_time = Instant::now();
     let mut last_log = Instant::now();
     let mut mode_start = Instant::now();
-    
+
     let mut current_mode = ProtocolMode::Normal;
     let mut active_conn: Option<Connection> = None;
 
@@ -45,7 +45,9 @@ fn main() -> anyhow::Result<()> {
     loop {
         // 1. Pacing
         let now = Instant::now();
-        if now < next_tick { thread::sleep(next_tick - now); }
+        if now < next_tick {
+            thread::sleep(next_tick - now);
+        }
         next_tick += interval;
         if Instant::now() > next_tick + Duration::from_millis(100) {
             next_tick = Instant::now() + interval;
@@ -59,16 +61,20 @@ fn main() -> anyhow::Result<()> {
                 ProtocolMode::SFP => ProtocolMode::RdpSfp,
                 ProtocolMode::RdpSfp => ProtocolMode::Normal,
             };
-            
-            println!("\n[TX] MODE END: {} (count={})", current_mode.to_str(), count);
+
+            println!(
+                "\n[TX] MODE END: {} (count={})",
+                current_mode.to_str(),
+                count
+            );
             println!("[TX] Cleaning up connections and entering 500ms silence...");
-            
+
             active_conn = None; // Drop connection (calls csp_close)
-            
-            // SILENCE PERIOD: This is critical. It allows RDP FIN handshakes 
+
+            // SILENCE PERIOD: This is critical. It allows RDP FIN handshakes
             // to finish without competition from the next mode's packets.
             thread::sleep(Duration::from_millis(500));
-            
+
             current_mode = next_mode;
             mode_start = Instant::now();
             println!("[TX] MODE START: {}\n", current_mode.to_str());
@@ -84,8 +90,11 @@ fn main() -> anyhow::Result<()> {
                     let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
-                    
-                    if node.sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0).is_ok() {
+
+                    if node
+                        .sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0)
+                        .is_ok()
+                    {
                         bytes_sent += 200;
                         count += 1;
                     }
@@ -94,7 +103,9 @@ fn main() -> anyhow::Result<()> {
             ProtocolMode::Rdp => {
                 if active_conn.is_none() {
                     active_conn = node.connect(Priority::Norm, 2, DATA_PORT, 100, conn_opts::RDP);
-                    if active_conn.is_none() { continue; }
+                    if active_conn.is_none() {
+                        continue;
+                    }
                 }
                 let conn = active_conn.as_ref().unwrap();
                 if let Some(mut pkt) = Packet::get(200) {
@@ -106,14 +117,22 @@ fn main() -> anyhow::Result<()> {
                     if conn.send_discard(pkt, 0).is_ok() {
                         bytes_sent += 200;
                         count += 1;
-                    } else { active_conn = None; }
+                    } else {
+                        active_conn = None;
+                    }
                 }
             }
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
                 if active_conn.is_none() {
-                    let opts = if current_mode == ProtocolMode::RdpSfp { conn_opts::RDP } else { conn_opts::NONE };
+                    let opts = if current_mode == ProtocolMode::RdpSfp {
+                        conn_opts::RDP
+                    } else {
+                        conn_opts::NONE
+                    };
                     active_conn = node.connect(Priority::Norm, 2, SFP_PORT, 100, opts);
-                    if active_conn.is_none() { continue; }
+                    if active_conn.is_none() {
+                        continue;
+                    }
                 }
                 let conn = active_conn.as_ref().unwrap();
                 let size = 600;
@@ -126,15 +145,23 @@ fn main() -> anyhow::Result<()> {
                     bytes_sent += size as u64;
                     count += 1;
                     let burst_packets = (size / 180) + 1;
-                    for _ in 0..burst_packets { next_tick += interval; }
-                } else { active_conn = None; }
+                    for _ in 0..burst_packets {
+                        next_tick += interval;
+                    }
+                } else {
+                    active_conn = None;
+                }
             }
         }
 
         if last_log.elapsed() >= Duration::from_secs(5) {
             let elapsed = start_time.elapsed().as_secs_f64();
             let kbps_app = (bytes_sent as f64 / 1024.0) / elapsed;
-            println!("[Stats] App: {:.2} KB/s, Mode: {}", kbps_app, current_mode.to_str());
+            println!(
+                "[Stats] App: {:.2} KB/s, Mode: {}",
+                kbps_app,
+                current_mode.to_str()
+            );
             last_log = Instant::now();
         }
     }

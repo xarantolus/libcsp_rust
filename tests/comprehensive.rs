@@ -1,7 +1,7 @@
-use libcsp::{CspConfig, Packet, Socket, Priority, socket_opts, conn_opts, ports, CspNode};
-use std::thread;
-use std::sync::{OnceLock, Mutex, mpsc};
+use libcsp::{conn_opts, ports, socket_opts, CspConfig, CspNode, Packet, Priority, Socket};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex, OnceLock};
+use std::thread;
 
 static NODE: OnceLock<CspNode> = OnceLock::new();
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
@@ -16,7 +16,8 @@ fn ensure_init() -> CspNode {
         node.route_start_task(4096, 0).unwrap();
         node.route_load("0/0 LOOP").unwrap();
         node
-    }).clone()
+    })
+    .clone()
 }
 
 fn lock_csp() -> std::sync::MutexGuard<'static, ()> {
@@ -61,7 +62,8 @@ fn test_rdp_basic() {
     ready_rx.recv().expect("Server failed to start");
 
     // Safe connect using node
-    let conn = node.connect(Priority::Norm, 1, 15, 1000, conn_opts::RDP)
+    let conn = node
+        .connect(Priority::Norm, 1, 15, 1000, conn_opts::RDP)
         .expect("RDP connect failed");
 
     let mut pkt = Packet::get(8).expect("Failed to get packet");
@@ -69,7 +71,10 @@ fn test_rdp_basic() {
     conn.send(pkt, 1000).expect("RDP send failed");
 
     server_thread.join().expect("Server thread panicked");
-    assert!(server_received.load(Ordering::SeqCst), "Server did not receive RDP packet");
+    assert!(
+        server_received.load(Ordering::SeqCst),
+        "Server did not receive RDP packet"
+    );
 }
 
 #[test]
@@ -93,8 +98,15 @@ fn test_sfp_large_transfer() {
 
         if let Some(conn) = sock.accept(5000) {
             let received = conn.sfp_recv(5000).expect("SFP receive failed");
-            assert_eq!(received.len(), data_to_send_clone.len(), "Received data length mismatch");
-            assert_eq!(received, data_to_send_clone, "Received data content mismatch");
+            assert_eq!(
+                received.len(),
+                data_to_send_clone.len(),
+                "Received data length mismatch"
+            );
+            assert_eq!(
+                received, data_to_send_clone,
+                "Received data content mismatch"
+            );
         } else {
             panic!("Server failed to accept SFP connection");
         }
@@ -103,10 +115,12 @@ fn test_sfp_large_transfer() {
     // Wait for server to be ready
     ready_rx.recv().expect("Server failed to start");
 
-    let conn = node.connect(Priority::Norm, 1, 16, 1000, conn_opts::NONE)
+    let conn = node
+        .connect(Priority::Norm, 1, 16, 1000, conn_opts::NONE)
         .expect("SFP connect failed");
 
-    conn.sfp_send(&data_to_send, 200, 5000).expect("SFP send failed");
+    conn.sfp_send(&data_to_send, 200, 5000)
+        .expect("SFP send failed");
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -147,19 +161,16 @@ fn test_transaction_oneshot() {
     let out_buf = b"request".to_vec();
     let mut in_buf = vec![0u8; 10];
 
-    let ret = node.transaction(
-        Priority::Norm,
-        1,
-        17,
-        1000,
-        &out_buf,
-        &mut in_buf,
-        5,
-        0
-    ).expect("Transaction failed");
+    let ret = node
+        .transaction(Priority::Norm, 1, 17, 1000, &out_buf, &mut in_buf, 5, 0)
+        .expect("Transaction failed");
 
     assert_eq!(ret, 5, "Transaction should have returned 5 bytes");
-    assert_eq!(&in_buf[0..5], b"reply", "Transaction reply content mismatch");
+    assert_eq!(
+        &in_buf[0..5],
+        b"reply",
+        "Transaction reply content mismatch"
+    );
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -196,19 +207,29 @@ fn test_cmp_ident() {
     let out_buf = vec![0u8, 1u8]; // type = 0 (REQUEST), code = 1 (IDENT)
     let mut in_buf = vec![0u8; 256];
 
-    let ret = node.transaction(
-        Priority::Norm,
-        1,
-        ports::CMP,
-        1000,
-        &out_buf,
-        &mut in_buf,
-        -1,
-        0
-    ).expect("CMP transaction failed");
+    let ret = node
+        .transaction(
+            Priority::Norm,
+            1,
+            ports::CMP,
+            1000,
+            &out_buf,
+            &mut in_buf,
+            -1,
+            0,
+        )
+        .expect("CMP transaction failed");
 
-    assert!(ret > 0, "CMP transaction should return positive bytes received, got {}", ret);
-    assert!(ret <= 256, "CMP transaction should not exceed buffer size, got {}", ret);
+    assert!(
+        ret > 0,
+        "CMP transaction should return positive bytes received, got {}",
+        ret
+    );
+    assert!(
+        ret <= 256,
+        "CMP transaction should not exceed buffer size, got {}",
+        ret
+    );
 
     service_thread.join().expect("Service thread panicked");
 }
@@ -224,13 +245,21 @@ fn test_route_load() {
 
     // Verify loading same route again doesn't fail (updates/overwrites)
     let res2 = node.route_load("10/5 LOOP");
-    assert!(res2.is_ok(), "Failed to reload same route: {:?}", res2.err());
+    assert!(
+        res2.is_ok(),
+        "Failed to reload same route: {:?}",
+        res2.err()
+    );
 
     // Test loading a compatible non-overlapping address
     // Note: libcsp's static routing table has limitations - we can't load arbitrary routes
     // The format is "address/netmask interface" where interface can be LOOP, I2C, CAN, etc.
     let res3 = node.route_load("11/5 LOOP");
-    assert!(res3.is_ok(), "Failed to load second route: {:?}", res3.err());
+    assert!(
+        res3.is_ok(),
+        "Failed to load second route: {:?}",
+        res3.err()
+    );
 
     // Test error case: invalid format should fail
     let res_invalid = node.route_load("invalid");
@@ -271,7 +300,11 @@ fn test_node_ping() {
     let res = node.ping(1, 1000, 10, 0).expect("Ping failed");
 
     // Validate ping result
-    assert!(res < 1000, "Ping RTT should be less than timeout (1000ms), got {} ms", res);
+    assert!(
+        res < 1000,
+        "Ping RTT should be less than timeout (1000ms), got {} ms",
+        res
+    );
 
     service_thread.join().expect("Service thread panicked");
 }
