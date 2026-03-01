@@ -226,7 +226,7 @@ pub const BROADCAST_ADDR: u32 = sys::CSP_ID_HOST_MAX; // CSP_ID_HOST_MAX = (1 <<
 pub const ANY_PORT: u8 = sys::CSP_ANY as u8; // CSP_ANY
 
 /// Infinite timeout (block until event occurs).
-pub const MAX_TIMEOUT: u32 = sys::CSP_MAX_TIMEOUT;
+pub const MAX_TIMEOUT: u32 = u32::MAX;
 
 // ── Port enum ─────────────────────────────────────────────────────────────────
 
