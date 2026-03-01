@@ -13,6 +13,8 @@ version 2.1 of the License, or (at your option) any later version.
 
 use core::fmt;
 
+use crate::sys;
+
 /// All error codes returned by libcsp functions.
 ///
 /// Integer values are taken verbatim from `include/csp/csp_error.h`.
@@ -63,22 +65,22 @@ impl CspError {
     /// functions that return 0 on success.
     pub fn from_code(code: i32) -> Self {
         match code {
-            -1 => CspError::NoMemory,
-            -2 => CspError::InvalidArgument,
-            -3 => CspError::TimedOut,
-            -4 => CspError::ResourceInUse,
-            -5 => CspError::NotSupported,
-            -6 => CspError::Busy,
-            -7 => CspError::AlreadyInProgress,
-            -8 => CspError::ConnectionReset,
-            -9 => CspError::NoBuffers,
-            -10 => CspError::TransmitFailed,
-            -11 => CspError::DriverError,
-            -12 => CspError::Again,
-            -100 => CspError::HmacFailed,
-            -101 => CspError::XteaFailed,
-            -102 => CspError::Crc32Failed,
-            -103 => CspError::SfpError,
+            sys::CSP_ERR_NOMEM => CspError::NoMemory,
+            sys::CSP_ERR_INVAL => CspError::InvalidArgument,
+            sys::CSP_ERR_TIMEDOUT => CspError::TimedOut,
+            sys::CSP_ERR_USED => CspError::ResourceInUse,
+            sys::CSP_ERR_NOTSUP => CspError::NotSupported,
+            sys::CSP_ERR_BUSY => CspError::Busy,
+            sys::CSP_ERR_ALREADY => CspError::AlreadyInProgress,
+            sys::CSP_ERR_RESET => CspError::ConnectionReset,
+            sys::CSP_ERR_NOBUFS => CspError::NoBuffers,
+            sys::CSP_ERR_TX => CspError::TransmitFailed,
+            sys::CSP_ERR_DRIVER => CspError::DriverError,
+            sys::CSP_ERR_AGAIN => CspError::Again,
+            sys::CSP_ERR_HMAC => CspError::HmacFailed,
+            sys::CSP_ERR_XTEA => CspError::XteaFailed,
+            sys::CSP_ERR_CRC32 => CspError::Crc32Failed,
+            sys::CSP_ERR_SFP => CspError::SfpError,
             other => CspError::Other(other),
         }
     }

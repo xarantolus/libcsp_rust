@@ -42,7 +42,7 @@ use crate::Result;
 /// Sentinel for "send directly to destination address" (no via relay).
 ///
 /// Maps to `CSP_NO_VIA_ADDRESS = 0xFF`.
-pub const NO_VIA: u8 = 0xFF;
+pub const NO_VIA: u8 = sys::CSP_NO_VIA_ADDRESS as u8;
 
 // ── Individual route entry ────────────────────────────────────────────────────
 

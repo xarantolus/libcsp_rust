@@ -168,13 +168,13 @@ pub type Result<T> = core::result::Result<T, CspError>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
     /// Critical priority (0 — highest).
-    Critical = 0,
+    Critical = sys::csp_prio_t_CSP_PRIO_CRITICAL as u8,
     /// High priority (1).
-    High = 1,
+    High = sys::csp_prio_t_CSP_PRIO_HIGH as u8,
     /// Normal priority (2 — default).
-    Norm = 2,
+    Norm = sys::csp_prio_t_CSP_PRIO_NORM as u8,
     /// Low priority (3 — lowest).
-    Low = 3,
+    Low = sys::csp_prio_t_CSP_PRIO_LOW as u8,
 }
 
 // ── Socket / connection option constants ──────────────────────────────────────
@@ -184,26 +184,28 @@ pub enum Priority {
 /// These map directly to the `CSP_SO_*` constants in `csp_types.h` and can be
 /// combined with `|`.
 pub mod socket_opts {
+    use crate::sys;
+
     /// No options.
-    pub const NONE: u32 = 0x0000;
+    pub const NONE: u32 = sys::CSP_SO_NONE;
     /// Require RDP.
-    pub const RDP_REQ: u32 = 0x0001;
+    pub const RDP_REQ: u32 = sys::CSP_SO_RDPREQ;
     /// Prohibit RDP.
-    pub const RDP_PROHIB: u32 = 0x0002;
+    pub const RDP_PROHIB: u32 = sys::CSP_SO_RDPPROHIB;
     /// Require HMAC.
-    pub const HMAC_REQ: u32 = 0x0004;
+    pub const HMAC_REQ: u32 = sys::CSP_SO_HMACREQ;
     /// Prohibit HMAC.
-    pub const HMAC_PROHIB: u32 = 0x0008;
+    pub const HMAC_PROHIB: u32 = sys::CSP_SO_HMACPROHIB;
     /// Require XTEA.
-    pub const XTEA_REQ: u32 = 0x0010;
+    pub const XTEA_REQ: u32 = sys::CSP_SO_XTEAREQ;
     /// Prohibit XTEA.
-    pub const XTEA_PROHIB: u32 = 0x0020;
+    pub const XTEA_PROHIB: u32 = sys::CSP_SO_XTEAPROHIB;
     /// Require CRC32.
-    pub const CRC32_REQ: u32 = 0x0040;
+    pub const CRC32_REQ: u32 = sys::CSP_SO_CRC32REQ;
     /// Prohibit CRC32.
-    pub const CRC32_PROHIB: u32 = 0x0080;
+    pub const CRC32_PROHIB: u32 = sys::CSP_SO_CRC32PROHIB;
     /// Enable connection-less mode.
-    pub const CONN_LESS: u32 = 0x0100;
+    pub const CONN_LESS: u32 = sys::CSP_SO_CONN_LESS;
 }
 
 /// Connection options aliases (`CSP_O_*`).
@@ -218,37 +220,38 @@ pub mod conn_opts {
 }
 
 /// Broadcast address (all nodes).
-pub const BROADCAST_ADDR: u8 = 31; // CSP_ID_HOST_MAX = (1 << 5) - 1
+pub const BROADCAST_ADDR: u32 = sys::CSP_ID_HOST_MAX; // CSP_ID_HOST_MAX = (1 << 5) - 1
 
 /// Accept packets on any port (use with [`Socket::bind`]).
-pub const ANY_PORT: u8 = 255; // CSP_ANY
+pub const ANY_PORT: u8 = sys::CSP_ANY as u8; // CSP_ANY
 
 /// Infinite timeout (block until event occurs).
-pub const MAX_TIMEOUT: u32 = 0xFFFF_FFFF;
+pub const MAX_TIMEOUT: u32 = sys::CSP_MAX_TIMEOUT;
 
 // ── Port enum ─────────────────────────────────────────────────────────────────
 
 /// CSP port numbers.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Port {
     /// CSP Management Protocol (0).
-    Cmp,
+    Cmp = sys::csp_service_port_t_CSP_CMP as u8,
     /// Ping / echo (1).
-    Ping,
+    Ping = sys::csp_service_port_t_CSP_PING as u8,
     /// Process list (2).
-    Ps,
+    Ps = sys::csp_service_port_t_CSP_PS as u8,
     /// Free memory query (3).
-    MemFree,
+    MemFree = sys::csp_service_port_t_CSP_MEMFREE as u8,
     /// Reboot / shutdown (4).
-    Reboot,
+    Reboot = sys::csp_service_port_t_CSP_REBOOT as u8,
     /// Free buffer count (5).
-    BufFree,
+    BufFree = sys::csp_service_port_t_CSP_BUF_FREE as u8,
     /// Uptime query (6).
-    Uptime,
+    Uptime = sys::csp_service_port_t_CSP_UPTIME as u8,
     /// Accept packets on any port (255).
-    Any,
+    Any = sys::CSP_ANY as u8,
     /// Custom user-defined port.
-    Custom(u8),
+    Custom(u8) = 254,
 }
 
 impl From<u8> for Port {
@@ -295,20 +298,22 @@ impl Port {
 
 /// Reserved CSP service port numbers (`csp_service_port_t`).
 pub mod ports {
+    use crate::sys;
+
     /// CSP Management Protocol.
-    pub const CMP: u8 = 0;
+    pub const CMP: u32 = sys::csp_service_port_t_CSP_CMP;
     /// Ping / echo.
-    pub const PING: u8 = 1;
+    pub const PING: u32 = sys::csp_service_port_t_CSP_PING;
     /// Process list.
-    pub const PS: u8 = 2;
+    pub const PS: u32 = sys::csp_service_port_t_CSP_PS;
     /// Free memory query.
-    pub const MEMFREE: u8 = 3;
+    pub const MEMFREE: u32 = sys::csp_service_port_t_CSP_MEMFREE;
     /// Reboot / shutdown.
-    pub const REBOOT: u8 = 4;
+    pub const REBOOT: u32 = sys::csp_service_port_t_CSP_REBOOT;
     /// Free buffer count.
-    pub const BUF_FREE: u8 = 5;
+    pub const BUF_FREE: u32 = sys::csp_service_port_t_CSP_BUF_FREE;
     /// Uptime query.
-    pub const UPTIME: u8 = 6;
+    pub const UPTIME: u32 = sys::csp_service_port_t_CSP_UPTIME;
 }
 
 #[cfg(test)]

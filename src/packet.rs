@@ -157,27 +157,27 @@ impl Packet {
 
     /// Check if the RDP flag is set.
     pub fn is_rdp(&self) -> bool {
-        (self.flags() & 0x02) != 0
+        (self.flags() & sys::CSP_FRDP as u8) != 0
     }
 
     /// Check if the XTEA flag is set.
     pub fn is_xtea(&self) -> bool {
-        (self.flags() & 0x04) != 0
+        (self.flags() & sys::CSP_FXTEA as u8) != 0
     }
 
     /// Check if the HMAC flag is set.
     pub fn is_hmac(&self) -> bool {
-        (self.flags() & 0x08) != 0
+        (self.flags() & sys::CSP_FHMAC as u8) != 0
     }
 
     /// Check if the CRC32 flag is set.
     pub fn is_crc32(&self) -> bool {
-        (self.flags() & 0x01) != 0
+        (self.flags() & sys::CSP_FCRC32 as u8) != 0
     }
 
     /// Check if the Fragmentation flag is set.
     pub fn is_frag(&self) -> bool {
-        (self.flags() & 0x10) != 0
+        (self.flags() & sys::CSP_FFRAG as u8) != 0
     }
 
     /// Immutable view of the **used** payload (`[0..length()]`).
