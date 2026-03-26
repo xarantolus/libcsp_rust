@@ -22,6 +22,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 //!
 //! Do **not** use this module directly in application code.
 //! Use the safe wrappers provided by the parent crate instead.
+//!
+//! On freestanding embedded targets (`target_os = "none"`) bindgen is not run
+//! and only a minimal set of types required by `arch.rs` is provided.
 
 #![allow(
     non_upper_case_globals,
