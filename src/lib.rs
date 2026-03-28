@@ -132,6 +132,7 @@ pub mod debug;
 // examples to run with this feature enabled (e.g. via --all-features),
 // we provide a default stub implementation for host platforms.
 #[cfg(all(
+    feature = "std",
     feature = "external-arch",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]

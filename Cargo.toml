@@ -42,6 +42,12 @@ debug-timestamp = [] # Add timestamps to debug output
 # from outside this crate.
 external-arch = []
 
+# ROPI-RWPI ARM support: the export_arch! macro emits *_impl-suffixed symbols for the
+# functions that touch Rust statics (malloc, free, calloc, queue_create, get_ms).
+# The crate compiles an assembly file that provides the public csp_* names as
+# R9-saving trampolines that reload __data_start before calling the *_impl variant.
+ropi-rwpi = []
+
 [dependencies]
 bitflags = "2"
 spin = "0.9"

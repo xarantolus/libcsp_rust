@@ -44,6 +44,16 @@ fn main() {
     // 2. Compile libcsp as a static library
     compile_libcsp(&src_dir, &include_dir, &gen_include_dir);
 
+    // 2b. ROPI-RWPI trampolines: compile the assembly shim on ARM targets
+    if env::var("CARGO_FEATURE_ROPI_RWPI").is_ok()
+        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm")
+    {
+        cc::Build::new()
+            .file("src/arch/ropi_rwpi.S")
+            .compile("csp_ropi_rwpi_trampolines");
+        println!("cargo:rerun-if-changed=src/arch/ropi_rwpi.S");
+    }
+
     // 3. Generate Rust bindings via bindgen (all targets, including embedded)
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     generate_bindings(&include_dir, &gen_include_dir, &out_dir);

@@ -494,8 +494,9 @@ pub unsafe trait CspArch: Send + Sync {
 }
 
 // test_arch is a POSIX-based implementation for host platforms.
-// It requires libc and is only available on Linux, macOS, and Windows.
+// It requires libc and std, and is only available on Linux, macOS, and Windows.
 #[cfg(all(
+    feature = "std",
     any(test, feature = "external-arch"),
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
@@ -505,8 +506,14 @@ pub mod test_arch;
 #[macro_export]
 macro_rules! export_arch {
     ($impl_type:ty, $instance:expr) => {
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms() -> u32 {
+            <$impl_type as $crate::CspArch>::get_ms(&$instance)
+        }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_ms_impl() -> u32 {
             <$impl_type as $crate::CspArch>::get_ms(&$instance)
         }
         #[no_mangle]
@@ -517,8 +524,14 @@ macro_rules! export_arch {
         pub unsafe extern "C" fn csp_get_uptime_s() -> u32 {
             <$impl_type as $crate::CspArch>::get_uptime_s(&$instance)
         }
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms_isr() -> u32 {
+            <$impl_type as $crate::CspArch>::get_ms_isr(&$instance)
+        }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_get_ms_isr_impl() -> u32 {
             <$impl_type as $crate::CspArch>::get_ms_isr(&$instance)
         }
         #[no_mangle]
@@ -655,8 +668,17 @@ macro_rules! export_arch {
             }
         }
 
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_queue_create(
+            length: i32,
+            item_size: usize,
+        ) -> *mut ::core::ffi::c_void {
+            <$impl_type as $crate::CspArch>::queue_create(&$instance, length as usize, item_size)
+        }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_queue_create_impl(
             length: i32,
             item_size: usize,
         ) -> *mut ::core::ffi::c_void {
@@ -723,16 +745,34 @@ macro_rules! export_arch {
             <$impl_type as $crate::CspArch>::queue_size(&$instance, queue) as i32
         }
 
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_malloc(size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::malloc(&$instance, size)
         }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_malloc_impl(size: usize) -> *mut ::core::ffi::c_void {
+            <$impl_type as $crate::CspArch>::malloc(&$instance, size)
+        }
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_calloc(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
         }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_calloc_impl(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
+            <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
+        }
+        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_free(ptr: *mut ::core::ffi::c_void) {
+            <$impl_type as $crate::CspArch>::free(&$instance, ptr)
+        }
+        #[cfg(feature = "ropi-rwpi")]
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_free_impl(ptr: *mut ::core::ffi::c_void) {
             <$impl_type as $crate::CspArch>::free(&$instance, ptr)
         }
 
