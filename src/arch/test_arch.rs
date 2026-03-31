@@ -98,6 +98,7 @@ unsafe impl CspArch for TestArch {
         use std::collections::VecDeque;
         use std::sync::{Condvar, Mutex};
 
+        #[allow(dead_code)]
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
             not_empty: Condvar,
@@ -121,6 +122,7 @@ unsafe impl CspArch for TestArch {
             use std::collections::VecDeque;
             use std::sync::{Condvar, Mutex};
 
+            #[allow(dead_code)]
             struct TestQueue {
                 data: Mutex<VecDeque<Vec<u8>>>,
                 not_empty: Condvar,
@@ -141,6 +143,7 @@ unsafe impl CspArch for TestArch {
         use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
 
+        #[allow(dead_code)]
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
             not_empty: Condvar,
@@ -200,6 +203,7 @@ unsafe impl CspArch for TestArch {
         use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
 
+        #[allow(dead_code)]
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
             not_empty: Condvar,
@@ -262,6 +266,7 @@ unsafe impl CspArch for TestArch {
         use std::collections::VecDeque;
         use std::sync::{Condvar, Mutex};
 
+        #[allow(dead_code)]
         struct TestQueue {
             data: Mutex<VecDeque<Vec<u8>>>,
             not_empty: Condvar,
@@ -309,7 +314,7 @@ unsafe impl CspArch for TestArch {
         f: unsafe extern "C" fn(*mut c_void),
         _name: *const c_char,
         _stack: u32,
-        arg: *mut c_void,
+        _arg: *mut c_void,
         _prio: u32,
         handle: *mut *mut c_void,
     ) -> i32 {

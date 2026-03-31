@@ -120,7 +120,7 @@ impl core::fmt::Debug for Socket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{socket_opts, test_helpers::with_csp_node, Packet, Priority};
+    use crate::{socket_opts, test_helpers::with_csp_node};
 
     #[test]
     fn test_socket_create_bind_listen() {

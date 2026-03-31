@@ -44,6 +44,23 @@ use crate::Result;
 /// Maps to `CSP_NO_VIA_ADDRESS = 0xFF`.
 pub const NO_VIA: u8 = sys::CSP_NO_VIA_ADDRESS as u8;
 
+/// Set the default route (catch-all) to a given interface.
+///
+/// All packets without a more specific route will be sent via `iface`.
+///
+/// # Safety
+/// `iface` must be a valid, initialised `csp_iface_t *` for the lifetime of the route.
+pub unsafe fn set_default(iface: *mut sys::csp_iface_t) -> Result<()> {
+    unsafe { set_raw(0, 0, iface, NO_VIA) }
+}
+
+/// Set the default route via a CAN interface handle.
+///
+/// Convenience wrapper that extracts the raw pointer from a [`crate::CanInterfaceHandle`].
+pub fn set_default_can(handle: &crate::CanInterfaceHandle) -> Result<()> {
+    unsafe { set_default(handle.c_iface_ptr()) }
+}
+
 // ── Individual route entry ────────────────────────────────────────────────────
 
 /// Add or update a single route in the routing table.

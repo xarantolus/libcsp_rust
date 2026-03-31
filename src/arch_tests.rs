@@ -74,28 +74,28 @@ mod tests {
     #[test]
     fn test_strnlen_basic() {
         let s = b"hello\0";
-        let len = unsafe { ARCH.strnlen(s.as_ptr() as *const c_char, 10) };
+        let len = ARCH.strnlen(s.as_ptr() as *const c_char, 10);
         assert_eq!(len, 5);
     }
 
     #[test]
     fn test_strnlen_exact_length() {
         let s = b"hello\0";
-        let len = unsafe { ARCH.strnlen(s.as_ptr() as *const c_char, 5) };
+        let len = ARCH.strnlen(s.as_ptr() as *const c_char, 5);
         assert_eq!(len, 5);
     }
 
     #[test]
     fn test_strnlen_truncated() {
         let s = b"hello\0";
-        let len = unsafe { ARCH.strnlen(s.as_ptr() as *const c_char, 3) };
+        let len = ARCH.strnlen(s.as_ptr() as *const c_char, 3);
         assert_eq!(len, 3);
     }
 
     #[test]
     fn test_strnlen_empty() {
         let s = b"\0";
-        let len = unsafe { ARCH.strnlen(s.as_ptr() as *const c_char, 10) };
+        let len = ARCH.strnlen(s.as_ptr() as *const c_char, 10);
         assert_eq!(len, 0);
     }
 
@@ -103,7 +103,7 @@ mod tests {
     fn test_strnlen_no_null() {
         // String without null terminator within maxlen
         let s = b"hello";
-        let len = unsafe { ARCH.strnlen(s.as_ptr() as *const c_char, 3) };
+        let len = ARCH.strnlen(s.as_ptr() as *const c_char, 3);
         assert_eq!(len, 3);
     }
 
@@ -116,37 +116,31 @@ mod tests {
         let mut saveptr: *mut c_char = ptr::null_mut();
 
         // First token
-        let token1 = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token1 = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(!token1.is_null());
         let token1_str = unsafe { core::ffi::CStr::from_ptr(token1) };
         assert_eq!(token1_str.to_bytes(), b"hello");
 
         // Second token
-        let token2 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token2 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(!token2.is_null());
         let token2_str = unsafe { core::ffi::CStr::from_ptr(token2) };
         assert_eq!(token2_str.to_bytes(), b"world");
 
         // No more tokens
-        let token3 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token3 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(token3.is_null());
     }
 
@@ -156,37 +150,31 @@ mod tests {
         let delim = b":\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token1 = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token1 = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token1) }.to_bytes(),
             b"one"
         );
 
-        let token2 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token2 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),
             b"two"
         );
 
-        let token3 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token3 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token3) }.to_bytes(),
             b"three"
@@ -199,13 +187,11 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token1 = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token1 = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token1) }.to_bytes(),
             b"hello"
@@ -218,37 +204,31 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token1 = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token1 = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token1) }.to_bytes(),
             b"hello"
         );
 
-        let token2 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token2 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),
             b"world"
         );
 
-        let token3 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token3 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(token3.is_null());
     }
 
@@ -258,13 +238,11 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(token.is_null());
     }
 
@@ -274,13 +252,11 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert!(token.is_null());
     }
 
@@ -291,25 +267,21 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut c_char = ptr::null_mut();
 
-        let token1 = unsafe {
-            ARCH.strtok_r(
-                s.as_mut_ptr() as *mut c_char,
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token1 = ARCH.strtok_r(
+            s.as_mut_ptr() as *mut c_char,
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token1) }.to_bytes(),
             b"1/5 CAN"
         );
 
-        let token2 = unsafe {
-            ARCH.strtok_r(
-                ptr::null_mut(),
-                delim.as_ptr() as *const c_char,
-                &mut saveptr,
-            )
-        };
+        let token2 = ARCH.strtok_r(
+            ptr::null_mut(),
+            delim.as_ptr() as *const c_char,
+            &mut saveptr,
+        );
         assert_eq!(
             unsafe { core::ffi::CStr::from_ptr(token2) }.to_bytes(),
             b"2 ETH"
@@ -323,7 +295,7 @@ mod tests {
         let mut saveptr: *mut c_char = ptr::null_mut();
 
         let tokens: Vec<&[u8]> = (0..4)
-            .filter_map(|i| unsafe {
+            .filter_map(|i| {
                 let tok = if i == 0 {
                     ARCH.strtok_r(
                         s.as_mut_ptr() as *mut c_char,
@@ -340,7 +312,7 @@ mod tests {
                 if tok.is_null() {
                     None
                 } else {
-                    Some(core::ffi::CStr::from_ptr(tok).to_bytes())
+                    Some(unsafe { core::ffi::CStr::from_ptr(tok) }.to_bytes())
                 }
             })
             .collect();

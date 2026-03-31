@@ -110,7 +110,7 @@ pub type DebugHookFn = fn(DebugLevel, &str);
 use core::sync::atomic::{AtomicUsize, Ordering};
 static RUST_DEBUG_HOOK: AtomicUsize = AtomicUsize::new(0);
 
-/// External C functions from csp_debug_wrapper.c
+// External C functions from csp_debug_wrapper.c
 #[cfg(feature = "debug")]
 extern "C" {
     fn csp_debug_set_rust_callback(callback: Option<extern "C" fn(c_uint, *const c_char)>);

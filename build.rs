@@ -408,6 +408,16 @@ fn compile_libcsp(
         build.flag("-include").flag("csp/csp_external_arch.h");
     }
 
+    // ROPI-RWPI: compile C code with R9-relative data access so globals are
+    // accessed through the static-base register, matching user-space binaries.
+    if env::var("CARGO_FEATURE_ROPI_RWPI").is_ok()
+        && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm")
+    {
+        build.flag("-msingle-pic-base");
+        build.flag("-mpic-register=r9");
+        build.flag("-mno-pic-data-is-text-relative");
+    }
+
     build.define("CSP_USE_RTABLE", "1");
 
     let debug = if env::var("CARGO_FEATURE_DEBUG").is_ok() {
