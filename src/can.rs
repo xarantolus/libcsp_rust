@@ -16,6 +16,7 @@ use crate::sys;
 /// Trait for a CAN driver that can transmit raw CAN frames.
 ///
 /// Implement this for your hardware-specific CAN peripheral.
+#[allow(clippy::result_unit_err)]
 pub trait CanDriver: Send {
     /// Transmit a single CAN frame.
     ///

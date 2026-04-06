@@ -9,6 +9,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # All features except ropi-rwpi (requires ARM asm trampolines) and
+  # usart-windows (wrong platform).
+  CI_FEATURES: "std,rdp,rdp-fast-close,crc32,hmac,xtea,qos,promisc,dedup,cidr-rtable,socketcan,zmq,usart-linux,debug,debug-timestamp,external-arch"
 
 jobs:
   test-linux:
@@ -30,13 +33,13 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build
-        run: cargo build --all-targets --all-features
+        run: cargo build --all-targets --features "$CI_FEATURES"
 
       - name: Test
-        run: cargo test --all-features
+        run: cargo test --features "$CI_FEATURES"
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings
 
       - name: Check Formatting
         run: cargo fmt --all -- --check

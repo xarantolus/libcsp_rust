@@ -74,6 +74,7 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     // Safety: libcsp is assumed to be initialised.
     c_iface.mtu = unsafe { sys::csp_buffer_data_size() } as u16;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(InterfaceState {
         user_iface: spin::Mutex::new(Box::new(interface)),
         c_iface: UnsafeCell::new(c_iface),

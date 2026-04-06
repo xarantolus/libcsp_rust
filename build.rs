@@ -630,10 +630,7 @@ fn gcc_builtin_include() -> Vec<String> {
             }
         }
         // newlib / system headers (stdint.h, string.h, etc.)
-        for candidate in &[
-            "/usr/arm-none-eabi/include",
-            "/usr/include/newlib",
-        ] {
+        for candidate in &["/usr/arm-none-eabi/include", "/usr/include/newlib"] {
             if std::path::Path::new(candidate).exists() {
                 paths.push((*candidate).to_owned());
                 break;
@@ -656,10 +653,8 @@ fn gcc_builtin_include() -> Vec<String> {
             paths.push(path);
         }
     }
-    if paths.is_empty() {
-        if std::path::Path::new("/usr/include").exists() {
-            paths.push("/usr/include".into());
-        }
+    if paths.is_empty() && std::path::Path::new("/usr/include").exists() {
+        paths.push("/usr/include".into());
     }
     paths
 }
@@ -694,7 +689,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target = env::var("TARGET").unwrap_or_default();
-    let is_arm_embedded = target.contains("thumb") || target.contains("arm-none-eabi")
+    let is_arm_embedded = target.contains("thumb")
+        || target.contains("arm-none-eabi")
         || matches!(target_os.as_str(), "none" | "unknown");
     let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
 

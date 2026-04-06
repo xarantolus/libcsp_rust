@@ -50,6 +50,7 @@ impl Prng {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ProtocolMode {
     Normal,
     Rdp,
@@ -68,7 +69,7 @@ impl ProtocolMode {
         }
     }
 
-    pub fn to_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ProtocolMode::Normal => "NORMAL (UDP-like)",
             ProtocolMode::Rdp => "RDP (Reliable)",

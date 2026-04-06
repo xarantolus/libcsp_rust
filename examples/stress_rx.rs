@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
                 bytes_recv += data.len() as u64;
                 count += 1;
 
-                if count % 100 == 0 {
+                if count.is_multiple_of(100) {
                     println!(
                         "[RX] Received 100 packets (latest count={}, from {}:{})",
                         pkt_count, src_addr, src_port
@@ -120,48 +120,38 @@ fn main() -> anyhow::Result<()> {
                 println!("[RX] SFP session started from {}", src_addr);
             }
 
-            loop {
-                match conn.sfp_recv(500) {
-                    Ok(data) => {
-                        let data: Vec<u8> = data;
-                        if data.len() < 8 {
-                            errors += 1;
-                            continue;
-                        }
-                        let mut count_buf = [0u8; 8];
-                        count_buf.copy_from_slice(&data[0..8]);
-                        let pkt_count = u64::from_le_bytes(count_buf);
-
-                        let mut expected = vec![0u8; data.len()];
-                        expected[0..8].copy_from_slice(&count_buf);
-                        let mut blob_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
-                        blob_prng.fill(&mut expected[8..]);
-
-                        if data != expected {
-                            eprintln!(
-                                "[RX] SFP DATA ERROR from {} at count {}! Got {} bytes",
-                                src_addr,
-                                pkt_count,
-                                data.len()
-                            );
-                            errors += 1;
-                        }
-                        bytes_recv += data.len() as u64;
-                        count += 1;
-                        println!(
-                            "[RX] SFP blob {}: {} bytes from {}",
-                            pkt_count,
-                            data.len(),
-                            src_addr
-                        );
-                    }
-                    Err(_) => {
-                        // Timeout with no new blob — TX has either paused or
-                        // closed the connection. Exit the inner loop so we can
-                        // accept a new connection or service the data socket.
-                        break;
-                    }
+            while let Ok(data) = conn.sfp_recv(500) {
+                let data: Vec<u8> = data;
+                if data.len() < 8 {
+                    errors += 1;
+                    continue;
                 }
+                let mut count_buf = [0u8; 8];
+                count_buf.copy_from_slice(&data[0..8]);
+                let pkt_count = u64::from_le_bytes(count_buf);
+
+                let mut expected = vec![0u8; data.len()];
+                expected[0..8].copy_from_slice(&count_buf);
+                let mut blob_prng = Prng::new(PRNG_SEED ^ (pkt_count as u32));
+                blob_prng.fill(&mut expected[8..]);
+
+                if data != expected {
+                    eprintln!(
+                        "[RX] SFP DATA ERROR from {} at count {}! Got {} bytes",
+                        src_addr,
+                        pkt_count,
+                        data.len()
+                    );
+                    errors += 1;
+                }
+                bytes_recv += data.len() as u64;
+                count += 1;
+                println!(
+                    "[RX] SFP blob {}: {} bytes from {}",
+                    pkt_count,
+                    data.len(),
+                    src_addr
+                );
             }
 
             if is_rdp {

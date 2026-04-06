@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
 
             println!(
                 "\n[TX] MODE END: {} (count={})",
-                current_mode.to_str(),
+                current_mode.as_str(),
                 count
             );
             println!("[TX] Cleaning up connections and entering 500ms silence...");
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
 
             current_mode = next_mode;
             mode_start = Instant::now();
-            println!("[TX] MODE START: {}\n", current_mode.to_str());
+            println!("[TX] MODE START: {}\n", current_mode.as_str());
         }
 
         // 3. Mode Logic
@@ -160,7 +160,7 @@ fn main() -> anyhow::Result<()> {
             println!(
                 "[Stats] App: {:.2} KB/s, Mode: {}",
                 kbps_app,
-                current_mode.to_str()
+                current_mode.as_str()
             );
             last_log = Instant::now();
         }

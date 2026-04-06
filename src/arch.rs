@@ -51,6 +51,7 @@ use core::ffi::{c_char, c_void};
 /// primitives with valid pointer handling. Many methods take raw pointers that must be
 /// valid for the operation being performed. Incorrect implementations can lead to
 /// undefined behavior, memory corruption, or crashes.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub unsafe trait CspArch: Send + Sync {
     // ── Time (REQUIRED) ─────────────────────────────────────────────────────
 
@@ -506,11 +507,13 @@ pub mod test_arch;
 #[macro_export]
 macro_rules! export_arch {
     ($impl_type:ty, $instance:expr) => {
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms() -> u32 {
             <$impl_type as $crate::CspArch>::get_ms(&$instance)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms_impl() -> u32 {
@@ -524,11 +527,13 @@ macro_rules! export_arch {
         pub unsafe extern "C" fn csp_get_uptime_s() -> u32 {
             <$impl_type as $crate::CspArch>::get_uptime_s(&$instance)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms_isr() -> u32 {
             <$impl_type as $crate::CspArch>::get_ms_isr(&$instance)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
         pub unsafe extern "C" fn csp_get_ms_isr_impl() -> u32 {
@@ -668,6 +673,7 @@ macro_rules! export_arch {
             }
         }
 
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_queue_create(
@@ -676,6 +682,7 @@ macro_rules! export_arch {
         ) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::queue_create(&$instance, length as usize, item_size)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
         pub unsafe extern "C" fn csp_queue_create_impl(
@@ -745,31 +752,40 @@ macro_rules! export_arch {
             <$impl_type as $crate::CspArch>::queue_size(&$instance, queue) as i32
         }
 
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_malloc(size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::malloc(&$instance, size)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
         pub unsafe extern "C" fn csp_malloc_impl(size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::malloc(&$instance, size)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_calloc(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
-        pub unsafe extern "C" fn csp_calloc_impl(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
+        pub unsafe extern "C" fn csp_calloc_impl(
+            nmemb: usize,
+            size: usize,
+        ) -> *mut ::core::ffi::c_void {
             <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
         pub unsafe extern "C" fn csp_free(ptr: *mut ::core::ffi::c_void) {
             <$impl_type as $crate::CspArch>::free(&$instance, ptr)
         }
+        #[allow(unexpected_cfgs)]
         #[cfg(feature = "ropi-rwpi")]
         #[no_mangle]
         pub unsafe extern "C" fn csp_free_impl(ptr: *mut ::core::ffi::c_void) {

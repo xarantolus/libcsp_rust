@@ -114,10 +114,10 @@ extern crate alloc;
 pub mod sys;
 
 pub mod arch;
+pub mod can;
 mod connection;
 mod error;
 mod init;
-pub mod can;
 pub mod interface;
 mod packet;
 pub mod promisc;
@@ -145,10 +145,10 @@ mod arch_default_export {
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 pub use arch::CspArch;
+pub use can::{CanDriver, CanInterfaceHandle};
 pub use connection::Connection;
 pub use error::CspError;
 pub use init::{CspConfig, CspNode};
-pub use can::{CanDriver, CanInterfaceHandle};
 pub use interface::{CspInterface, InterfaceHandle};
 pub use packet::Packet;
 pub use service::{Dispatcher, Ident, IfStats};
@@ -223,7 +223,7 @@ pub mod conn_opts {
 }
 
 /// Broadcast address (all nodes).
-pub const BROADCAST_ADDR: u32 = sys::CSP_ID_HOST_MAX; // CSP_ID_HOST_MAX = (1 << 5) - 1
+pub const BROADCAST_ADDR: u8 = sys::CSP_ID_HOST_MAX as u8; // CSP_ID_HOST_MAX = (1 << 5) - 1
 
 /// Accept packets on any port (use with [`Socket::bind`]).
 pub const ANY_PORT: u8 = sys::CSP_ANY as u8; // CSP_ANY
@@ -304,19 +304,19 @@ pub mod ports {
     use crate::sys;
 
     /// CSP Management Protocol.
-    pub const CMP: u32 = sys::csp_service_port_t_CSP_CMP;
+    pub const CMP: u8 = sys::csp_service_port_t_CSP_CMP as u8;
     /// Ping / echo.
-    pub const PING: u32 = sys::csp_service_port_t_CSP_PING;
+    pub const PING: u8 = sys::csp_service_port_t_CSP_PING as u8;
     /// Process list.
-    pub const PS: u32 = sys::csp_service_port_t_CSP_PS;
+    pub const PS: u8 = sys::csp_service_port_t_CSP_PS as u8;
     /// Free memory query.
-    pub const MEMFREE: u32 = sys::csp_service_port_t_CSP_MEMFREE;
+    pub const MEMFREE: u8 = sys::csp_service_port_t_CSP_MEMFREE as u8;
     /// Reboot / shutdown.
-    pub const REBOOT: u32 = sys::csp_service_port_t_CSP_REBOOT;
+    pub const REBOOT: u8 = sys::csp_service_port_t_CSP_REBOOT as u8;
     /// Free buffer count.
-    pub const BUF_FREE: u32 = sys::csp_service_port_t_CSP_BUF_FREE;
+    pub const BUF_FREE: u8 = sys::csp_service_port_t_CSP_BUF_FREE as u8;
     /// Uptime query.
-    pub const UPTIME: u32 = sys::csp_service_port_t_CSP_UPTIME;
+    pub const UPTIME: u8 = sys::csp_service_port_t_CSP_UPTIME as u8;
 }
 
 #[cfg(test)]

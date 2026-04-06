@@ -316,6 +316,7 @@ impl CspNode {
     ///   buffer.  `Ok(())` is returned and `packet` is consumed.
     /// - **On failure**: The packet is returned as `Err((CspError, Packet))`
     ///   so the caller can inspect or drop it.
+    #[allow(clippy::too_many_arguments)]
     pub fn sendto(
         &self,
         prio: Priority,

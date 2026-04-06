@@ -92,22 +92,22 @@ fn test_ident_contains_hostname() {
     // and check they contain reasonable ASCII content
     assert!(ident.hostname.is_ascii(), "Hostname should be ASCII");
     assert!(
-        ident.model.chars().all(|c| c.is_ascii()),
+        ident.model.is_ascii(),
         "Model should be ASCII, got: '{}'",
         ident.model
     );
     assert!(
-        ident.revision.chars().all(|c| c.is_ascii()),
+        ident.revision.is_ascii(),
         "Revision should be ASCII, got: '{}'",
         ident.revision
     );
     assert!(
-        ident.date.chars().all(|c| c.is_ascii()),
+        ident.date.is_ascii(),
         "Date should be ASCII, got: '{}'",
         ident.date
     );
     assert!(
-        ident.time.chars().all(|c| c.is_ascii()),
+        ident.time.is_ascii(),
         "Time should be ASCII, got: '{}'",
         ident.time
     );
