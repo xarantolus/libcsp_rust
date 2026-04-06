@@ -22,6 +22,27 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// Returns true when building for a bare-metal embedded target (no OS).
+///
+/// This is used alongside the `external-arch` feature to decide whether to
+/// use the external arch stubs instead of POSIX/Windows arch implementations.
+///
+/// We check this explicitly because Cargo workspace feature unification can
+/// strip the `external-arch` feature when multiple workspace members depend
+/// on libcsp with different feature sets. Detecting the target directly is
+/// a reliable fallback.
+fn is_embedded_target() -> bool {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    matches!(target_os.as_str(), "none" | "unknown" | "")
+        || env::var("TARGET").is_ok_and(|t| t.contains("thumb") || t.contains("arm-none"))
+}
+
+/// Returns true when the arch implementation is provided externally (in Rust)
+/// rather than by libcsp's built-in POSIX/Windows/macOS C implementations.
+fn uses_external_arch() -> bool {
+    env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() || is_embedded_target()
+}
+
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let libcsp_dir = PathBuf::from("libcsp");
@@ -37,7 +58,7 @@ fn main() {
     fs::create_dir_all(&gen_csp_dir).expect("failed to create generated include dir");
     generate_autoconfig(&gen_csp_dir);
 
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+    if uses_external_arch() {
         generate_external_arch_headers(&gen_csp_dir);
     }
 
@@ -117,7 +138,8 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
 
-    // OS defines
+    // OS defines — bare-metal targets still set CSP_POSIX as a header placeholder,
+    // but the external-arch mechanism prevents POSIX headers from being included.
     let os_define = match target_os.as_str() {
         "windows" => "#define CSP_WINDOWS 1\n#define CSP_POSIX  0\n#define CSP_MACOSX 0",
         "macos" => "#define CSP_MACOSX 1\n#define CSP_POSIX  0\n#define CSP_WINDOWS 0",
@@ -356,6 +378,7 @@ fn compile_libcsp(
     gen_include_dir: &std::path::Path,
 ) {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let external_arch = uses_external_arch();
 
     let mut build = cc::Build::new();
 
@@ -402,7 +425,7 @@ fn compile_libcsp(
         "CSP_DEBUG_TIMESTAMP",
     );
 
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+    if external_arch {
         // Force-include our external arch header.
         // The header defines guards to prevent libcsp's arch headers from being included.
         build.flag("-include").flag("csp/csp_external_arch.h");
@@ -461,7 +484,7 @@ fn compile_libcsp(
     }
 
     // Compile mini-scanf for external-arch (sscanf with varargs support)
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+    if external_arch {
         compile_mini_scanf();
     }
 
@@ -498,13 +521,13 @@ fn compile_libcsp(
     }
 
     // Generic arch files (not OS-specific)
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_err() {
+    if !external_arch {
         build.file(src_dir.join("arch/csp_system.c"));
         build.file(src_dir.join("arch/csp_time.c"));
     }
 
     // OS-specific arch files
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_err() {
+    if !external_arch {
         match target_os.as_str() {
             "windows" => {
                 build.define("CSP_WINDOWS", "1");
@@ -775,7 +798,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
     // When using external-arch, force-include the stub header so bindgen sees
     // the opaque pointer types (csp_mutex_t = void*, etc.) rather than the
     // POSIX pthread types that would otherwise be included.
-    if env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() {
+    if uses_external_arch() {
         let arch_header = gen_include_dir
             .join("csp/csp_external_arch.h")
             .to_str()
