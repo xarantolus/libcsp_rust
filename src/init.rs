@@ -330,16 +330,19 @@ impl CspNode {
         let prio_u8 = prio as u8;
         debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
         let raw = packet.into_raw();
+        // csp_sendto returns CSP_ERR_NONE (0) on success and a negative error
+        // code (CSP_ERR_NOTSUP, etc.) on failure — *not* the 0/1 convention
+        // that csp_send uses. On success libcsp has consumed the packet via
+        // the interface's nexthop; on failure the packet is still live and
+        // we reconstruct it so Drop frees the buffer exactly once.
         // Safety: `raw` is a valid packet obtained from `Packet::get`.
-        // CSP takes ownership of the buffer if it returns 1.
-        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
+        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)`.
         let ret = unsafe { sys::csp_sendto(prio_u8, dst, dst_port, src_port, opts, raw, timeout) };
-        if ret == 1 {
-            // CSP owns `raw` now — do NOT reconstruct a Packet from it.
+        if ret == sys::CSP_ERR_NONE as i32 {
             Ok(())
         } else {
-            // Safety: CSP did not take ownership, so we can safely reconstruct
-            // the Packet to ensure the buffer is eventually freed.
+            // Safety: CSP did not take ownership on the failure path, so we
+            // can safely reconstruct the Packet to ensure the buffer is freed.
             let returned = unsafe { Packet::from_raw(raw) };
             Err((crate::CspError::TransmitFailed, returned))
         }
