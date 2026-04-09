@@ -44,6 +44,13 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
+      - name: Build custom_arch external example
+        # Standalone crate that disables `host-default-arch` so it can supply
+        # its own `csp_*` symbols via `export_arch!`. Built separately so the
+        # parent crate's full feature build (which includes `host-default-arch`)
+        # doesn't try to link both copies.
+        run: cargo build --manifest-path examples/custom_arch_external/Cargo.toml
+
   build-embedded:
     name: Build (Embassy Example)
     runs-on: ubuntu-latest

@@ -7,12 +7,23 @@ license = "LGPL-2.1"
 links = "csp"
 
 [features]
-default = ["std", "rdp", "crc32", "hmac", "xtea", "qos", "promisc", "dedup"]
+default = ["std", "rdp", "crc32", "hmac", "xtea", "qos", "promisc", "dedup", "host-default-arch"]
 
 # Pull in the standard library. Disable to build for no_std targets.
 # When disabled you still need `alloc` (for CString / heap-allocated strings
 # in CspConfig). The CSP buffer pool itself never calls the Rust allocator.
 std = []
+
+# Auto-export a POSIX `TestArch` as the C-side OS shim when `external-arch`
+# is enabled on a host platform (Linux/macOS/Windows). On by default so that
+# `cargo test --features external-arch` and the in-tree examples link without
+# requiring the user to invoke `export_arch!` themselves.
+#
+# Disable (via `default-features = false`) when you want to provide your own
+# arch implementation on a host target — e.g., the `examples/custom_arch_external`
+# sub-crate. Disabling has no effect on bare-metal targets, where the host
+# arch is excluded by `target_os` regardless.
+host-default-arch = []
 
 # Security / protocol features
 rdp           = []   # Reliable Datagram Protocol

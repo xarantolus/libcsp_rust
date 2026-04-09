@@ -132,9 +132,14 @@ pub mod debug;
 // architecture-specific implementation. To allow standard host tests and
 // examples to run with this feature enabled (e.g. via --all-features),
 // we provide a default stub implementation for host platforms.
+//
+// Gated additionally on `host-default-arch` (default-on) so that downstream
+// crates wanting to provide their own arch on a host target can opt out via
+// `default-features = false` — see `examples/custom_arch_external/`.
 #[cfg(all(
     feature = "std",
     feature = "external-arch",
+    feature = "host-default-arch",
     any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 mod arch_default_export {

@@ -16,7 +16,15 @@
 //! The stubs below return the safest possible no-op values. On a real target
 //! you would back them with your RTOS's semaphore/mutex/queue/heap APIs.
 //!
-//! Run with: cargo run --example custom_arch
+//! ## Why a separate crate?
+//!
+//! This example lives in its own crate (rather than `examples/custom_arch.rs`)
+//! because it needs `libcsp` built with `default-features = false` —
+//! specifically without `host-default-arch`. Otherwise both the parent crate
+//! and this binary would emit `csp_*` symbols, and the linker would fail with
+//! duplicate definitions.
+//!
+//! Run with: `cd examples/custom_arch_external && cargo run`
 
 extern crate alloc;
 use core::ffi::c_void;

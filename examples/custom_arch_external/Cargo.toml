@@ -1,0 +1,29 @@
+[package]
+name = "custom-arch-external-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone example crate that demonstrates providing a custom architecture
+# implementation via `libcsp::export_arch!`. We disable the parent crate's
+# default features so the built-in `host-default-arch` shim is excluded —
+# otherwise both this binary and `libcsp` would emit `csp_*` symbols and the
+# linker would fail with duplicate definitions.
+#
+# Build it with `cargo build` from this directory, or
+# `cargo build -p custom-arch-external-example` if added to a workspace.
+
+[features]
+default = []
+# Forwarding feature: when enabled, also enables `libcsp/ropi-rwpi`. The
+# `libcsp::export_arch!` macro emits `#[cfg(feature = "ropi-rwpi")]` arms in
+# its expansion, so any crate calling the macro must declare a `ropi-rwpi`
+# feature locally to avoid `unexpected_cfgs` lint warnings.
+ropi-rwpi = ["libcsp/ropi-rwpi"]
+
+[dependencies]
+libcsp = { path = "../..", default-features = false, features = ["std", "rdp", "external-arch"] }
+
+[[bin]]
+name = "custom_arch"
+path = "src/main.rs"

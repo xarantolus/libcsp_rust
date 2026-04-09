@@ -3,6 +3,14 @@ name = "embassy-example"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+# Forwarding feature: when enabled, also enables `libcsp/ropi-rwpi`. The
+# `libcsp::export_arch!` macro emits `#[cfg(feature = "ropi-rwpi")]` arms in
+# its expansion, so any crate calling the macro must declare a `ropi-rwpi`
+# feature locally to avoid `unexpected_cfgs` lint warnings.
+ropi-rwpi = ["libcsp/ropi-rwpi"]
+
 [dependencies]
 embassy-stm32 = { version = "0.1", features = ["stm32l4r5zi", "unstable-pac", "memory-x", "time-driver-any"] }
 embassy-executor = { version = "0.5", features = ["arch-cortex-m", "executor-thread", "task-arena-size-4096"] }
