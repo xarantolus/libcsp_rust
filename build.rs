@@ -790,9 +790,11 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         .clang_arg("-DCSP_USE_RTABLE=1");
 
     // For ARM embedded targets, tell clang to generate 32-bit layouts and
-    // point it at the ARM newlib/GCC headers instead of the host's.
+    // point it at the ARM newlib/GCC headers instead of the host's. Forward
+    // the actual cargo TARGET so the `hf` / non-`hf` ABI matches what cc is
+    // compiling libcsp with.
     if is_arm_embedded {
-        builder = builder.clang_arg("--target=thumbv7em-none-eabi");
+        builder = builder.clang_arg(format!("--target={target}"));
     }
 
     // When using external-arch, force-include the stub header so bindgen sees
