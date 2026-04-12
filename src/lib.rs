@@ -120,6 +120,7 @@ mod error;
 mod init;
 pub mod interface;
 mod packet;
+pub mod peek_poke;
 pub mod promisc;
 pub mod route;
 pub mod service;

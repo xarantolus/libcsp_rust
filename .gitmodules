@@ -1,6 +1,6 @@
 [submodule "libcsp"]
 	path = libcsp
-	url = https://github.com/libcsp/libcsp
+	url = https://github.com/xarantolus/libcsp
 [submodule "libcsp-sys/mini-scanf"]
 	path = libcsp-sys/mini-scanf
 	url = https://github.com/MuratovAS/mini-scanf.git
