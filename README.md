@@ -1,4 +1,4 @@
-# libcsp — Rust bindings for libcsp v1.6
+# libcsp — Rust bindings for libcsp v2.1
 
 Safe, idiomatic Rust wrappers for the
 [Cubesat Space Protocol](https://github.com/libcsp/libcsp) C library.
@@ -9,6 +9,9 @@ Safe, idiomatic Rust wrappers for the
   wrappers (`Packet`, `Connection`, `CspNode`).
 - **`no_std` compatible** — disable the `std` feature; `alloc` is still
   required for `CspConfig` string fields.
+- **Wire-format v1 by default** — 4-byte header, 5-bit addresses (0–31), for
+  compatibility with existing flight hardware. Opt into v2 framing with
+  `CspConfig::version(2)`.
 
 ---
 
@@ -38,7 +41,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-libcsp = { path = "." }   # or from crates.io once published
+libcsp = { version = "2.1", path = "." }   # or from crates.io once published
 ```
 
 ### Server example
@@ -53,20 +56,18 @@ fn main() {
         .hostname("my-cubesat")
         .model("CubeSat-1U")
         .revision("v1.0")
-        .buffers(20, 256)
         .init()
         .expect("csp_init failed");
 
-    // 2. Start the router task (spawns a POSIX thread on Linux)
-    node.route_start_task(4096, 0).expect("router task failed");
+    // 2. Start the router task (spawns a POSIX thread on Linux/macOS)
+    node.route_start_task(0, 0).expect("router task failed");
 
-    // 3. Add a loopback route for local testing:
-    //    (use sys::csp_rtable_set or add ifaces with the raw sys module)
+    // 3. Add a loopback route for local testing
+    node.route_load("0/0 LOOP").unwrap();
 
     // 4. Create a server socket on port 10
-    let sock = Socket::new(0).expect("csp_socket failed");
+    let mut sock = Socket::new(0);
     sock.bind(10).unwrap();
-    sock.listen(5).unwrap();
 
     println!("Listening on CSP port 10 …");
 
@@ -99,11 +100,11 @@ fn main() {
     let node = CspConfig::new()
         .address(2)
         .hostname("ground-station")
-        .buffers(10, 256)
         .init()
         .expect("csp_init failed");
 
-    node.route_start_task(4096, 0).unwrap();
+    node.route_start_task(0, 0).unwrap();
+    node.route_load("0/0 LOOP").unwrap();
 
     // Connect to node 1, port 10, with normal priority, no connection options
     let conn = node
@@ -114,11 +115,10 @@ fn main() {
     let mut pkt = Packet::get(32).expect("CSP buffer pool exhausted");
     pkt.write(b"hello from Rust!").unwrap();
 
-    // send() returns Ok(()) on success; on failure returns Err((err, pkt))
-    match conn.send(pkt, 0) {
-        Ok(()) => println!("Sent!"),
-        Err((e, _returned_pkt)) => eprintln!("Send failed: {e}"),
-    }
+    // send() always consumes the packet — libcsp frees the buffer whether
+    // delivery succeeds or fails.
+    conn.send(pkt);
+    println!("Sent!");
     // conn is closed on drop
 }
 ```
@@ -126,13 +126,13 @@ fn main() {
 ### Connectionless (UDP-style) example
 
 ```rust
-use libcsp::{CspConfig, Socket, socket_opts};
+use libcsp::{CspConfig, Packet, Priority, Socket, socket_opts};
 
 fn main() {
     let node = CspConfig::new().address(3).init().unwrap();
-    node.route_start_task(4096, 0).unwrap();
+    node.route_start_task(0, 0).unwrap();
 
-    let sock = Socket::new(socket_opts::CONN_LESS).unwrap();
+    let mut sock = Socket::new(socket_opts::CONN_LESS);
     sock.bind(20).unwrap();
 
     while let Some(pkt) = sock.recvfrom(1000) {
@@ -147,39 +147,45 @@ fn main() {
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `std` | ✓ | `std::error::Error` impl for `CspError` |
+| `std` | ✓ | `std::error::Error` impl for `CspError` and host-side helpers |
 | `rdp` | ✓ | Reliable Datagram Protocol |
-| `crc32` | ✓ | CRC32 packet integrity check |
+| `rdp-fast-close` | – | Fast close of RDP connections (implies `rdp`) |
 | `hmac` | ✓ | HMAC-SHA1 authentication |
-| `xtea` | ✓ | XTEA encryption |
-| `qos` | ✓ | Quality-of-Service priority queues |
 | `promisc` | ✓ | Promiscuous receive mode |
-| `dedup` | ✓ | Packet deduplication |
-| `cidr-rtable` | – | CIDR routing table (default: static) |
+| `dedup` | ✓ | Packet deduplication (runtime toggle via `CspConfig::dedup`) |
+| `host-default-arch` | ✓ | Auto-export POSIX arch shims when `external-arch` is on (Linux/macOS) |
 | `socketcan` | – | Linux SocketCAN driver (`libsocketcan` required) |
 | `zmq` | – | ZMQ hub interface (`libzmq` required) |
 | `usart-linux` | – | Linux USART / KISS driver |
-| `usart-windows` | – | Windows USART driver |
-| `debug` | – | CSP debug/log output to stdout |
-| `debug-timestamp` | – | Prepend timestamps to debug output |
+| `debug` | – | CSP debug counters and per-event print toggles |
+| `external-arch` | – | Provide your own OS primitives via the `CspArch` trait |
+| `zmq-v1-fixup` | – | Little-endian CSP v1 headers over ZMQ (legacy bridging) |
+| `buffer-zero-clear` | – | Zero freed buffers on release |
+| `ropi-rwpi` | – | ROPI/RWPI trampolines for R9-based ARM position independence |
 
 ### Buffer / connection sizing
 
-Override the compile-time sizing constants via environment variables before
-running `cargo build`:
+Buffer count, buffer size and connection limits are compile-time constants.
+Override them via environment variables before running `cargo build`:
 
 ```sh
-LIBCSP_BUFFER_SIZE=512      # bytes per packet buffer (default 256)
-LIBCSP_BUFFER_COUNT=32      # number of packet buffers (default 10)
-LIBCSP_CONN_MAX=20          # max simultaneous connections (default 10)
-LIBCSP_CONN_RXQUEUE_LEN=16  # per-connection Rx queue (default 10)
-LIBCSP_QFIFO_LEN=50         # router FIFO length (default 25)
-LIBCSP_PORT_MAX_BIND=58     # highest bindable port (default 24, max 62)
-LIBCSP_RTABLE_SIZE=20       # routing table entries (default 10)
-LIBCSP_RDP_MAX_WINDOW=10    # RDP window size (default 20)
+LIBCSP_BUFFER_SIZE=512         # bytes per packet buffer
+LIBCSP_BUFFER_COUNT=32         # number of packet buffers
+LIBCSP_CONN_MAX=20             # max simultaneous connections
+LIBCSP_CONN_RXQUEUE_LEN=16     # per-connection Rx queue
+LIBCSP_QFIFO_LEN=50            # router FIFO length
+LIBCSP_PORT_MAX_BIND=58        # highest bindable port (max 62)
+LIBCSP_RTABLE_SIZE=20          # routing table entries
+LIBCSP_MAX_INTERFACES=6        # max registered interfaces
+LIBCSP_RDP_MAX_WINDOW=10       # RDP window size
+LIBCSP_PACKET_PADDING_BYTES=8  # pre-data scratch bytes (header/IV space)
 ```
 
-**Important:** `LIBCSP_PORT_MAX_BIND` controls the port range split:
+Read the resolved values back at runtime via `libcsp::consts::*` (e.g.
+`libcsp::consts::BUFFER_SIZE`, `libcsp::consts::BUFFER_COUNT`, …).
+
+**Port range split:** `LIBCSP_PORT_MAX_BIND` controls where the bindable
+port range ends:
 - Ports 0 to `PORT_MAX_BIND`: Bindable by servers
 - Ports (`PORT_MAX_BIND`+1) to 63: Ephemeral (auto-assigned for client connections)
 - Must be ≤ 62 (leaving at least 1 port for ephemeral use)
@@ -190,45 +196,31 @@ See [USAGE.md](USAGE.md#port-architecture) for details on port assignment.
 
 ## Debug and Logging
 
-Enable the `debug` feature to capture CSP log messages in Rust:
+Enable the `debug` feature to activate CSP's counter-based diagnostics and
+per-event print toggles:
 
 ```toml
 [dependencies]
-libcsp = { version = "1.6", features = ["debug"] }
+libcsp = { version = "2.1", features = ["debug"] }
 ```
-
-### Custom Log Handlers
 
 ```rust
-use libcsp::debug::{set_debug_level, set_debug_hook, DebugLevel};
+use libcsp::debug::{self, RdpTrace};
 
-// Enable specific debug levels
-set_debug_level(DebugLevel::Info, true);
-set_debug_level(DebugLevel::Error, true);
+// Snapshot the current error counters.
+let c = debug::counters();
+println!("buffer_out={} conn_out={} errno={}", c.buffer_out, c.conn_out, c.errno);
 
-// Capture CSP log messages
-set_debug_hook(|level, message| {
-    match level {
-        DebugLevel::Error => eprintln!("[CSP ERROR] {}", message),
-        DebugLevel::Warn => eprintln!("[CSP WARN] {}", message),
-        _ => println!("[CSP {:?}] {}", level, message),
-    }
-});
+// Turn on RDP state-machine tracing and per-packet prints.
+debug::set_rdp_trace(RdpTrace::Protocol);
+debug::set_packet_trace(true);
+
+// Reset counters between test runs.
+debug::reset_counters();
 ```
 
-### Debug Levels
-
-| Level | Description |
-|-------|-------------|
-| `Error` | Critical errors (always enabled by default) |
-| `Warn` | Warnings (enabled by default) |
-| `Info` | Informational messages |
-| `Buffer` | Buffer allocation/deallocation |
-| `Packet` | Packet processing details |
-| `Protocol` | Protocol state machine |
-| `Lock` | Mutex/lock operations |
-
-See [LOGGING.md](LOGGING.md) for complete logging documentation.
+Debug output goes through libcsp's `csp_print_func`, which by default writes
+to stdout. See [LOGGING.md](LOGGING.md) for the full logging reference.
 
 ---
 
@@ -236,12 +228,12 @@ See [LOGGING.md](LOGGING.md) for complete logging documentation.
 
 ```toml
 [dependencies]
-libcsp = { path = ".", default-features = false, features = ["rdp", "crc32"] }
+libcsp = { path = ".", default-features = false, features = ["rdp"] }
 ```
 
 The `alloc` crate must be available on your target (it is on FreeRTOS with a
-heap configured).  If you need a fully allocation-free init path, construct the
-`csp_conf_t` directly via the `sys` module.
+heap configured). The `external-arch` feature lets you supply your own OS
+primitives via the [`CspArch`] trait — see [USAGE.md](USAGE.md#custom-arch-and-time-rtosbare-metal).
 
 ---
 
@@ -251,7 +243,7 @@ heap configured).  If you need a fully allocation-free init path, construct the
 |----------|-------------|
 | [README.md](README.md) | Quick start guide and feature overview (this file) |
 | [USAGE.md](USAGE.md) | Comprehensive usage guide with patterns and examples |
-| [LOGGING.md](LOGGING.md) | Debug and logging configuration |
+| [LOGGING.md](LOGGING.md) | Debug counters and print-toggle reference |
 | [USAGE_STRESS.md](USAGE_STRESS.md) | Stress testing patterns and performance tuning |
 
 ---
@@ -265,11 +257,16 @@ libcsp crate
 ├── packet       — Packet (RAII, auto-frees via csp_buffer_free)
 ├── connection   — Connection (RAII, auto-closes via csp_close)
 ├── socket       — Socket (server-side listener)
+├── interface    — CspInterface trait for custom transports
+├── route        — Routing table helpers (load/set_raw/iterate)
+├── service      — Dispatcher + CMP (ident/peek/poke) client helpers
+├── debug        — Counter snapshots + RDP/packet trace toggles
+├── arch         — CspArch trait for no_std OS primitives
 └── init         — CspConfig builder + CspNode token
 ```
 
 The C library (`./libcsp`) is compiled as a static library by `build.rs` using
-the `cc` crate.  `bindgen` generates `$OUT_DIR/bindings.rs` from
+the `cc` crate. `bindgen` generates `$OUT_DIR/bindings.rs` from
 `libcsp/include/csp/csp.h`, which is included verbatim by `src/sys.rs`.
 
 ---
@@ -277,5 +274,5 @@ the `cc` crate.  `bindgen` generates `$OUT_DIR/bindings.rs` from
 ## License
 
 This crate is a binding to libcsp which is licensed under the
-**GNU Lesser General Public License v2.1** (LGPL-2.1).  The Rust wrapper code
-is licensed under the same terms.  See [`libcsp/COPYING`](libcsp/COPYING).
+**GNU Lesser General Public License v2.1** (LGPL-2.1). The Rust wrapper code
+is licensed under the same terms. See [`libcsp/COPYING`](libcsp/COPYING).

@@ -9,35 +9,84 @@ This guide explains how to use the `libcsp` Rust bindings, focusing on memory sa
 CSP is a global singleton. Initialise it once at the start of your application.
 
 ```rust
-use libcsp::CspConfig;
+use libcsp::{CspConfig, DedupMode};
 
 fn main() -> libcsp::Result<()> {
     let node = CspConfig::new()
-        .address(1)            // Set local CSP address (0-31)
+        .address(1)            // Set local CSP address (0-31 on wire v1)
         .hostname("my-sat")
-        .buffers(20, 256)      // 20 buffers of 256 bytes each
+        .model("CubeSat-1U")
+        .revision("v1.0")
+        .dedup(DedupMode::All) // Optional: drop duplicate packets
         .init()?;              // Returns a CspNode handle (RAII)
 
-    // The CspNode handle keeps the CSP runtime alive.
-    // When dropped, it calls `csp_free_resources()`.
+    // The CspNode handle keeps the CSP runtime alive; cloning it is cheap.
+    // When the last clone is dropped, the crate marks the runtime free for
+    // re-init.
 
-    // Start the background router task (optional but recommended)
-    // Note: This spawns a thread/task using the C library's arch layer.
-    node.route_start_task(4096, 0)?;
+    // Start the background router task (spawns a POSIX thread on Linux/macOS)
+    node.route_start_task(0, 0)?;
 
     Ok(())
 }
 ```
 
+### Wire-format version
+
+Version 1 uses a 4-byte header with 5-bit host addresses (0–31) and is the
+default, matching the framing expected by most existing flight hardware.
+Version 2 uses a 6-byte header with 14-bit addresses (0–16383). Opt in
+explicitly:
+
+```rust
+let node = CspConfig::new()
+    .version(2)
+    .address(1000)
+    .init()?;
+```
+
+Both ends of a link must agree on the wire version.
+
+### Sizing
+
+Buffer pool size, connection count, FIFO depth and similar limits are
+compile-time constants set by the build script. Override them by setting
+environment variables before `cargo build`:
+
+| Env var | Affects |
+|---------|---------|
+| `LIBCSP_BUFFER_SIZE` | Bytes per packet buffer |
+| `LIBCSP_BUFFER_COUNT` | Number of packet buffers |
+| `LIBCSP_CONN_MAX` | Max simultaneous connections |
+| `LIBCSP_CONN_RXQUEUE_LEN` | Per-connection RX queue depth |
+| `LIBCSP_QFIFO_LEN` | Router incoming FIFO depth |
+| `LIBCSP_PORT_MAX_BIND` | Highest bindable port (≤ 62) |
+| `LIBCSP_RTABLE_SIZE` | Routing table entries |
+| `LIBCSP_MAX_INTERFACES` | Max registered interfaces |
+| `LIBCSP_RDP_MAX_WINDOW` | RDP window size |
+| `LIBCSP_PACKET_PADDING_BYTES` | Reserved scratch bytes in front of the payload |
+
+Read the resolved values back from the [`libcsp::consts`] module:
+
+```rust
+use libcsp::consts;
+
+println!("Pool: {} buffers × {} bytes", consts::BUFFER_COUNT, consts::BUFFER_SIZE);
+println!("Max conns: {}", consts::CONN_MAX);
+```
+
 ### Manual Routing (For RTOS/Embassy)
-If you are in an environment where you want to manage tasks yourself (like `embassy` or a custom RTOS), do **not** call `route_start_task`. Instead, call `route_work` in your own task:
+
+In an environment where you want to manage tasks yourself (like `embassy` or
+a custom RTOS), do **not** call `route_start_task`. Instead, call
+`route_work` in your own task:
 
 ```rust
 // Dedicated router task
 loop {
     // This call is BLOCKING. It will put your task to sleep
     // and wake up instantly when a packet is pumped via handle.rx(pkt).
-    node.route_work(libcsp::MAX_TIMEOUT).unwrap();
+    node.route_work().unwrap();
 }
 ```
 
@@ -64,7 +113,6 @@ CSP uses 6-bit port numbers (0-63), divided into three categories:
 │                                                  │
 │  7 to port_max_bind:  Bindable Ports           │
 │          - Application servers bind here        │
-│          - Default: up to port 24               │
 │                                                  │
 │  (port_max_bind+1) to 63:  Ephemeral Ports    │
 │          - Auto-assigned for client connections │
@@ -81,10 +129,12 @@ CSP uses 6-bit port numbers (0-63), divided into three categories:
 
 **Servers** bind to specific ports:
 ```rust
-let sock = Socket::new(socket_opts::NONE)?;
-sock.bind(10)?;  // Bind to port 10
-sock.listen(5)?;
+let mut sock = Socket::new(socket_opts::NONE);
+sock.bind(10)?;  // Bind to port 10 — also initialises the RX queue
 ```
+
+`bind()` already calls `csp_listen` internally, so a separate `listen()`
+call is usually unnecessary.
 
 **Clients** automatically get ephemeral source ports:
 ```rust
@@ -95,33 +145,27 @@ let conn = node.connect(Priority::Norm, dest_addr, dest_port, timeout, opts)?;
 
 ### Configuring Port Ranges
 
-```rust
-// Default: ports 0-24 bindable, 25-63 ephemeral (39 ephemeral ports)
-CspConfig::new()
-    .address(1)
-    .init()?;
+Adjust the bindable/ephemeral split at build time via `LIBCSP_PORT_MAX_BIND`:
 
-// Custom: ports 0-40 bindable, 41-63 ephemeral (23 ephemeral ports)
-CspConfig::new()
-    .address(1)
-    .port_max_bind(40)
-    .init()?;
+```sh
+LIBCSP_PORT_MAX_BIND=40 cargo build
 ```
 
-**Important:** `port_max_bind` must be ≤ 62 to leave at least one ephemeral port for client connections. Setting it to 63 causes division by zero!
+**Important:** `PORT_MAX_BIND` must be ≤ 62 to leave at least one ephemeral
+port for client connections.
 
 ### Port 0 is NOT for Auto-Assignment
 
 Port 0 is **CMP** (CSP Management Protocol) - a critical service port:
 
 ```rust
-// ❌ WRONG - This binds to CMP service, not auto-assign!
+// WRONG - This binds to CMP service, not auto-assign!
 sock.bind(0)?;
 
-// ✅ CORRECT - Bind to a specific application port
+// CORRECT - Bind to a specific application port
 sock.bind(10)?;
 
-// ✅ CORRECT - Client gets automatic ephemeral port
+// CORRECT - Client gets automatic ephemeral port
 let conn = node.connect(Priority::Norm, dest_addr, 10, timeout, opts)?;
 ```
 
@@ -161,22 +205,38 @@ if let Some(mut pkt) = Packet::get(32) {
 
 **Why can `pkt.write()` fail?**
 
-All packet buffers are pre-allocated at startup with a fixed data capacity — the `data_size` argument to `.buffers(count, data_size)`. The argument to `Packet::get(n)` is a *minimum request hint*, not an independent allocation: you always get a buffer of the globally-configured capacity. `pkt.write(bytes)` returns `Err(bytes.len())` if `bytes.len() > buffer_data_size`. For payloads that exceed one buffer, use SFP (§3.5).
+All packet buffers are pre-allocated at startup with a fixed data capacity
+controlled by `LIBCSP_BUFFER_SIZE` (exposed at runtime as
+`libcsp::packet::BUFFER_SIZE`). The argument to `Packet::get(n)` is a
+*minimum request hint*; you always get a buffer of the globally-configured
+capacity. `pkt.write(bytes)` returns `Err(bytes.len())` if `bytes.len() >
+BUFFER_SIZE`. For payloads that exceed one buffer, use SFP (§5.5).
 
 ### Decoding Headers
-`Packet` provides safe methods to inspect the CSP header without bit-shifting:
+
+`Packet` provides safe accessors for the CSP header:
+
 ```rust
-let src = pkt.src_addr();
-let dst = pkt.dst_addr();
-let port = pkt.dst_port();
-if pkt.is_rdp() { /* ... */ }
+let src  = pkt.src_addr();   // u16
+let dst  = pkt.dst_addr();   // u16
+let port = pkt.dst_port();   // u8
+let prio = pkt.priority();   // Priority enum
+if pkt.is_rdp()   { /* ... */ }
+if pkt.is_hmac()  { /* ... */ }
+if pkt.is_crc32() { /* ... */ }
+if pkt.is_frag()  { /* ... */ }
 ```
+
+For the raw header struct use `pkt.id()` (returns a copy of
+`sys::csp_id_t` with fields `pri`, `flags`, `src`, `dst`, `dport`,
+`sport`). Write it back with `pkt.set_id(id)`.
 
 ---
 
 ## 5. Send Patterns
 
-This section shows the four common patterns for sending data: fire-and-forget, reliable, encrypted, and request/response.
+This section shows the common patterns for sending data: fire-and-forget,
+reliable, and request/response.
 
 ---
 
@@ -188,25 +248,22 @@ Use `node.sendto()` when you want to blast data out as fast as possible without 
 use libcsp::{Packet, Priority, socket_opts};
 
 const TELEMETRY_PORT: u8 = 10;
-const DST_NODE: u8 = 2;
+const DST_NODE: u16 = 2;
 
-// node.sendto returns the packet on failure so you can log and drop it.
 if let Some(mut pkt) = Packet::get(16) {
     let telemetry: [u8; 16] = build_telemetry_frame();
     pkt.write(&telemetry).unwrap();
 
-    if let Err((_e, _pkt)) = node.sendto(
-        Priority::Norm as u8,
+    // sendto always consumes the packet — libcsp frees the buffer whether
+    // delivery succeeded or not.
+    node.sendto(
+        Priority::Norm,
         DST_NODE,
         TELEMETRY_PORT,
         0,                   // src_port: 0 lets CSP assign one
         socket_opts::NONE,
         pkt,
-        0,                   // timeout: unused for connectionless send
-    ) {
-        // _pkt is dropped here, automatically returned to the pool.
-        // Log the failure or just ignore it — this is fire-and-forget.
-    }
+    );
 }
 ```
 
@@ -214,9 +271,8 @@ if let Some(mut pkt) = Packet::get(16) {
 ```rust
 use libcsp::{Socket, socket_opts};
 
-let sock = Socket::new(socket_opts::NONE).unwrap();
+let mut sock = Socket::new(socket_opts::NONE);
 sock.bind(TELEMETRY_PORT).unwrap();
-sock.listen(10).unwrap();
 
 while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
     while let Some(pkt) = conn.read(100) {
@@ -236,15 +292,15 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 Use a connection opened with `conn_opts::RDP` when delivery must be guaranteed. CSP's Reliable Datagram Protocol adds sequence numbers, acknowledgements, and retransmission.
 
 ```rust
-use libcsp::{Priority, conn_opts};
+use libcsp::{Priority, conn_opts, Packet};
 
 const DATA_PORT: u8 = 11;
-const DST_NODE: u8 = 2;
+const DST_NODE: u16 = 2;
 
 // Connect — the RDP three-way handshake happens here.
 // Returns None if no connection slots are free or the handshake times out.
 if let Some(conn) = node.connect(
-    Priority::Norm as u8,
+    Priority::Norm,
     DST_NODE,
     DATA_PORT,
     1000,           // handshake timeout (ms)
@@ -254,11 +310,8 @@ if let Some(conn) = node.connect(
         if let Some(mut pkt) = Packet::get(chunk.len()) {
             pkt.write(chunk).unwrap();
 
-            // send() returns the packet on failure so you can retry or abort.
-            if let Err((_e, _pkt)) = conn.send(pkt, 500) {
-                eprintln!("send failed, aborting transfer");
-                break;
-            }
+            // send consumes pkt; libcsp always frees the buffer.
+            conn.send(pkt);
         }
     }
     // conn dropped here → graceful RDP FIN exchange
@@ -269,9 +322,8 @@ if let Some(conn) = node.connect(
 ```rust
 use libcsp::{Socket, socket_opts};
 
-let sock = Socket::new(socket_opts::NONE).unwrap();
+let mut sock = Socket::new(socket_opts::NONE);
 sock.bind(DATA_PORT).unwrap();
-sock.listen(10).unwrap();
 
 while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
     if conn.is_rdp() {
@@ -290,70 +342,28 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 
 **When to use:** Firmware uploads, large file transfers, anything where data loss is unacceptable.
 
-**Tip:** Call `csp_rdp_set_opt` before opening connections to tune window size and timeouts for your link budget.
+**Tip:** Call `node.rdp_set_opt(...)` before opening connections to tune window size and timeouts for your link budget.
 
 ---
 
-### 5.3 Encrypted Transfer (XTEA)
+### 5.3 Per-Send Priority Override
 
-Add `conn_opts::XTEA` to any connection to transparently encrypt the payload. The shared 128-bit key is pre-loaded into the C layer via `csp_xtea_set_key()`. You can combine flags — e.g. `conn_opts::RDP | conn_opts::XTEA` gives you both reliability and encryption.
+The connection records a default priority at `connect()` time, but you can
+override it on individual sends without tearing down the connection:
 
 ```rust
-use libcsp::{Priority, conn_opts};
+use libcsp::{Priority, Packet};
 
-const SECRET_PORT: u8 = 20;
-const DST_NODE: u8 = 2;
-
-// Establish an XTEA-encrypted channel.
-// Both ends must have the same pre-shared key loaded.
-if let Some(conn) = node.connect(
-    Priority::Norm as u8,
-    DST_NODE,
-    SECRET_PORT,
-    1000,
-    conn_opts::XTEA,        // or: conn_opts::RDP | conn_opts::XTEA
-) {
-    if let Some(mut pkt) = Packet::get(32) {
-        pkt.write(b"top secret command").unwrap();
-        // pkt ownership transferred to CSP (freed by stack on success,
-        // freed automatically on failure because send_discard discards it).
-        let _ = conn.send_discard(pkt, 500);
-    }
-    // conn dropped here → csp_close() called
+if let Some(mut pkt) = Packet::get(16) {
+    pkt.write(b"urgent alert").unwrap();
+    // Send this one packet at Critical priority regardless of the
+    // connection's default.
+    conn.send_prio(Priority::Critical, pkt);
 }
 ```
 
-**Loading the key** (do this once at startup, before any connections):
-```rust
-// Call before route_start_task and any connections.
-let key: [u32; 4] = [0xDEAD_BEEF, 0xCAFE_F00D, 0x1234_5678, 0xABCD_EF01];
-node.set_xtea_key(&key); // requires the `xtea` feature (enabled by default)
-```
-
-**Receiver side** — decryption is automatic as long as the socket does not prohibit XTEA:
-```rust
-use libcsp::{Socket, socket_opts};
-
-// socket_opts::NONE accepts any security flags the sender used.
-let sock = Socket::new(socket_opts::NONE).unwrap();
-sock.bind(SECRET_PORT).unwrap();
-sock.listen(5).unwrap();
-
-while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
-    while let Some(pkt) = conn.read(500) {
-        // CSP has already decrypted the payload by the time we read it.
-        println!("Decrypted: {:?}", pkt.data());
-    }
-}
-```
-
-**To require encryption** (reject unencrypted connections):
-```rust
-// Bind with XTEA_REQ — CSP drops packets that arrive unencrypted.
-let sock = Socket::new(socket_opts::XTEA_REQ).unwrap();
-```
-
-**When to use:** Command channels, keying material distribution, any data that must not be readable on-wire.
+**When to use:** Mixed traffic on a single connection where a subset of
+messages must jump the QoS queue (alarms, keepalives).
 
 ---
 
@@ -367,13 +377,13 @@ let sock = Socket::new(socket_opts::XTEA_REQ).unwrap();
 use libcsp::{Priority, conn_opts};
 
 const QUERY_PORT: u8 = 12;
-const DST_NODE: u8 = 2;
+const DST_NODE: u16 = 2;
 
 let request  = b"GET temperature";
 let mut reply = [0u8; 64];
 
 let reply_len = node.transaction(
-    Priority::Norm as u8,
+    Priority::Norm,
     DST_NODE,
     QUERY_PORT,
     1000,           // reply wait timeout (ms): how long to block waiting for the server's reply
@@ -383,7 +393,7 @@ let reply_len = node.transaction(
     conn_opts::NONE,
 )?;
 
-println!("Reply ({} bytes): {:?}", reply_len, &reply[..reply_len as usize]);
+println!("Reply ({} bytes): {:?}", reply_len, &reply[..reply_len]);
 ```
 
 #### Server Side
@@ -393,7 +403,7 @@ Return `Some(reply_pkt)` from a `Dispatcher` handler to send a response back on 
 ```rust
 use libcsp::{Dispatcher, Packet, Port};
 
-let mut server = Dispatcher::new().unwrap();
+let mut server = Dispatcher::new();
 
 server.register(Port::Custom(QUERY_PORT), |_conn, pkt| {
     let request = pkt.data();
@@ -422,9 +432,9 @@ For protocols that need several exchanges on one connection, open the connection
 | Call | Timeout argument | Meaning |
 |------|-----------------|---------|
 | `node.connect(…, timeout, …)` | ms | **Handshake timeout.** For RDP, this is how long to wait for the SYN-ACK. For plain CSP (no RDP), the connection slot is allocated immediately and this value is ignored. |
-| `conn.send_discard(pkt, timeout)` | ms | **Send timeout.** Passed to `csp_send()`. In libcsp 1.6 this is largely unused — the send enqueues immediately. For RDP it governs how long to wait for buffer space. |
+| `conn.send(pkt)` | — | `send` is void: it hands the packet to libcsp which always consumes it. There is no per-send timeout. |
 | `conn.read(timeout)` | ms | **Receive timeout.** Blocks until a packet arrives in the connection's RX queue or the timeout expires. Returns `None` on timeout or when the peer closes the connection. Use `libcsp::MAX_TIMEOUT` to block indefinitely. |
-| `conn.transaction(timeout, …)` | ms | **Reply wait timeout.** Used by the one-shot helper; applies only to waiting for the server's single reply. |
+| `node.transaction(…, timeout, …)` | ms | **Reply wait timeout.** Used by the one-shot helper; applies only to waiting for the server's single reply. |
 
 **Client side:**
 ```rust
@@ -432,13 +442,12 @@ use libcsp::{Priority, conn_opts, Packet};
 
 // connect: 1000 ms RDP handshake timeout (ignored here since no RDP flag)
 if let Some(conn) = node.connect(
-    Priority::Norm as u8, DST_NODE, QUERY_PORT, 1000, conn_opts::NONE,
+    Priority::Norm, DST_NODE, QUERY_PORT, 1000, conn_opts::NONE,
 ) {
     // Round 1: send a request
     if let Some(mut req) = Packet::get(16) {
         req.write(b"HELLO").unwrap();
-        // req freed by CSP on success, or freed automatically on failure
-        let _ = conn.send_discard(req, 200);
+        conn.send(req); // req ownership consumed by libcsp
     }
     // Block up to 500 ms for the server's reply
     if let Some(reply) = conn.read(500) {
@@ -449,7 +458,7 @@ if let Some(conn) = node.connect(
     // Round 2: send another request on the same connection
     if let Some(mut req) = Packet::get(16) {
         req.write(b"GET data").unwrap();
-        let _ = conn.send_discard(req, 200);
+        conn.send(req);
     }
     if let Some(reply) = conn.read(500) {
         println!("Round 2 reply: {:?}", reply.data());
@@ -464,7 +473,7 @@ if let Some(conn) = node.connect(
 ```rust
 use libcsp::{Dispatcher, Packet, Port};
 
-let mut server = Dispatcher::new().unwrap();
+let mut server = Dispatcher::new();
 
 server.register(Port::Custom(QUERY_PORT), |_conn, pkt| {
     // pkt is owned by this closure — we must either return it as a reply
@@ -495,11 +504,11 @@ CSP's Simple Fragmentation Protocol (SFP) lets you send payloads larger than a s
 use libcsp::{Priority, conn_opts};
 
 const SFP_PORT: u8 = 11;
-const DST_NODE: u8 = 2;
+const DST_NODE: u16 = 2;
 
 // Sender
 if let Some(conn) = node.connect(
-    Priority::Norm as u8,
+    Priority::Norm,
     DST_NODE,
     SFP_PORT,
     1000,
@@ -515,9 +524,8 @@ if let Some(conn) = node.connect(
 ```rust
 use libcsp::{Socket, socket_opts};
 
-let sock = Socket::new(socket_opts::NONE).unwrap();
+let mut sock = Socket::new(socket_opts::NONE);
 sock.bind(SFP_PORT).unwrap();
-sock.listen(5).unwrap();
 
 while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
     match conn.sfp_recv(5000) {   // timeout covers the whole reassembly
@@ -532,7 +540,7 @@ while let Some(conn) = sock.accept(libcsp::MAX_TIMEOUT) {
 
 **When to use:** Firmware uploads, telemetry dumps, large configuration blobs — anything that must be delivered as one logical unit but is too large for a single CSP packet.
 
-**Tip:** Combine with RDP (`conn_opts::RDP | conn_opts::NONE` → just `conn_opts::RDP`) to get reliable, ordered fragment delivery with retransmission.
+**Tip:** Combine with RDP (`conn_opts::RDP`) to get reliable, ordered fragment delivery with retransmission.
 
 ---
 
@@ -561,7 +569,7 @@ There are two ways to register a port:
 | Method | Effect |
 |--------|--------|
 | `server.register(port, closure)` | Your closure handles every incoming packet on that port. Return `Some(reply_pkt)` to respond, `None` to silently consume. |
-| `server.bind_service(port)` | Binds the port for listening but delegates packet handling to libcsp's built-in `csp_service_handler`. Use this for standard protocol ports (Ping, MemFree, Uptime, BufFree, Reboot). |
+| `server.bind_service(port)` | Binds the port for listening but delegates packet handling to libcsp's built-in `csp_service_handler`. Use this for standard protocol ports (Ping, MemFree, Uptime, BufFree, Reboot, Cmp). |
 
 **Standard services and their client-side calls:**
 
@@ -580,7 +588,7 @@ The server must have called `bind_service` for the corresponding port before a r
 use libcsp::{Dispatcher, Port, MAX_TIMEOUT};
 use std::thread;
 
-let mut server = Dispatcher::new().unwrap();
+let mut server = Dispatcher::new();
 
 // Standard built-in service handlers
 server.bind_service(Port::Ping)?;    // enables node.ping(this_addr, …) from remotes
@@ -605,7 +613,11 @@ thread::spawn(move || server.run(MAX_TIMEOUT));
 
 ### CMP: Peer Inspection (Ident, Peek, Poke)
 
-Safe wrappers for the CSP Management Protocol (CMP) return high-level Rust types.  The **remote node must have `Port::Cmp` registered** via `server.bind_service(Port::Cmp)` (see above).
+Safe wrappers for the CSP Management Protocol (CMP) return high-level Rust
+types. PEEK/POKE are handled directly by libcsp's built-in CMP service
+handler, which reads and writes the target node's raw memory at the given
+address. The **remote node must have `Port::Cmp` registered** via
+`server.bind_service(Port::Cmp)` (see above).
 
 ```rust
 // Get remote node identification (hostname, model, revision, build date/time)
@@ -622,11 +634,12 @@ println!("Memory at 0x2000_0000: {:02x?}", bytes);
 node.poke(remote_addr, 0x2000_0000, &[0xDE, 0xAD, 0xBE, 0xEF], 1000)?;
 ```
 
-**Server-side:** No extra code is needed beyond `bind_service(Port::Cmp)`.  The built-in `csp_service_handler` reads/writes memory on the running process directly using the address and length you provide.  On embedded targets this means real hardware memory; use `peek`/`poke` only for debugging or well-understood register maps.
+On embedded targets `peek`/`poke` act on real hardware memory; use them only
+for debugging or well-understood register maps.
 
 ---
 
-## 6. Custom Interfaces (Transports)
+## 7. Custom Interfaces (Transports)
 
 Implement the `CspInterface` trait to bridge CSP to custom hardware (e.g., STM32 CAN via `embassy`).
 
@@ -638,16 +651,20 @@ struct MyCanDriver { /* ... */ }
 impl CspInterface for MyCanDriver {
     fn name(&self) -> &str { "MY_CAN" }
 
-    fn nexthop(&mut self, via: u8, pkt: Packet) {
+    fn nexthop(&mut self, via: u16, pkt: Packet, from_me: bool) {
+        // `via` is the next-hop CSP address (65535 means "send direct").
+        // `from_me` is true when this node generated the packet locally.
+        //
         // 1. Hardware TX
-        // self.hw.send(pkt.id_raw(), pkt.data());
-
-        // 2. Packet pkt is dropped and freed here automatically.
+        // self.hw.send(&pkt.data(), pkt.id());
+        //
+        // 2. pkt is dropped and freed here automatically.
+        let _ = (via, from_me);
     }
 }
 
 // Registration returns an InterfaceHandle
-let my_iface = MyCanDriver { ... };
+let my_iface = MyCanDriver { /* ... */ };
 let handle = interface::register(my_iface);
 ```
 
@@ -656,27 +673,62 @@ let handle = interface::register(my_iface);
 When receiving data from hardware, you must manually feed it into the CSP router.
 
 ```rust
+use libcsp::Packet;
+
 // 1. You receive data from your hardware
 let raw_data = [0u8; 10];
-let can_id = 0x12345678;
 
 // 2. Allocate a packet from the CSP pool
 if let Some(mut pkt) = Packet::get(raw_data.len()) {
-    // 3. Fill the packet
-    pkt.set_id_raw(can_id);
+    // 3. Fill the packet header (csp_id_t: pri/flags/src/dst/dport/sport)
+    //    and payload.
+    let mut id = pkt.id();
+    id.src   = 2;
+    id.dst   = 1;
+    id.sport = 20;
+    id.dport = 10;
+    pkt.set_id(id);
     pkt.write(&raw_data).unwrap();
 
-    // 4. "Pump" it into the router
-    // This transfers ownership to the CSP stack.
+    // 4. "Pump" it into the router.
+    //    This transfers ownership to the CSP stack.
     handle.rx(pkt);
 }
 ```
 
 Internal mechanism: `handle.rx()` calls `csp_qfifo_write()`, which wakes up the background router task to process the packet.
 
+### Routing through your interface
+
+Once the interface is registered you can direct traffic through it via the
+routing table. The compact-string format is the most ergonomic:
+
+```rust
+use libcsp::route;
+
+// Send all traffic for addresses 2 and 3 out of MY_CAN
+node.route_load("2 MY_CAN, 3 MY_CAN").unwrap();
+
+// Or programmatically, using the raw interface pointer:
+unsafe {
+    route::set_raw(2, 0, handle.c_iface_ptr(), route::NO_VIA)?;
+}
+
+// Inspect the routing table:
+route::iterate(|entry| {
+    println!(
+        "  {}/{} via {}",
+        entry.address(),
+        entry.netmask(),
+        entry.via(),
+    );
+    true // keep iterating
+});
+```
+
 ---
 
-## 7. Sniffing Traffic
+## 8. Sniffing Traffic
 
 Use the RAII `Sniffer` handle to enable promiscuous mode. It disables automatically when dropped.
 
@@ -691,81 +743,83 @@ while let Some(pkt) = sniffer.read(1000) {
 
 ---
 
-## 8. Custom Arch and Time (RTOS/Bare-Metal)
+## 9. Custom Arch and Time (RTOS/Bare-Metal)
 
-In a `no_std` or custom RTOS environment (like `embassy` on STM32), libcsp needs primitives for time, mutexes, and queues.
-
-### Providing Time
-Libcsp does not have a built-in clock for `no_std`. You **must** provide the following C symbols. You can implement them directly in Rust using `#[no_mangle]`:
-
-```rust
-#[no_mangle]
-pub extern "C" fn csp_get_ms() -> u32 {
-    // Return system time in milliseconds
-    // E.g. embassy_time::Instant::now().as_millis() as u32
-    0
-}
-
-#[no_mangle]
-pub extern "C" fn csp_get_s() -> u32 {
-    // Return system time in seconds
-    0
-}
-```
-
-### Providing OS Primitives (CspArch Trait)
-If you enable the `external-arch` feature, you can provide all OS primitives by implementing the `CspArch` trait. This is the recommended way for `no_std` environments like Embassy.
+In a `no_std` or custom RTOS environment (like `embassy` on STM32), libcsp
+needs primitives for time, mutexes, queues and a few standard C string
+helpers. Enable the `external-arch` feature and implement the [`CspArch`]
+trait.
 
 ```rust
-use libcsp::{CspArch, export_arch};
+use libcsp::{export_arch, CspArch};
 use core::ffi::c_void;
 
 struct MyArch;
 
-impl CspArch for MyArch {
-    fn get_ms(&self) -> u32 { /* ... */ 0 }
-    fn get_s(&self) -> u32 { /* ... */ 0 }
+unsafe impl CspArch for MyArch {
+    fn get_ms(&self) -> u32 {
+        embassy_time::Instant::now().as_millis() as u32
+    }
+    fn get_s(&self) -> u32 {
+        embassy_time::Instant::now().as_secs() as u32
+    }
 
     fn bin_sem_create(&self) -> *mut c_void { /* ... */ core::ptr::null_mut() }
-    fn bin_sem_wait(&self, sem: *mut c_void, timeout: u32) -> bool { true }
-    // ... implement other methods ...
-    fn malloc(&self, size: usize) -> *mut c_void { /* ... */ core::ptr::null_mut() }
-    fn free(&self, _ptr: *mut c_void) { /* ... */ }
+    fn bin_sem_remove(&self, _sem: *mut c_void) { /* ... */ }
+    fn bin_sem_wait(&self, _sem: *mut c_void, _timeout: u32) -> bool { true }
+    fn bin_sem_post(&self, _sem: *mut c_void) -> bool { true }
+
+    fn mutex_create(&self) -> *mut c_void { /* ... */ core::ptr::null_mut() }
+    fn mutex_remove(&self, _mutex: *mut c_void) { /* ... */ }
+    fn mutex_lock(&self, _mutex: *mut c_void, _timeout: u32) -> bool { true }
+    fn mutex_unlock(&self, _mutex: *mut c_void) -> bool { true }
+
+    fn queue_create(&self, _len: usize, _item: usize) -> *mut c_void {
+        core::ptr::null_mut()
+    }
+    fn queue_remove(&self, _q: *mut c_void) { /* ... */ }
+    fn queue_enqueue(&self, _q: *mut c_void, _item: *const c_void, _to: u32) -> bool { true }
+    fn queue_dequeue(&self, _q: *mut c_void, _item: *mut c_void, _to: u32) -> bool { true }
+    fn queue_size(&self, _q: *mut c_void) -> usize { 0 }
 }
 
-// Export symbols to the C linker
+// Export the symbols libcsp's C code links against.
 export_arch!(MyArch, MyArch);
 ```
 
-The `export_arch!` macro generates the `#[no_mangle]` C shims that libcsp expects.
+The `export_arch!` macro emits the `#[no_mangle]` C shims that libcsp
+expects (`csp_get_ms`, `csp_mutex_*`, `csp_queue_*`, plus a handful of
+standard C string functions such as `strncpy` and `strtok_r`).
+
+When you manage the router yourself, call `node.route_work()` in your own
+task instead of `route_start_task` — the default `thread_create` is a
+no-op on bare-metal targets.
 
 ### Cross-Compilation Requirement
 When building for an embedded target (e.g. `thumbv7em-none-eabihf`), the `cc` crate requires an appropriate cross-compiler (e.g. `arm-none-eabi-gcc`) to be available on your host system to compile the libcsp C core.
 
 ---
 
-## 9. Summary of Ownership
+## 10. Summary of Ownership
 
 | Action | Ownership |
 |--------|-----------|
 | `Packet::get()` | Caller owns the packet. |
-| `node.sendto(pkt)` | If success: CSP takes ownership. If fail: returned in `Err((e, pkt))`. |
-| `conn.send(pkt)` | If success: CSP takes ownership. If fail: returned in `Err((e, pkt))`. |
-| `conn.send_discard(pkt)` | Always consumed — freed on failure, sent on success. |
-| `conn.read()` / `sniffer.read()` | Caller owns the returned packet. |
+| `node.sendto(pkt)` | CSP takes ownership; libcsp always frees the buffer. |
+| `conn.send(pkt)` / `conn.send_prio(prio, pkt)` | CSP takes ownership; libcsp always frees the buffer. |
+| `conn.read()` / `sniffer.read()` / `sock.recvfrom()` | Caller owns the returned packet. |
 | `Dispatcher` handler | Closure takes ownership of `Packet`. Return `Some(pkt)` to send as reply. |
 | `CspInterface::nexthop` | Trait method takes ownership of `Packet`. |
 | `handle.rx(pkt)` | Ownership transferred to CSP router. |
 
-## 10. Pattern Comparison
+## 11. Pattern Comparison
 
 | Pattern | API | Overhead | Delivery |
 |---------|-----|----------|----------|
 | Fire-and-forget | `node.sendto()` | None (no connection slot) | Best-effort |
 | Reliable | `node.connect(…, RDP)` + `conn.send()` | RDP handshake + ACKs | Guaranteed, ordered |
-| Encrypted | `node.connect(…, XTEA)` + `conn.send()` | XTEA cipher per packet | Best-effort, encrypted |
-| Reliable + Encrypted | `node.connect(…, RDP \| XTEA)` | Both | Guaranteed, ordered, encrypted |
 | Large payload | `node.connect()` + `conn.sfp_send()` | Fragmentation overhead | Best-effort |
 | Large payload, reliable | `node.connect(…, RDP)` + `conn.sfp_send()` | RDP + fragmentation | Guaranteed, ordered |
 | One-shot request/reply | `node.transaction()` | Connection per call | Best-effort |
 | Multi-round request/reply | `node.connect()` + manual send/read | One connection | Best-effort |
+| Per-send priority override | `conn.send_prio(prio, pkt)` | None | Best-effort / RDP |
