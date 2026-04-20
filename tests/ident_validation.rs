@@ -13,8 +13,6 @@ fn ensure_init() -> CspNode {
         let node = CspConfig::new()
             .address(1)
             .hostname("test-satellite") // Specific hostname for validation
-            .buffers(20, 256)
-            .port_max_bind(58) // Allow binding to ports 0-58, leaving 59-63 for ephemeral ports
             .init()
             .expect("init failed");
         node.route_start_task(4096, 0)
@@ -39,7 +37,7 @@ fn test_ident_contains_hostname() {
 
     // Start service handler thread
     let service_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(ports::CMP).expect("Failed to bind CMP port");
         sock.listen(5).expect("Failed to listen");
 

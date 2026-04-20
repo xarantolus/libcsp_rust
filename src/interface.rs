@@ -20,10 +20,12 @@ pub trait CspInterface: Send {
     ///
     /// - `via`: Next-hop destination address.
     /// - `packet`: The packet to transmit.
+    /// - `from_me`: `true` if the packet was generated locally rather than
+    ///   forwarded through this node.
     ///
     /// The implementation **must** ensure the packet is eventually freed (by
     /// letting the `Packet` drop or passing it back to CSP).
-    fn nexthop(&mut self, via: u8, packet: Packet);
+    fn nexthop(&mut self, via: u16, packet: Packet, from_me: bool);
 
     /// Return the name of this interface.
     fn name(&self) -> &str;
@@ -71,8 +73,6 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     let mut c_iface: sys::csp_iface_t = unsafe { core::mem::zeroed() };
     c_iface.name = c_name.as_ptr();
     c_iface.nexthop = Some(nexthop_shim);
-    // Safety: libcsp is assumed to be initialised.
-    c_iface.mtu = unsafe { sys::csp_buffer_data_size() } as u16;
 
     #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(InterfaceState {
@@ -125,18 +125,19 @@ impl InterfaceHandle {
 
 /// C-compatible shim that forwards the nexthop call to the Rust trait.
 unsafe extern "C" fn nexthop_shim(
-    route: *const sys::csp_route_t,
+    iface: *mut sys::csp_iface_t,
+    via: u16,
     packet: *mut sys::csp_packet_t,
+    from_me: core::ffi::c_int,
 ) -> i32 {
-    // Safety: `route` and `packet` are valid pointers provided by libcsp.
-    // `interface_data` is a valid pointer to `InterfaceState`.
-    let iface = (*route).iface;
-    // Note: (*iface).interface_data was set to `*mut InterfaceState` in register().
+    // Safety: `iface` / `packet` are valid pointers from libcsp; the
+    // `interface_data` slot was populated in `register()` with a pointer to
+    // `InterfaceState`.
     let state_ptr = (*iface).interface_data as *mut InterfaceState;
     let state = &*state_ptr;
 
     let pkt = Packet::from_raw(packet);
-    state.user_iface.lock().nexthop((*route).via, pkt);
+    state.user_iface.lock().nexthop(via, pkt, from_me != 0);
 
     0 // CSP_ERR_NONE
 }

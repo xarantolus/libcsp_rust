@@ -7,292 +7,81 @@ License as published by the Free Software Foundation; either
 version 2.1 of the License, or (at your option) any later version.
 */
 
-//! CSP debug output and logging integration.
+//! CSP debug counters and log-level toggles.
 //!
-//! This module provides safe Rust bindings to libcsp's debug system, allowing you to:
-//! - Enable/disable debug levels
-//! - Set custom debug hooks to capture log messages
-//! - Control debug output programmatically
+//! libcsp exposes error counters through a handful of `extern` globals plus
+//! two `uint8_t` toggles that control whether RDP and packet events call
+//! `csp_print_func()`. This module wraps them in a typed API.
 //!
-//! # Example
-//!
-//! ```no_run
-//! use libcsp::debug::{DebugLevel, set_debug_level, set_debug_hook};
-//! use std::ffi::CStr;
-//!
-//! // Enable INFO level logging
-//! set_debug_level(DebugLevel::Info, true);
-//!
-//! // Set a custom debug hook
-//! set_debug_hook(|level, message| {
-//!     println!("[CSP {:?}] {}", level, message);
-//! });
-//! ```
+//! There is no message-formatting hook; if you need captured log output,
+//! wrap libcsp with a C-level override of `csp_print_func`.
 
 use crate::sys;
-use core::ffi::{c_char, c_uint, CStr};
 
-/// CSP debug/log levels.
+/// Global error counters.
 ///
-/// These correspond to the `csp_debug_level_t` enum in `csp_debug.h`.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DebugLevel {
-    /// Error messages (always enabled by default)
-    Error = sys::csp_debug_level_t_CSP_ERROR,
-    /// Warning messages (enabled by default)
-    Warn = sys::csp_debug_level_t_CSP_WARN,
-    /// Informational messages (disabled by default)
-    Info = sys::csp_debug_level_t_CSP_INFO,
-    /// Buffer allocation/deallocation (disabled by default)
-    Buffer = sys::csp_debug_level_t_CSP_BUFFER,
-    /// Packet processing (disabled by default)
-    Packet = sys::csp_debug_level_t_CSP_PACKET,
-    /// Protocol state machine (disabled by default)
-    Protocol = sys::csp_debug_level_t_CSP_PROTOCOL,
-    /// Lock operations (disabled by default)
-    Lock = sys::csp_debug_level_t_CSP_LOCK,
+/// Each field increments atomically whenever libcsp hits the corresponding
+/// error path. They never decrement and wrap at `u8::MAX`.
+#[derive(Debug, Clone, Copy)]
+pub struct Counters {
+    pub buffer_out: u8,
+    pub conn_out: u8,
+    pub conn_ovf: u8,
+    pub conn_noroute: u8,
+    pub inval_reply: u8,
+    pub errno: u8,
+    pub can_errno: u8,
+    pub eth_errno: u8,
 }
 
-/// Enable or disable a specific debug level.
-///
-/// This is only available when the `debug` feature is enabled at compile time.
-///
-/// # Example
-///
-/// ```no_run
-/// use libcsp::debug::{DebugLevel, set_debug_level};
-///
-/// // Enable INFO level
-/// set_debug_level(DebugLevel::Info, true);
-///
-/// // Disable PACKET level
-/// set_debug_level(DebugLevel::Packet, false);
-/// ```
-#[cfg(feature = "debug")]
-pub fn set_debug_level(level: DebugLevel, enabled: bool) {
+/// Snapshot the current debug counters.
+pub fn counters() -> Counters {
     unsafe {
-        sys::csp_debug_set_level(level as u32, enabled);
-    }
-}
-
-/// Get the current state of a debug level.
-///
-/// Returns `true` if the level is enabled, `false` otherwise.
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn get_debug_level(level: DebugLevel) -> bool {
-    unsafe { sys::csp_debug_get_level(level as u32) != 0 }
-}
-
-/// Toggle a debug level (enable if disabled, disable if enabled).
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn toggle_debug_level(level: DebugLevel) {
-    unsafe {
-        sys::csp_debug_toggle_level(level as u32);
-    }
-}
-
-/// Type signature for debug hook callbacks.
-///
-/// The callback receives:
-/// - `level`: The debug level of the message
-/// - `message`: The formatted log message as a string
-pub type DebugHookFn = fn(DebugLevel, &str);
-
-/// Global storage for the Rust debug hook (if any).
-///
-/// Uses AtomicPtr instead of static mut to prevent data races.
-/// The pointer stores the function pointer value, not a heap allocation.
-use core::sync::atomic::{AtomicUsize, Ordering};
-static RUST_DEBUG_HOOK: AtomicUsize = AtomicUsize::new(0);
-
-// External C functions from csp_debug_wrapper.c
-#[cfg(feature = "debug")]
-extern "C" {
-    fn csp_debug_set_rust_callback(callback: Option<extern "C" fn(c_uint, *const c_char)>);
-    fn csp_debug_hook_install_wrapper();
-    fn csp_debug_hook_clear();
-}
-
-/// Rust callback that receives formatted debug messages from the C wrapper.
-///
-/// This function is called by csp_debug_wrapper.c after it has formatted
-/// the va_list arguments into a string.
-#[cfg(feature = "debug")]
-extern "C" fn rust_debug_callback(level: c_uint, message: *const c_char) {
-    // Load the function pointer atomically
-    let hook_ptr = RUST_DEBUG_HOOK.load(Ordering::Acquire);
-    if hook_ptr != 0 {
-        // Safety: The function pointer was stored via set_debug_hook and is valid
-        // as long as it's non-zero. We trust that set_debug_hook only stores
-        // valid DebugHookFn function pointers.
-        let hook: DebugHookFn = unsafe { core::mem::transmute(hook_ptr) };
-
-        // Convert C string to Rust string
-        if !message.is_null() {
-            // Safety: message is a valid C string from the C wrapper
-            if let Ok(msg) = unsafe { CStr::from_ptr(message) }.to_str() {
-                // Map the C level to Rust enum
-                let debug_level = match level {
-                    sys::csp_debug_level_t_CSP_ERROR => DebugLevel::Error,
-                    sys::csp_debug_level_t_CSP_WARN => DebugLevel::Warn,
-                    sys::csp_debug_level_t_CSP_INFO => DebugLevel::Info,
-                    sys::csp_debug_level_t_CSP_BUFFER => DebugLevel::Buffer,
-                    sys::csp_debug_level_t_CSP_PACKET => DebugLevel::Packet,
-                    sys::csp_debug_level_t_CSP_PROTOCOL => DebugLevel::Protocol,
-                    sys::csp_debug_level_t_CSP_LOCK => DebugLevel::Lock,
-                    _ => DebugLevel::Info, // Fallback
-                };
-
-                hook(debug_level, msg);
-            }
+        Counters {
+            buffer_out: sys::csp_dbg_buffer_out,
+            conn_out: sys::csp_dbg_conn_out,
+            conn_ovf: sys::csp_dbg_conn_ovf,
+            conn_noroute: sys::csp_dbg_conn_noroute,
+            inval_reply: sys::csp_dbg_inval_reply,
+            errno: sys::csp_dbg_errno,
+            can_errno: sys::csp_dbg_can_errno,
+            eth_errno: sys::csp_dbg_eth_errno,
         }
     }
 }
 
-/// Set a custom debug hook to capture CSP log messages.
-///
-/// The hook function will be called for every debug message that passes the
-/// enabled debug level filters.
-///
-/// This is only available when the `debug` feature is enabled.
-///
-/// # Example
-///
-/// ```no_run
-/// use libcsp::debug::{DebugLevel, set_debug_hook, set_debug_level};
-///
-/// // Set up custom logging
-/// set_debug_hook(|level, message| {
-///     match level {
-///         DebugLevel::Error => eprintln!("[CSP ERROR] {}", message),
-///         DebugLevel::Warn => eprintln!("[CSP WARN] {}", message),
-///         _ => println!("[CSP] {}", message),
-///     }
-/// });
-///
-/// // Enable the levels you want to see
-/// set_debug_level(DebugLevel::Info, true);
-/// ```
-///
-/// # Safety
-///
-/// Only one debug hook can be active at a time. Setting a new hook replaces the previous one.
-/// The hook function must be valid for the entire lifetime of the debug system.
-#[cfg(feature = "debug")]
-pub fn set_debug_hook(hook: DebugHookFn) {
-    // Store the function pointer atomically
-    RUST_DEBUG_HOOK.store(hook as usize, Ordering::Release);
-
-    // Safety: The C functions are valid FFI functions from the wrapper
+/// Reset all debug counters to zero.
+pub fn reset_counters() {
     unsafe {
-        // Set our Rust callback in the C wrapper
-        csp_debug_set_rust_callback(Some(rust_debug_callback));
-        // Install the C wrapper as the CSP debug hook
-        csp_debug_hook_install_wrapper();
+        sys::csp_dbg_buffer_out = 0;
+        sys::csp_dbg_conn_out = 0;
+        sys::csp_dbg_conn_ovf = 0;
+        sys::csp_dbg_conn_noroute = 0;
+        sys::csp_dbg_inval_reply = 0;
+        sys::csp_dbg_errno = 0;
+        sys::csp_dbg_can_errno = 0;
+        sys::csp_dbg_eth_errno = 0;
     }
 }
 
-/// Remove the custom debug hook, reverting to default CSP debug output.
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn clear_debug_hook() {
-    // Clear the function pointer atomically
-    RUST_DEBUG_HOOK.store(0, Ordering::Release);
-
-    // Safety: The C functions are valid FFI functions from the wrapper
-    unsafe {
-        csp_debug_set_rust_callback(None);
-        csp_debug_hook_clear();
-    }
+/// Verbosity levels for the RDP trace (`csp_dbg_rdp_print`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RdpTrace {
+    /// Silent.
+    Off = 0,
+    /// Log RDP error paths only.
+    Errors = 1,
+    /// Log RDP errors plus every protocol transition.
+    Protocol = 2,
 }
 
-/// Helper to enable common debug levels for development.
-///
-/// Enables: Error, Warn, Info
-/// Disables: Buffer, Packet, Protocol, Lock
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn enable_dev_debug() {
-    set_debug_level(DebugLevel::Error, true);
-    set_debug_level(DebugLevel::Warn, true);
-    set_debug_level(DebugLevel::Info, true);
-    set_debug_level(DebugLevel::Buffer, false);
-    set_debug_level(DebugLevel::Packet, false);
-    set_debug_level(DebugLevel::Protocol, false);
-    set_debug_level(DebugLevel::Lock, false);
+/// Set the RDP trace level.
+pub fn set_rdp_trace(level: RdpTrace) {
+    unsafe { sys::csp_dbg_rdp_print = level as u8 };
 }
 
-/// Helper to enable verbose debug levels for deep debugging.
-///
-/// Enables all debug levels.
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn enable_verbose_debug() {
-    for level in [
-        DebugLevel::Error,
-        DebugLevel::Warn,
-        DebugLevel::Info,
-        DebugLevel::Buffer,
-        DebugLevel::Packet,
-        DebugLevel::Protocol,
-        DebugLevel::Lock,
-    ] {
-        set_debug_level(level, true);
-    }
-}
-
-/// Helper to disable all debug output.
-///
-/// This is only available when the `debug` feature is enabled.
-#[cfg(feature = "debug")]
-pub fn disable_all_debug() {
-    for level in [
-        DebugLevel::Error,
-        DebugLevel::Warn,
-        DebugLevel::Info,
-        DebugLevel::Buffer,
-        DebugLevel::Packet,
-        DebugLevel::Protocol,
-        DebugLevel::Lock,
-    ] {
-        set_debug_level(level, false);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(feature = "debug")]
-    fn test_debug_level_enum() {
-        // Verify enum values match C constants (using generated constants)
-        assert_eq!(DebugLevel::Error as u32, sys::csp_debug_level_t_CSP_ERROR);
-        assert_eq!(DebugLevel::Warn as u32, sys::csp_debug_level_t_CSP_WARN);
-        assert_eq!(DebugLevel::Info as u32, sys::csp_debug_level_t_CSP_INFO);
-        assert_eq!(DebugLevel::Buffer as u32, sys::csp_debug_level_t_CSP_BUFFER);
-        assert_eq!(DebugLevel::Packet as u32, sys::csp_debug_level_t_CSP_PACKET);
-        assert_eq!(
-            DebugLevel::Protocol as u32,
-            sys::csp_debug_level_t_CSP_PROTOCOL
-        );
-        assert_eq!(DebugLevel::Lock as u32, sys::csp_debug_level_t_CSP_LOCK);
-    }
-
-    #[test]
-    #[cfg(feature = "debug")]
-    fn test_debug_level_ordering() {
-        // Verify severity ordering
-        assert!(DebugLevel::Error < DebugLevel::Warn);
-        assert!(DebugLevel::Warn < DebugLevel::Info);
-        assert!(DebugLevel::Info < DebugLevel::Buffer);
-    }
+/// Enable or disable per-packet trace prints.
+pub fn set_packet_trace(enabled: bool) {
+    unsafe { sys::csp_dbg_packet_print = if enabled { 1 } else { 0 } };
 }

@@ -11,16 +11,13 @@ use core::ffi::{c_char, c_void};
 /// - Mutexes: [`mutex_create`], [`mutex_remove`], [`mutex_lock`], [`mutex_unlock`]
 /// - Binary Semaphores: [`bin_sem_create`], [`bin_sem_remove`], [`bin_sem_wait`], [`bin_sem_post`]
 /// - Queues: [`queue_create`], [`queue_remove`], [`queue_enqueue`], [`queue_dequeue`], [`queue_size`]
-/// - Memory: [`malloc`], [`free`], ([`calloc`] has a default implementation)
 ///
 /// ## Optional Functions
 ///
 /// These have default implementations or are only needed for specific features:
 /// - ISR variants (`get_ms_isr`, `bin_sem_post_isr`, `queue_*_isr`) - default to non-ISR versions
-/// - [`thread_create`] - only needed if using [`CspNode::route_start_task`]. Use [`CspNode::route_work`] to avoid needing threads.
+/// - [`thread_create`] - only needed if you want to spawn the router as a thread
 /// - [`sleep_ms`] - convenience function, no-op by default
-/// - System functions (`sys_tasklist`, `memfree`, `reboot`, etc.) - used by CSP services, have no-op defaults
-/// - Clock functions - for timestamps, have no-op defaults
 ///
 /// [`get_ms`]: CspArch::get_ms
 /// [`get_s`]: CspArch::get_s
@@ -37,13 +34,8 @@ use core::ffi::{c_char, c_void};
 /// [`queue_enqueue`]: CspArch::queue_enqueue
 /// [`queue_dequeue`]: CspArch::queue_dequeue
 /// [`queue_size`]: CspArch::queue_size
-/// [`malloc`]: CspArch::malloc
-/// [`free`]: CspArch::free
-/// [`calloc`]: CspArch::calloc
 /// [`thread_create`]: CspArch::thread_create
 /// [`sleep_ms`]: CspArch::sleep_ms
-/// [`CspNode::route_start_task`]: crate::CspNode::route_start_task
-/// [`CspNode::route_work`]: crate::CspNode::route_work
 ///
 /// # Safety
 ///
@@ -212,92 +204,54 @@ pub unsafe trait CspArch: Send + Sync {
         self.queue_size(queue)
     }
 
-    // ── Memory (REQUIRED) ───────────────────────────────────────────────────
+    // ── CSP hooks (OPTIONAL) ────────────────────────────────────────────────
+    // Backing functions for libcsp's CMP services (MEMFREE, REBOOT, PS, …).
+    // Defaults are no-ops that return harmless values.
 
-    /// Allocate memory.
-    ///
-    /// **Required.** Returns a pointer, or null on failure.
-    fn malloc(&self, size: usize) -> *mut c_void;
+    /// Return free heap memory in bytes. Backs `csp_memfree_hook`.
+    fn memfree_hook(&self) -> u32 {
+        0
+    }
 
-    /// Free memory.
-    ///
-    /// **Required.** `ptr` must have been returned by [`malloc`] or [`calloc`].
-    ///
-    /// [`malloc`]: CspArch::malloc
-    /// [`calloc`]: CspArch::calloc
-    fn free(&self, ptr: *mut c_void);
+    /// Reboot the system. Backs `csp_reboot_hook`. Default: no-op.
+    fn reboot_hook(&self) {}
 
-    /// Allocate and zero-initialize memory.
+    /// Shut down the system. Backs `csp_shutdown_hook`. Default: no-op.
+    fn shutdown_hook(&self) {}
+
+    /// Fill `packet` with process/task information. Backs `csp_ps_hook`.
+    /// Returns the number of entries written. Default: 0.
     ///
-    /// **Optional.** Default implementation uses [`malloc`] + `memset`.
+    /// # Safety
+    /// The provided pointer is a valid `csp_packet_t *` when libcsp invokes it.
+    fn ps_hook(&self, _packet: *mut crate::sys::csp_packet_t) -> u32 {
+        0
+    }
+
+    /// Last-resort handler invoked by libcsp when an invariant fails.
+    /// Should not return. Default: busy-loop.
     ///
-    /// [`malloc`]: CspArch::malloc
-    fn calloc(&self, nmemb: usize, size: usize) -> *mut c_void {
-        let total = nmemb * size;
-        let ptr = self.malloc(total);
-        if !ptr.is_null() {
-            // Safety: `ptr` is a valid pointer newly allocated by `malloc`.
-            unsafe { core::ptr::write_bytes(ptr, 0, total) };
+    /// # Safety
+    /// `msg` points to a NUL-terminated C string.
+    fn panic(&self, _msg: *const c_char) -> ! {
+        loop {
+            core::hint::spin_loop();
         }
-        ptr
     }
-
-    // ── System Services (OPTIONAL) ──────────────────────────────────────────
-    // These are used by CSP service handlers. If you don't use those services,
-    // the default no-op implementations are fine.
-
-    /// Return free heap memory in bytes.
-    ///
-    /// **Optional.** Used by the MEMFREE service. Defaults to 0.
-    fn memfree(&self) -> u32 {
-        0
-    }
-
-    /// Reboot the system.
-    ///
-    /// **Optional.** Used by the REBOOT service. Defaults to no-op that returns CSP_ERR_NONE (0).
-    /// @return CSP_ERR_NONE (0) on success, or error code.
-    fn reboot(&self) -> i32 {
-        0 /* CSP_ERR_NONE */
-    }
-
-    /// Shutdown the system.
-    ///
-    /// **Optional.** Used by the SHUTDOWN service. Defaults to no-op that returns CSP_ERR_NONE (0).
-    /// @return CSP_ERR_NONE (0) on success, or error code.
-    fn shutdown(&self) -> i32 {
-        0 /* CSP_ERR_NONE */
-    }
-
-    /// Get task list size.
-    ///
-    /// **Optional.** Used by the PS service. Defaults to 0.
-    fn sys_tasklist_size(&self) -> i32 {
-        0
-    }
-
-    /// Write task list to buffer.
-    ///
-    /// **Optional.** Used by the PS service. Defaults to no-op.
-    fn sys_tasklist(&self, _out: *mut c_char) {}
-
-    /// Set terminal color.
-    ///
-    /// **Optional.** Used for colored debug output. Defaults to no-op.
-    fn sys_set_color(&self, _color: crate::sys::csp_color_t) {}
 
     // ── Clock/Timestamp (OPTIONAL) ──────────────────────────────────────────
-    // These are for packet timestamps. Not needed for basic CSP operation.
+    // Back `csp_clock_get_time` / `csp_clock_set_time` hooks in csp_hooks.h.
+    // Default implementations do nothing, which is fine if you never use the
+    // CMP CLOCK service or packet timestamps.
 
-    /// Get current timestamp.
-    ///
-    /// **Optional.** Defaults to no-op.
+    /// Populate `*time` (a `csp_timestamp_t`) with the current wall-clock time.
     fn clock_get_time(&self, _time: *mut c_void) {}
 
-    /// Set current timestamp.
-    ///
-    /// **Optional.** Defaults to no-op.
-    fn clock_set_time(&self, _time: *mut c_void) {}
+    /// Accept a wall-clock time (a `csp_timestamp_t`). Return 0 on success,
+    /// negative on failure (e.g. `CSP_ERR_INVAL`).
+    fn clock_set_time(&self, _time: *const c_void) -> i32 {
+        0
+    }
 
     // ── Threading (OPTIONAL) ────────────────────────────────────────────────
     // Only needed if you want to use `CspNode::route_start_task()`.
@@ -752,57 +706,25 @@ macro_rules! export_arch {
             <$impl_type as $crate::CspArch>::queue_size(&$instance, queue) as i32
         }
 
-        #[allow(unexpected_cfgs)]
-        #[cfg(not(feature = "ropi-rwpi"))]
         #[no_mangle]
-        pub unsafe extern "C" fn csp_malloc(size: usize) -> *mut ::core::ffi::c_void {
-            <$impl_type as $crate::CspArch>::malloc(&$instance, size)
-        }
-        #[allow(unexpected_cfgs)]
-        #[cfg(feature = "ropi-rwpi")]
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_malloc_impl(size: usize) -> *mut ::core::ffi::c_void {
-            <$impl_type as $crate::CspArch>::malloc(&$instance, size)
-        }
-        #[allow(unexpected_cfgs)]
-        #[cfg(not(feature = "ropi-rwpi"))]
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_calloc(nmemb: usize, size: usize) -> *mut ::core::ffi::c_void {
-            <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
-        }
-        #[allow(unexpected_cfgs)]
-        #[cfg(feature = "ropi-rwpi")]
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_calloc_impl(
-            nmemb: usize,
-            size: usize,
-        ) -> *mut ::core::ffi::c_void {
-            <$impl_type as $crate::CspArch>::calloc(&$instance, nmemb, size)
-        }
-        #[allow(unexpected_cfgs)]
-        #[cfg(not(feature = "ropi-rwpi"))]
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_free(ptr: *mut ::core::ffi::c_void) {
-            <$impl_type as $crate::CspArch>::free(&$instance, ptr)
-        }
-        #[allow(unexpected_cfgs)]
-        #[cfg(feature = "ropi-rwpi")]
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_free_impl(ptr: *mut ::core::ffi::c_void) {
-            <$impl_type as $crate::CspArch>::free(&$instance, ptr)
-        }
-
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_memfree() -> u32 {
-            <$impl_type as $crate::CspArch>::memfree(&$instance)
+        pub unsafe extern "C" fn csp_memfree_hook() -> u32 {
+            <$impl_type as $crate::CspArch>::memfree_hook(&$instance)
         }
         #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_reboot() -> i32 {
-            <$impl_type as $crate::CspArch>::reboot(&$instance)
+        pub unsafe extern "C" fn csp_reboot_hook() {
+            <$impl_type as $crate::CspArch>::reboot_hook(&$instance)
         }
         #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_shutdown() -> i32 {
-            <$impl_type as $crate::CspArch>::shutdown(&$instance)
+        pub unsafe extern "C" fn csp_shutdown_hook() {
+            <$impl_type as $crate::CspArch>::shutdown_hook(&$instance)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_ps_hook(packet: *mut $crate::sys::csp_packet_t) -> u32 {
+            <$impl_type as $crate::CspArch>::ps_hook(&$instance, packet)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_panic(msg: *const ::core::ffi::c_char) -> ! {
+            <$impl_type as $crate::CspArch>::panic(&$instance, msg)
         }
 
         #[no_mangle]
@@ -810,21 +732,8 @@ macro_rules! export_arch {
             <$impl_type as $crate::CspArch>::clock_get_time(&$instance, time)
         }
         #[no_mangle]
-        pub unsafe extern "C" fn csp_clock_set_time(time: *mut ::core::ffi::c_void) {
+        pub unsafe extern "C" fn csp_clock_set_time(time: *const ::core::ffi::c_void) -> i32 {
             <$impl_type as $crate::CspArch>::clock_set_time(&$instance, time)
-        }
-
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_tasklist_size() -> i32 {
-            <$impl_type as $crate::CspArch>::sys_tasklist_size(&$instance)
-        }
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_tasklist(out: *mut ::core::ffi::c_char) {
-            <$impl_type as $crate::CspArch>::sys_tasklist(&$instance, out)
-        }
-        #[no_mangle]
-        pub unsafe extern "C" fn csp_sys_set_color(color: $crate::sys::csp_color_t) {
-            <$impl_type as $crate::CspArch>::sys_set_color(&$instance, color)
         }
         #[no_mangle]
         pub unsafe extern "C" fn csp_thread_create(

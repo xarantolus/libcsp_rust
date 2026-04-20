@@ -36,7 +36,7 @@ pub struct IfStats {
 }
 
 impl crate::CspNode {
-    pub fn ident(&self, node: u8, timeout: u32) -> Result<Ident> {
+    pub fn ident(&self, node: u16, timeout: u32) -> Result<Ident> {
         // Safety: Creating a zeroed struct is safe as it's passed to C.
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
         // CMP_SIZE(ident) = 2 (type+code) + sizeof(ident struct)
@@ -79,7 +79,7 @@ impl crate::CspNode {
         }
     }
 
-    pub fn peek(&self, node: u8, address: u32, len: u8, timeout: u32) -> Result<Vec<u8>> {
+    pub fn peek(&self, node: u16, address: u32, len: u8, timeout: u32) -> Result<Vec<u8>> {
         if len as u32 > sys::CSP_CMP_PEEK_MAX_LEN {
             return Err(CspError::InvalidArgument);
         }
@@ -112,7 +112,7 @@ impl crate::CspNode {
         }
     }
 
-    pub fn poke(&self, node: u8, address: u32, data: &[u8], timeout: u32) -> Result<()> {
+    pub fn poke(&self, node: u16, address: u32, data: &[u8], timeout: u32) -> Result<()> {
         if data.len() as u32 > sys::CSP_CMP_POKE_MAX_LEN {
             return Err(CspError::InvalidArgument);
         }
@@ -192,16 +192,15 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    pub fn new() -> Option<Self> {
-        let socket = Socket::new(crate::socket_opts::NONE)?;
-        Some(Dispatcher {
-            socket,
+    pub fn new() -> Self {
+        Dispatcher {
+            socket: Socket::new(crate::socket_opts::NONE),
             handlers: BTreeMap::new(),
             #[cfg(feature = "std")]
             result_handlers: BTreeMap::new(),
             #[cfg(feature = "std")]
             error_callback: None,
-        })
+        }
     }
 
     /// Set an error callback.
@@ -242,7 +241,7 @@ impl Dispatcher {
     /// ```no_run
     /// # use libcsp::{CspConfig, service::Dispatcher};
     /// let node = CspConfig::new().init().unwrap();
-    /// let mut dispatcher = Dispatcher::new().unwrap();
+    /// let mut dispatcher = Dispatcher::new();
     ///
     /// dispatcher.on_error(|context, err| {
     ///     eprintln!("Error in {}: {}", context, err);
@@ -301,29 +300,15 @@ impl Dispatcher {
                 if has_regular_handler {
                     let handler = self.handlers.get_mut(&dport).unwrap();
                     if let Some(reply) = handler(&conn, pkt) {
-                        if let Err(err) = conn.send_discard(reply, 100) {
-                            #[cfg(feature = "std")]
-                            if let Some(ref mut cb) = self.error_callback {
-                                cb("send_reply", Box::new(err));
-                            }
-                            let _ = err; // silence unused warning in no_std
-                        }
+                        conn.send(reply);
                     }
                 } else if has_result_handler {
                     #[cfg(feature = "std")]
                     {
                         let handler = self.result_handlers.get_mut(&dport).unwrap();
                         match handler(&conn, pkt) {
-                            Ok(Some(reply)) => {
-                                if let Err(err) = conn.send_discard(reply, 100) {
-                                    if let Some(ref mut cb) = self.error_callback {
-                                        cb("send_reply", Box::new(err));
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                // No reply, that's fine
-                            }
+                            Ok(Some(reply)) => conn.send(reply),
+                            Ok(None) => {}
                             Err(err) => {
                                 if let Some(ref mut cb) = self.error_callback {
                                     cb("handler", err);
@@ -332,7 +317,6 @@ impl Dispatcher {
                         }
                     }
                 } else if Port::from(dport).is_service_port() {
-                    // Fall back to built-in service handler
                     conn.handle_service(pkt);
                 }
             }
@@ -403,7 +387,7 @@ mod tests {
     #[test]
     fn test_dispatcher_basic() {
         with_csp_node(|_node| {
-            let mut dispatcher = Dispatcher::new().expect("Failed to create dispatcher");
+            let mut dispatcher = Dispatcher::new();
 
             // Register a simple echo handler on a unique port
             let port = 15;
@@ -435,7 +419,7 @@ mod tests {
     #[cfg(feature = "std")]
     fn test_dispatcher_with_result() {
         with_csp_node(|_node| {
-            let mut dispatcher = Dispatcher::new().expect("Failed to create dispatcher");
+            let mut dispatcher = Dispatcher::new();
 
             // Set error callback
             dispatcher.on_error(|context, err| {
@@ -444,7 +428,7 @@ mod tests {
 
             // Register a handler that can return errors
             dispatcher
-                .register_with_result(16, |_conn, pkt| {
+                .register_with_result(17, |_conn, pkt| {
                     if pkt.length() == 0 {
                         Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
@@ -461,7 +445,7 @@ mod tests {
     #[test]
     fn test_dispatcher_bind_service() {
         with_csp_node(|_node| {
-            let mut dispatcher = Dispatcher::new().expect("Failed to create dispatcher");
+            let mut dispatcher = Dispatcher::new();
 
             // Bind to a service port without a custom handler (uses built-in)
             dispatcher

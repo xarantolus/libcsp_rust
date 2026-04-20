@@ -14,7 +14,6 @@ fn main() {
     let node = CspConfig::new()
         .address(1)
         .hostname("loopback-test")
-        .buffers(10, 256)
         .init()
         .expect("csp_init failed");
 
@@ -27,7 +26,9 @@ fn main() {
 
     // Verify iteration works
     let mut found_loop = false;
-    libcsp::route::iterate(|addr, mask, entry| {
+    libcsp::route::iterate(|entry| {
+        let addr = entry.address();
+        let mask = entry.netmask();
         println!("Route: {}/{} via {}", addr, mask, entry.via());
         if addr == 0 && mask == 0 {
             found_loop = true;
@@ -40,7 +41,7 @@ fn main() {
 
     // 4. Server thread — bind, listen, accept one connection, read one packet.
     let server_handle = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("csp_socket failed");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(10).expect("bind failed");
         sock.listen(5).expect("listen failed");
 
@@ -67,12 +68,12 @@ fn main() {
         .connect(Priority::Norm, 1, 10, 1000, conn_opts::NONE)
         .expect("csp_connect failed");
 
-    let mut pkt = Packet::get(32).expect("no buffers");
+    let mut pkt = Packet::get(32_usize).expect("no buffers");
     pkt.write(b"hello from Rust!").expect("write failed");
 
     println!("Client: Sending packet...");
-    // send_discard: on failure the packet is freed and Err is returned.
-    conn.send_discard(pkt, 100).expect("send failed");
+    // send consumes the packet; libcsp always frees the buffer.
+    conn.send(pkt);
 
     server_handle.join().expect("server thread panicked");
     println!("Test passed!");

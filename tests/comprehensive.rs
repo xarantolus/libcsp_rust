@@ -10,7 +10,6 @@ fn ensure_init() -> CspNode {
     NODE.get_or_init(|| {
         let node = CspConfig::new()
             .address(1)
-            .buffers(50, 256)
             .init()
             .expect("init failed");
         node.route_start_task(4096, 0).unwrap();
@@ -37,7 +36,7 @@ fn test_rdp_basic() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::RDP_REQ).expect("failed to create RDP socket");
+        let mut sock = Socket::new(socket_opts::RDP_REQ);
         sock.bind(15).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -68,7 +67,7 @@ fn test_rdp_basic() {
 
     let mut pkt = Packet::get(8).expect("Failed to get packet");
     pkt.write(b"rdp-test").expect("Failed to write packet");
-    conn.send(pkt, 1000).expect("RDP send failed");
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
     assert!(
@@ -89,7 +88,7 @@ fn test_sfp_large_transfer() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(16).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -134,7 +133,7 @@ fn test_transaction_oneshot() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(17).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -146,7 +145,7 @@ fn test_transaction_oneshot() {
                 assert_eq!(pkt.data(), b"request", "Server received unexpected request");
                 assert_eq!(pkt.length(), 7, "Request packet length should be 7 bytes");
                 pkt.write(b"reply").expect("Failed to write reply");
-                conn.send(pkt, 1000).expect("Failed to send reply");
+                conn.send(pkt);
             } else {
                 panic!("Server failed to read transaction request");
             }
@@ -184,7 +183,7 @@ fn test_cmp_ident() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let service_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(ports::CMP).expect("Failed to bind CMP port");
         sock.listen(5).expect("Failed to listen");
 
@@ -275,7 +274,7 @@ fn test_node_ping() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let service_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(ports::PING).expect("Failed to bind PING port");
         sock.listen(5).expect("Failed to listen");
 

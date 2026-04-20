@@ -1,13 +1,13 @@
 [package]
 name = "libcsp"
-version = "1.6.0"
+version = "2.1.0"
 edition = "2021"
-description = "Safe Rust bindings for libcsp (Cubesat Space Protocol) v1.6"
+description = "Safe Rust bindings for libcsp (Cubesat Space Protocol) v2.1 with v1 wire-format compatibility"
 license = "LGPL-2.1"
 links = "csp"
 
 [features]
-default = ["std", "rdp", "crc32", "hmac", "xtea", "qos", "promisc", "dedup", "host-default-arch"]
+default = ["std", "rdp", "hmac", "promisc", "dedup", "host-default-arch"]
 
 # Pull in the standard library. Disable to build for no_std targets.
 # When disabled you still need `alloc` (for CString / heap-allocated strings
@@ -15,7 +15,7 @@ default = ["std", "rdp", "crc32", "hmac", "xtea", "qos", "promisc", "dedup", "ho
 std = []
 
 # Auto-export a POSIX `TestArch` as the C-side OS shim when `external-arch`
-# is enabled on a host platform (Linux/macOS/Windows). On by default so that
+# is enabled on a host platform (Linux/macOS). On by default so that
 # `cargo test --features external-arch` and the in-tree examples link without
 # requiring the user to invoke `export_arch!` themselves.
 #
@@ -28,25 +28,26 @@ host-default-arch = []
 # Security / protocol features
 rdp           = []   # Reliable Datagram Protocol
 rdp-fast-close = ["rdp"]  # Fast close of RDP connections
-crc32         = []   # CRC32 checksum
 hmac          = []   # HMAC-SHA1 authentication
-xtea          = []   # XTEA encryption
 
-# Routing / QoS
-qos           = []   # Quality of Service (priority FIFOs)
+# Routing / misc
 promisc       = []   # Promiscuous mode
-dedup         = []   # Packet deduplication
-cidr-rtable   = []   # CIDR routing table (instead of static)
+dedup         = []   # Packet deduplication (runtime-configurable via CspConfig::dedup())
 
 # Drivers / interfaces (optional external dependencies)
 socketcan     = []   # Linux SocketCAN driver (requires libsocketcan)
 zmq           = []   # ZMQ hub interface (requires libzmq)
 usart-linux   = []   # Linux USART driver
-usart-windows = []   # Windows USART driver
 
 # Debug
-debug         = []   # Enable CSP debug output
-debug-timestamp = [] # Add timestamps to debug output
+debug         = []   # Enable CSP debug output (csp_print + counters)
+
+# CSP v1-on-ZMQ interop: swap to little-endian CSP v1 headers on ZMQ
+# (only needed if you're bridging legacy systems via ZMQ).
+zmq-v1-fixup  = []
+
+# Zero out freed buffers (runtime scrub). Off by default.
+buffer-zero-clear = []
 
 # Custom Architecture Support
 # Enable this to provide your own implementation of OS primitives (mutex, queue, clock)
@@ -54,7 +55,7 @@ debug-timestamp = [] # Add timestamps to debug output
 external-arch = []
 
 # ROPI-RWPI ARM support: the export_arch! macro emits *_impl-suffixed symbols for the
-# functions that touch Rust statics (malloc, free, calloc, queue_create, get_ms).
+# functions that touch Rust statics (queue_create, get_ms).
 # The crate compiles an assembly file that provides the public csp_* names as
 # R9-saving trampolines that reload __data_start before calling the *_impl variant.
 ropi-rwpi = []
@@ -66,8 +67,8 @@ spin = "0.9"
 # Note: We don't use tinyrlibc because it exports symbols with no_mangle when features are enabled,
 # causing conflicts with our export_arch! macro. Instead, we implement the simple functions ourselves.
 
-# libc is used by test_arch on host platforms (Linux, macOS, Windows)
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+# libc is used by test_arch on host platforms (Linux, macOS)
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]

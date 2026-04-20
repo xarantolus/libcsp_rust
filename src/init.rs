@@ -20,7 +20,7 @@ extern crate alloc;
 use alloc::ffi::CString;
 use alloc::sync::Arc;
 use core::ffi::c_char;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use crate::error::csp_result;
 use crate::sys;
@@ -28,54 +28,79 @@ use crate::{Connection, Packet, Priority, Result};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Cached node address. `csp_conf_t` does not store it in v2.x; each interface
+/// owns its own address via `csp_iface_t::addr`. This mirror exists only so
+/// [`CspNode::address`] remains cheap and does not require walking the iflist.
+static NODE_ADDRESS: AtomicU16 = AtomicU16::new(0);
+
+/// CSP deduplication mode (`csp_dedup_types`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DedupMode {
+    /// Deduplication disabled.
+    Off = sys::csp_dedup_types_CSP_DEDUP_OFF as u8,
+    /// Deduplicate packets being forwarded.
+    Forward = sys::csp_dedup_types_CSP_DEDUP_FWD as u8,
+    /// Deduplicate incoming packets.
+    Incoming = sys::csp_dedup_types_CSP_DEDUP_INCOMING as u8,
+    /// Deduplicate both incoming and forwarded packets.
+    All = sys::csp_dedup_types_CSP_DEDUP_ALL as u8,
+}
+
 /// Builder for the CSP runtime configuration.
 ///
-/// Mirrors the `csp_conf_t` struct in `csp.h`.  Heap allocation is only
-/// required for the three C-string fields (`hostname`, `model`, `revision`);
-/// all numeric fields are stack-allocated.
+/// Mirrors `csp_conf_t` from `csp.h`. Buffer pool size, connection count and
+/// similar limits are compile-time constants set via build environment
+/// variables (`LIBCSP_BUFFER_SIZE`, `LIBCSP_BUFFER_COUNT`, …). Use
+/// [`crate::consts`] to read them back at runtime.
 pub struct CspConfig {
-    address: u8,
+    version: u8,
+    address: u16,
     hostname: CString,
     model: CString,
     revision: CString,
-    conn_max: u8,
-    conn_queue_length: u8,
-    fifo_length: u8,
-    port_max_bind: u8,
-    rdp_max_window: u8,
-    buffers: u16,
-    buffer_data_size: u16,
     conn_dfl_so: u32,
+    dedup: u8,
 }
 
 impl Default for CspConfig {
-    /// Defaults mirror `csp_conf_get_defaults()` from `csp.h`.
     fn default() -> Self {
         CspConfig {
+            // v1 is the wire format expected by existing flight hardware.
+            version: 1,
             address: 1,
             hostname: CString::new("hostname").unwrap(),
             model: CString::new("model").unwrap(),
             revision: CString::new("1.0").unwrap(),
-            conn_max: 10,
-            conn_queue_length: 10,
-            fifo_length: 25,
-            port_max_bind: 24,
-            rdp_max_window: 20,
-            buffers: 10,
-            buffer_data_size: 256,
             conn_dfl_so: 0,
+            dedup: sys::csp_dedup_types_CSP_DEDUP_OFF as u8,
         }
     }
 }
 
 impl CspConfig {
-    /// Create a new `CspConfig` with sane defaults.
+    /// Create a new `CspConfig` with sane defaults (wire version 1, address 1).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Set this node's CSP address (0–31).
-    pub fn address(mut self, addr: u8) -> Self {
+    /// Set the CSP wire-format version (1 or 2).
+    ///
+    /// Version 1 uses a 4-byte header with 5-bit addresses (0–31). Version 2
+    /// uses a 6-byte header with 14-bit addresses. Both ends of a link must
+    /// agree. The default is 1 for compatibility with legacy devices.
+    pub fn version(mut self, v: u8) -> Self {
+        debug_assert!(v == 1 || v == 2, "version must be 1 or 2");
+        self.version = v;
+        self
+    }
+
+    /// Set this node's CSP address.
+    ///
+    /// Version 1 addresses are 0–31; version 2 addresses are 0–16383. The
+    /// address is written into the loopback interface on [`init`](Self::init)
+    /// so the node can receive traffic addressed to itself.
+    pub fn address(mut self, addr: u16) -> Self {
         self.address = addr;
         self
     }
@@ -107,46 +132,13 @@ impl CspConfig {
         self
     }
 
-    /// Set the maximum number of simultaneous connections.
-    pub fn conn_max(mut self, n: u8) -> Self {
-        self.conn_max = n;
-        self
-    }
-
-    /// Set the per-connection receive queue length.
-    pub fn conn_queue_length(mut self, n: u8) -> Self {
-        self.conn_queue_length = n;
-        self
-    }
-
-    /// Set the router FIFO length (incoming message queue depth).
-    pub fn fifo_length(mut self, n: u8) -> Self {
-        self.fifo_length = n;
-        self
-    }
-
-    /// Set the highest port number available for `csp_bind()`.
-    pub fn port_max_bind(mut self, n: u8) -> Self {
-        self.port_max_bind = n;
-        self
-    }
-
-    /// Set the maximum RDP window size.
-    pub fn rdp_max_window(mut self, n: u8) -> Self {
-        self.rdp_max_window = n;
-        self
-    }
-
-    /// Set the number of pre-allocated packet buffers and their data size.
-    pub fn buffers(mut self, count: u16, data_size: u16) -> Self {
-        self.buffers = count;
-        self.buffer_data_size = data_size;
+    /// Configure packet deduplication.
+    pub fn dedup(mut self, mode: DedupMode) -> Self {
+        self.dedup = mode as u8;
         self
     }
 
     /// Set the default connection options ORed onto every new connection.
-    ///
-    /// See `CSP_O_*` constants in the `sys` module.
     pub fn default_socket_opts(mut self, opts: u32) -> Self {
         self.conn_dfl_so = opts;
         self
@@ -154,73 +146,134 @@ impl CspConfig {
 
     /// Initialise the CSP stack.
     ///
-    /// Calls `csp_init()` with the configured values.  On success returns a
-    /// [`CspNode`] which keeps the string pointers alive for the duration of
-    /// the CSP runtime.  Drop the `CspNode` to call `csp_free_resources()`.
+    /// Writes the configured values into the `csp_conf` global and calls
+    /// `csp_init()`. Returns a [`CspNode`] that keeps the `CString`s alive.
     ///
     /// # Errors
-    /// Returns [`CspError`](crate::CspError) if `csp_init()` fails.
+    /// Returns [`CspError::AlreadyInitialized`] if a `CspNode` already exists.
+    ///
+    /// [`CspError::AlreadyInitialized`]: crate::CspError::AlreadyInitialized
     pub fn init(self) -> Result<CspNode> {
         if INITIALIZED.swap(true, Ordering::SeqCst) {
             return Err(crate::CspError::AlreadyInitialized);
         }
 
-        // Build the C struct. The pointer fields point into self's CStrings.
-        // Those must remain valid until csp_free_resources() is called.
-        let conf = sys::csp_conf_t {
-            address: self.address,
-            hostname: self.hostname.as_ptr() as *const c_char,
-            model: self.model.as_ptr() as *const c_char,
-            revision: self.revision.as_ptr() as *const c_char,
-            conn_max: self.conn_max,
-            conn_queue_length: self.conn_queue_length,
-            fifo_length: self.fifo_length,
-            port_max_bind: self.port_max_bind,
-            rdp_max_window: self.rdp_max_window,
-            buffers: self.buffers,
-            buffer_data_size: self.buffer_data_size,
-            conn_dfl_so: self.conn_dfl_so,
-        };
+        // Safety: `self.{hostname,model,revision}` outlive the runtime because
+        // they are moved into `CspNodeInner` below and freed only when the last
+        // `CspNode` clone is dropped.
+        unsafe {
+            sys::csp_conf.version = self.version;
+            sys::csp_conf.hostname = self.hostname.as_ptr() as *const c_char;
+            sys::csp_conf.model = self.model.as_ptr() as *const c_char;
+            sys::csp_conf.revision = self.revision.as_ptr() as *const c_char;
+            sys::csp_conf.conn_dfl_so = self.conn_dfl_so;
+            sys::csp_conf.dedup = self.dedup;
 
-        // Safety: `conf` is a valid struct pointing to C-strings owned by `self`.
-        csp_result(unsafe { sys::csp_init(&conf) })?;
+            sys::csp_init();
 
-        // Move self into the node so the CStrings live as long as the node.
+            // Register a self-addressed pseudo-interface plus a
+            // host-specific route for our own address. libcsp's built-in
+            // `LOOP` interface keeps `addr=0`, so packets that csp_connect
+            // emits with `src=0` never get their source filled in when the
+            // destination is our own address — replies would flow to 0
+            // instead of back to us. Routing through SELF_IFACE makes
+            // `csp_send_direct` apply its addr as the outgoing source.
+            //
+            // `netmask=0` keeps SELF out of the subnet-match path; the
+            // routing table is what directs self-traffic here.
+            SELF_IFACE.addr = self.address;
+            SELF_IFACE.netmask = 0;
+            SELF_IFACE.name = SELF_IFACE_NAME.as_ptr() as *const c_char;
+            SELF_IFACE.nexthop = Some(self_iface_tx);
+            csp_iflist_add(&raw mut SELF_IFACE);
+
+            // Zero the built-in loopback's netmask so subnet lookup never
+            // picks it up — the rtable is the only delivery path now.
+            let lo = sys::csp_iflist_get_by_name(b"LOOP\0".as_ptr() as *const c_char);
+            if !lo.is_null() {
+                (*lo).netmask = 0;
+            }
+
+            // Host-specific route for our own address. `-1` tells
+            // `csp_rtable_set` to use the full host-bit width as the mask,
+            // giving us an exact-match entry.
+            sys::csp_rtable_set(
+                self.address,
+                -1,
+                &raw mut SELF_IFACE,
+                sys::CSP_NO_VIA_ADDRESS as u16,
+            );
+        }
+
+        NODE_ADDRESS.store(self.address, Ordering::SeqCst);
+
         Ok(CspNode {
             _inner: Arc::new(CspNodeInner { _config: self }),
         })
     }
 }
 
+// ── Self-addressed loopback shim ─────────────────────────────────────────────
+
+/// Static storage for the self-addressed interface added by [`CspConfig::init`].
+///
+/// Kept as a `static mut` because libcsp holds a pointer to it via the
+/// interface list and expects the storage to live for the full runtime.
+static mut SELF_IFACE: sys::csp_iface_t = sys::csp_iface_t {
+    addr: 0,
+    netmask: 0,
+    name: core::ptr::null(),
+    interface_data: core::ptr::null_mut(),
+    driver_data: core::ptr::null_mut(),
+    nexthop: None,
+    is_default: 0,
+    tx: 0,
+    rx: 0,
+    tx_error: 0,
+    rx_error: 0,
+    drop: 0,
+    autherr: 0,
+    frame: 0,
+    txbytes: 0,
+    rxbytes: 0,
+    irq: 0,
+    next: core::ptr::null_mut(),
+};
+
+static SELF_IFACE_NAME: &[u8] = b"SELF\0";
+
+/// Nexthop for the self interface: forward the packet straight into the
+/// router via `csp_qfifo_write`, mirroring libcsp's built-in loopback.
+unsafe extern "C" fn self_iface_tx(
+    _iface: *mut sys::csp_iface_t,
+    _via: u16,
+    packet: *mut sys::csp_packet_t,
+    _from_me: core::ffi::c_int,
+) -> core::ffi::c_int {
+    sys::csp_qfifo_write(packet, &raw mut SELF_IFACE, core::ptr::null_mut());
+    sys::CSP_ERR_NONE as core::ffi::c_int
+}
+
+// `csp_iflist_add` is declared in the public headers but its prototype is
+// re-exported here for clarity.
+use crate::sys::csp_iflist_add;
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Token representing an initialised CSP runtime.
 ///
-/// Returned by [`CspConfig::init()`].  When the last reference to this value
-/// is dropped, `csp_free_resources()` is called to tear down the CSP stack.
+/// Returned by [`CspConfig::init()`]. Cloneable; the CSP stack lives as long
+/// as any clone is held.
 ///
 /// ## Single Node Limitation
 ///
-/// **Important:** Due to global state in the underlying libcsp C library,
-/// only **one** `CspNode` can exist at a time in a process. Attempting to
-/// create a second node (via [`CspConfig::init()`]) will return
+/// Due to global state in libcsp, only **one** `CspNode` can exist at a time
+/// in a process. A second [`CspConfig::init()`] call returns
 /// [`CspError::AlreadyInitialized`].
-///
-/// You can clone a `CspNode` (it's `Arc`-based internally), but you cannot
-/// have two independently-initialized CSP stacks in the same process.
-///
-/// This is a fundamental limitation of libcsp's design and cannot be worked
-/// around from Rust.
-///
-/// ## Lifetime
-///
-/// All connections, sockets and packets obtained from this node must be
-/// dropped **before** the `CspNode` itself is dropped.
 ///
 /// [`CspError::AlreadyInitialized`]: crate::CspError::AlreadyInitialized
 #[derive(Clone)]
 pub struct CspNode {
-    /// Keeps the CSP runtime alive (calls `csp_free_resources` on last drop).
     _inner: Arc<CspNodeInner>,
 }
 
@@ -230,72 +283,74 @@ struct CspNodeInner {
 
 impl Drop for CspNodeInner {
     fn drop(&mut self) {
-        // Safety: libcsp was successfully initialised.
-        unsafe { sys::csp_free_resources() }
         INITIALIZED.store(false, Ordering::SeqCst);
     }
 }
 
 impl CspNode {
     /// Return the CSP address of this node.
-    pub fn address(&self) -> u8 {
-        // Safety: libcsp is initialised.
-        unsafe { sys::csp_get_address() }
+    pub fn address(&self) -> u16 {
+        NODE_ADDRESS.load(Ordering::SeqCst)
     }
 
     // ── Routing ───────────────────────────────────────────────────────────
 
-    /// Start the CSP router task.
+    /// Process one routing iteration.
     ///
-    /// The router task calls `csp_route_work()` internally to dispatch
-    /// incoming packets to their destinations.
-    ///
-    /// `stack_size` — task stack size in bytes (platform-dependent units on
-    /// FreeRTOS; ignored on POSIX where `pthread` defaults apply).
-    ///
-    /// `priority` — task priority (platform-dependent).
-    pub fn route_start_task(&self, stack_size: u32, priority: u32) -> Result<()> {
+    /// Call in a loop (or spawn a thread that does so) to dispatch incoming
+    /// packets to their destinations. In v2.x libcsp no longer spawns a
+    /// router thread of its own — applications drive the router themselves.
+    pub fn route_work(&self) -> Result<()> {
         // Safety: libcsp is initialised.
-        csp_result(unsafe { sys::csp_route_start_task(stack_size, priority) })
+        csp_result(unsafe { sys::csp_route_work() })
     }
 
-    /// Manually process one routing iteration (alternative to the task).
+    /// Spawn a POSIX thread that calls [`route_work`] in a loop.
     ///
-    /// Call this in your own scheduling loop instead of
-    /// [`route_start_task`](CspNode::route_start_task) when you do not want
-    /// a background thread.
-    pub fn route_work(&self, timeout: u32) -> Result<()> {
-        // Safety: libcsp is initialised.
-        csp_result(unsafe { sys::csp_route_work(timeout) })
+    /// Convenience helper for hosted builds. On `external-arch` targets this
+    /// returns `Err(CspError::NotSupported)` — pump [`route_work`] from your
+    /// own scheduler instead.
+    ///
+    /// [`route_work`]: CspNode::route_work
+    #[cfg(all(feature = "std", any(target_os = "linux", target_os = "macos")))]
+    pub fn route_start_task(&self, _stack_size: u32, _priority: u32) -> Result<()> {
+        let node = self.clone();
+        std::thread::Builder::new()
+            .name("csp-router".into())
+            .spawn(move || loop {
+                // Ignore per-iteration errors so transient queue timeouts
+                // don't kill the router thread.
+                let _ = node.route_work();
+            })
+            .map(|_| ())
+            .map_err(|_| crate::CspError::DriverError)
+    }
+
+    #[cfg(not(all(feature = "std", any(target_os = "linux", target_os = "macos"))))]
+    pub fn route_start_task(&self, _stack_size: u32, _priority: u32) -> Result<()> {
+        Err(crate::CspError::NotSupported)
     }
 
     // ── Client connections ─────────────────────────────────────────────────
 
     /// Establish an outgoing connection to `dst:dst_port`.
     ///
-    /// `prio` — message priority (0 = critical … 3 = low).
-    /// `timeout` — connection timeout in ms (used for RDP; ignored for UDP).
-    /// `opts` — connection options (`CSP_O_*` bitmask).
-    ///
     /// Returns `None` if no connection slots are free or the RDP handshake
     /// times out.
     pub fn connect(
         &self,
         prio: Priority,
-        dst: u8,
+        dst: u16,
         dst_port: u8,
         timeout: u32,
         opts: u32,
     ) -> Option<Connection> {
         let prio_u8 = prio as u8;
         debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
-        // Safety: libcsp is initialised.
-        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
         let ptr = unsafe { sys::csp_connect(prio_u8, dst, dst_port, timeout, opts) };
         if ptr.is_null() {
             None
         } else {
-            // Safety: `ptr` is a valid connection pointer returned by libcsp.
             Some(unsafe { Connection::from_raw(ptr) })
         }
     }
@@ -304,62 +359,35 @@ impl CspNode {
 
     /// Send a packet connectionlessly to `dst:dst_port`.
     ///
-    /// Unlike [`connect`](CspNode::connect) + [`Connection::send`], this
-    /// bypasses the connection table entirely — no connection slot is used.
-    /// Useful for high-rate fire-and-forget traffic.
-    ///
-    /// `src_port` — source port number (use 0 to let CSP assign one).
-    ///
-    /// ## Ownership semantics
-    ///
-    /// - **On success** (`csp_sendto` returns 1): CSP takes ownership of the
-    ///   buffer.  `Ok(())` is returned and `packet` is consumed.
-    /// - **On failure**: The packet is returned as `Err((CspError, Packet))`
-    ///   so the caller can inspect or drop it.
+    /// Bypasses the connection table entirely. The packet is always consumed
+    /// — libcsp frees the buffer regardless of delivery outcome.
     #[allow(clippy::too_many_arguments)]
     pub fn sendto(
         &self,
         prio: Priority,
-        dst: u8,
+        dst: u16,
         dst_port: u8,
         src_port: u8,
         opts: u32,
         packet: Packet,
-        timeout: u32,
-    ) -> core::result::Result<(), (crate::CspError, Packet)> {
+    ) {
         let prio_u8 = prio as u8;
         debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
         let raw = packet.into_raw();
-        // Safety: `raw` is a valid packet obtained from `Packet::get`.
-        // CSP takes ownership of the buffer if it returns 1.
-        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
-        let ret = unsafe { sys::csp_sendto(prio_u8, dst, dst_port, src_port, opts, raw, timeout) };
-        if ret == 1 {
-            // CSP owns `raw` now — do NOT reconstruct a Packet from it.
-            Ok(())
-        } else {
-            // Safety: CSP did not take ownership, so we can safely reconstruct
-            // the Packet to ensure the buffer is eventually freed.
-            let returned = unsafe { Packet::from_raw(raw) };
-            Err((crate::CspError::TransmitFailed, returned))
-        }
+        unsafe { sys::csp_sendto(prio_u8, dst, dst_port, src_port, opts, raw) };
     }
 
     // ── One-shot transactions ─────────────────────────────────────────────
 
     /// Perform a full request/reply transaction (new connection each call).
     ///
-    /// Creates a connection, sends `out_buf`, waits for a reply into `in_buf`,
-    /// then closes the connection.
-    ///
     /// `in_len` — expected reply length; `-1` for unknown, `0` for no reply.
-    ///
     /// Returns `Ok(reply_len)` on success.
     #[allow(clippy::too_many_arguments)]
     pub fn transaction(
         &self,
         prio: Priority,
-        dst: u8,
+        dst: u16,
         dst_port: u8,
         timeout: u32,
         out_buf: &[u8],
@@ -369,8 +397,6 @@ impl CspNode {
     ) -> Result<usize> {
         let prio_u8 = prio as u8;
         debug_assert!(prio_u8 <= 3, "Priority must be 0-3, got {}", prio_u8);
-        // Safety: libcsp is initialised. `out_buf` and `in_buf` are valid slices.
-        // Safety: `prio as u8` is safe because `Priority` is `repr(u8)` and validated.
         let ret = unsafe {
             sys::csp_transaction_w_opts(
                 prio_u8,
@@ -385,21 +411,15 @@ impl CspNode {
             )
         };
         if ret > 0 || (ret == 1 && in_len == 0) {
-            // Safety: Underlying C function returns the length of the reply (>= 0).
             Ok(ret as usize)
         } else {
             Err(crate::CspError::TransmitFailed)
         }
     }
 
-    // ── Routing helpers ───────────────────────────────────────────────────────
+    // ── Routing helpers ───────────────────────────────────────────────────
 
-    /// Load routing table entries from a compact string (convenience wrapper
-    /// around [`route::load`](crate::route::load)).
-    ///
-    /// Format: `"<addr>[/<mask>] <iface> [<via>][, ...]"`
-    ///
-    /// Example: `"0/0 LOOP"` routes all traffic through the loopback interface.
+    /// Load routing table entries from a compact string.
     pub fn route_load(&self, table: &str) -> Result<usize> {
         crate::route::load(table)
     }
@@ -410,10 +430,10 @@ impl CspNode {
     /// `iface` must be a valid, live `csp_iface_t *`.
     pub unsafe fn route_set_raw(
         &self,
-        dest: u8,
+        dest: u16,
         mask: u8,
         iface: *mut crate::sys::csp_iface_t,
-        via: u8,
+        via: u16,
     ) -> Result<()> {
         crate::route::set_raw(dest, mask, iface, via)
     }
@@ -421,10 +441,7 @@ impl CspNode {
     // ── Service calls ──────────────────────────────────────────────────────
 
     /// Send a ping to `node` and return the echo time in ms.
-    ///
-    /// Returns `Ok(latency_ms)` on success.
-    pub fn ping(&self, node: u8, timeout: u32, payload_size: u32, opts: u8) -> Result<u32> {
-        // Safety: libcsp is initialised.
+    pub fn ping(&self, node: u16, timeout: u32, payload_size: u32, opts: u8) -> Result<u32> {
         let res = unsafe { sys::csp_ping(node, timeout, payload_size, opts) };
         if res >= 0 {
             Ok(res as u32)
@@ -433,80 +450,50 @@ impl CspNode {
         }
     }
 
-    /// Send a ping without waiting for reply.
-    ///
-    /// Fire-and-forget ping. Useful for keepalive.
-    pub fn ping_noreply(&self, node: u8) {
-        // Safety: libcsp is initialised.
+    /// Send a ping without waiting for a reply (keepalive).
+    pub fn ping_noreply(&self, node: u16) {
         unsafe { sys::csp_ping_noreply(node) }
     }
 
     /// Request process/task list from `node`.
-    ///
-    /// The output is printed to stdout by the remote node's CSP service handler.
-    /// This function sends the request but doesn't return the output directly.
-    pub fn ps(&self, node: u8, timeout: u32) {
-        // Safety: libcsp is initialised.
+    pub fn ps(&self, node: u16, timeout: u32) {
         unsafe { sys::csp_ps(node, timeout) }
     }
 
     /// Request and return free memory on `node`.
-    pub fn memfree(&self, node: u8, timeout: u32) -> Result<u32> {
+    pub fn memfree(&self, node: u16, timeout: u32) -> Result<u32> {
         let mut size: u32 = 0;
-        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_memfree(node, timeout, &mut size) })?;
         Ok(size)
     }
 
     /// Request and return uptime (seconds) of `node`.
-    pub fn uptime(&self, node: u8, timeout: u32) -> Result<u32> {
+    pub fn uptime(&self, node: u16, timeout: u32) -> Result<u32> {
         let mut secs: u32 = 0;
-        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_uptime(node, timeout, &mut secs) })?;
         Ok(secs)
     }
 
     /// Request and return the number of free packet buffers on `node`.
-    pub fn buf_free(&self, node: u8, timeout: u32) -> Result<u32> {
+    pub fn buf_free(&self, node: u16, timeout: u32) -> Result<u32> {
         let mut n: u32 = 0;
-        // Safety: libcsp is initialised.
         csp_result(unsafe { sys::csp_get_buf_free(node, timeout, &mut n) })?;
         Ok(n)
     }
 
     /// Send a reboot request to `node`.
-    pub fn reboot(&self, node: u8) {
-        // Safety: libcsp is initialised.
+    pub fn reboot(&self, node: u16) {
         unsafe { sys::csp_reboot(node) }
     }
 
     /// Send a shutdown request to `node`.
-    pub fn shutdown(&self, node: u8) {
-        // Safety: libcsp is initialised.
+    pub fn shutdown(&self, node: u16) {
         unsafe { sys::csp_shutdown(node) }
     }
 
     // ── Protocol Configuration ────────────────────────────────────────────────
 
     /// Configure RDP (Reliable Datagram Protocol) parameters.
-    ///
-    /// This sets global RDP configuration that affects all RDP connections.
-    ///
-    /// # Parameters
-    /// - `window_size` - Maximum number of unacknowledged packets (default: 20)
-    /// - `conn_timeout_ms` - Connection timeout in milliseconds (default: 10000)
-    /// - `packet_timeout_ms` - Packet timeout in milliseconds (default: 1000)
-    /// - `delayed_acks` - Enable delayed acknowledgments (default: 1)
-    /// - `ack_timeout` - ACK timeout in milliseconds (default: 1000)
-    /// - `ack_delay_count` - Number of packets to wait before sending ACK (default: 4)
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use libcsp::CspConfig;
-    /// let node = CspConfig::new().init().unwrap();
-    /// // Fast RDP close for stress tests
-    /// node.rdp_set_opt(20, 500, 100, 1, 100, 2);
-    /// ```
     ///
     /// Requires the `rdp` feature (enabled by default).
     #[cfg(feature = "rdp")]
@@ -519,7 +506,6 @@ impl CspNode {
         ack_timeout: u32,
         ack_delay_count: u32,
     ) {
-        // Safety: libcsp is initialised.
         unsafe {
             sys::csp_rdp_set_opt(
                 window_size,
@@ -534,10 +520,8 @@ impl CspNode {
 
     /// Get current RDP configuration.
     ///
-    /// Returns a tuple of (window_size, conn_timeout_ms, packet_timeout_ms,
-    /// delayed_acks, ack_timeout, ack_delay_count).
-    ///
-    /// Requires the `rdp` feature (enabled by default).
+    /// Returns `(window_size, conn_timeout_ms, packet_timeout_ms, delayed_acks,
+    /// ack_timeout, ack_delay_count)`.
     #[cfg(feature = "rdp")]
     pub fn rdp_get_opt(&self) -> (u32, u32, u32, u32, u32, u32) {
         let mut window_size = 0;
@@ -547,7 +531,6 @@ impl CspNode {
         let mut ack_timeout = 0;
         let mut ack_delay_count = 0;
 
-        // Safety: libcsp is initialised.
         unsafe {
             sys::csp_rdp_get_opt(
                 &mut window_size,
@@ -569,34 +552,9 @@ impl CspNode {
         )
     }
 
-    // ── Security ──────────────────────────────────────────────────────────────
-
-    /// Load the 128-bit XTEA pre-shared key (four 32-bit words).
-    ///
-    /// Both ends of any XTEA-encrypted connection must share the same key.
-    /// Call this **before** starting the router task and opening any
-    /// encrypted connections.
-    ///
-    /// The key is stored in a global variable inside the C library.  This
-    /// call is not thread-safe if made concurrently with active XTEA
-    /// connections.
-    ///
-    /// Requires the `xtea` feature (enabled by default).
-    #[cfg(feature = "xtea")]
-    pub fn set_xtea_key(&self, key: &[u32; 4]) {
-        // Safety: `key` is a valid array of four 32-bit words.
-        unsafe {
-            sys::csp_xtea_set_key(key.as_ptr() as *const core::ffi::c_void, 4);
-        }
-    }
-
     // ── Drivers ───────────────────────────────────────────────────────────────
 
     /// Open a Linux SocketCAN interface and add it to CSP.
-    ///
-    /// `device` — Linux device name (e.g., "can0", "vcan0").
-    /// `bitrate` — bitrate in bps (0 to keep current OS setting).
-    /// `promisc` — if true, receive all CAN frames; if false, filter for local address.
     #[cfg(feature = "socketcan")]
     pub fn add_interface_socketcan(
         &self,
@@ -607,11 +565,11 @@ impl CspNode {
         let c_device = CString::new(device).map_err(|_| crate::CspError::InvalidArgument)?;
         let mut iface_ptr: *mut sys::csp_iface_t = core::ptr::null_mut();
 
-        // Safety: `c_device` is a valid C-string. `iface_ptr` will be populated by libcsp.
         csp_result(unsafe {
             sys::csp_can_socketcan_open_and_add_interface(
                 c_device.as_ptr(),
                 sys::CSP_IF_CAN_DEFAULT_NAME.as_ptr() as *const c_char,
+                self.address() as core::ffi::c_uint,
                 bitrate,
                 promisc,
                 &mut iface_ptr,

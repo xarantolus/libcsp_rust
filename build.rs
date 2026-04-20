@@ -7,15 +7,6 @@ This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
 License as published by the Free Software Foundation; either
 version 2.1 of the License, or (at your option) any later version.
-
-This library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with this library; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 use std::env;
@@ -23,14 +14,6 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Returns true when building for a bare-metal embedded target (no OS).
-///
-/// This is used alongside the `external-arch` feature to decide whether to
-/// use the external arch stubs instead of POSIX/Windows arch implementations.
-///
-/// We check this explicitly because Cargo workspace feature unification can
-/// strip the `external-arch` feature when multiple workspace members depend
-/// on libcsp with different feature sets. Detecting the target directly is
-/// a reliable fallback.
 fn is_embedded_target() -> bool {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     matches!(target_os.as_str(), "none" | "unknown" | "")
@@ -38,7 +21,7 @@ fn is_embedded_target() -> bool {
 }
 
 /// Returns true when the arch implementation is provided externally (in Rust)
-/// rather than by libcsp's built-in POSIX/Windows/macOS C implementations.
+/// rather than by libcsp's built-in POSIX C implementation.
 fn uses_external_arch() -> bool {
     env::var("CARGO_FEATURE_EXTERNAL_ARCH").is_ok() || is_embedded_target()
 }
@@ -49,10 +32,9 @@ fn main() {
     let src_dir = libcsp_dir.join("src");
     let include_dir = libcsp_dir.join("include");
 
-    // Notify cargo of files/env vars that trigger rebuild
     emit_rerun_triggers();
 
-    // 1. Generate csp_autoconfig.h into OUT_DIR/include/csp/
+    // 1. Generate csp/autoconfig.h into OUT_DIR/include/csp/
     let gen_include_dir = out_dir.join("include");
     let gen_csp_dir = gen_include_dir.join("csp");
     fs::create_dir_all(&gen_csp_dir).expect("failed to create generated include dir");
@@ -88,9 +70,6 @@ fn main() {
         "macos" => {
             println!("cargo:rustc-link-lib=pthread");
         }
-        "windows" => {
-            println!("cargo:rustc-link-lib=ws2_32");
-        }
         _ => {}
     }
 
@@ -119,6 +98,7 @@ fn emit_rerun_triggers() {
         "LIBCSP_RTABLE_SIZE",
         "LIBCSP_MAX_INTERFACES",
         "LIBCSP_RDP_MAX_WINDOW",
+        "LIBCSP_PACKET_PADDING_BYTES",
     ] {
         println!("cargo:rerun-if-env-changed={name}");
     }
@@ -132,19 +112,10 @@ fn cfg_u32(env_name: &str, default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-/// Generate `csp_autoconfig.h` in `dest_dir` based on enabled Cargo features
+/// Generate `csp/autoconfig.h` in `dest_dir` based on enabled Cargo features
 /// and optional environment-variable overrides for buffer/connection sizing.
 fn generate_autoconfig(dest_dir: &std::path::Path) {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
-
-    // OS defines — bare-metal targets still set CSP_POSIX as a header placeholder,
-    // but the external-arch mechanism prevents POSIX headers from being included.
-    let os_define = match target_os.as_str() {
-        "windows" => "#define CSP_WINDOWS 1\n#define CSP_POSIX  0\n#define CSP_MACOSX 0",
-        "macos" => "#define CSP_MACOSX 1\n#define CSP_POSIX  0\n#define CSP_WINDOWS 0",
-        _ => "#define CSP_POSIX  1\n#define CSP_WINDOWS 0\n#define CSP_MACOSX 0",
-    };
 
     // Endianness
     let endian_define = if target_endian == "big" {
@@ -163,21 +134,20 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     };
     let use_rdp = feat("CARGO_FEATURE_RDP");
     let use_rdp_fc = feat("CARGO_FEATURE_RDP_FAST_CLOSE");
-    let use_crc32 = feat("CARGO_FEATURE_CRC32");
     let use_hmac = feat("CARGO_FEATURE_HMAC");
-    let use_xtea = feat("CARGO_FEATURE_XTEA");
-    let use_qos = feat("CARGO_FEATURE_QOS");
     let use_promisc = feat("CARGO_FEATURE_PROMISC");
     let use_dedup = feat("CARGO_FEATURE_DEDUP");
+    let use_zmq_fixup = feat("CARGO_FEATURE_ZMQ_V1_FIXUP");
+    let use_buf_zero = feat("CARGO_FEATURE_BUFFER_ZERO_CLEAR");
     let debug = feat("CARGO_FEATURE_DEBUG");
-    let debug_ts = feat("CARGO_FEATURE_DEBUG_TIMESTAMP");
 
-    // Log levels: in release (no debug feature) only ERROR is enabled
-    let (log_debug, log_info, log_warn, log_error) = if debug == "1" {
-        ("1", "1", "1", "1")
-    } else {
-        ("0", "0", "0", "1")
-    };
+    // Whether csp_print() is compiled in. Off for bare-metal external-arch,
+    // on otherwise (POSIX host). Rtable load/save/check also need this.
+    let enable_csp_print = if uses_external_arch() { "0" } else { "1" };
+
+    // stdio/strings require a hosted libc — disable for bare-metal external-arch.
+    let have_stdio = if uses_external_arch() { "0" } else { "1" };
+    let print_stdio = have_stdio;
 
     // Sizing — overridable via env vars
     let buf_size = cfg_u32("LIBCSP_BUFFER_SIZE", 256);
@@ -185,15 +155,36 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
     let conn_max = cfg_u32("LIBCSP_CONN_MAX", 10);
     let conn_rxq = cfg_u32("LIBCSP_CONN_RXQUEUE_LEN", 10);
     let qfifo_len = cfg_u32("LIBCSP_QFIFO_LEN", 25);
-    let port_max = cfg_u32("LIBCSP_PORT_MAX_BIND", 24);
+    // CSP ports are 6-bit (0..=63). Ports above `CSP_PORT_MAX_BIND` are used
+    // by the library as ephemeral source ports for outbound connections, so
+    // keep MAX_BIND strictly below 63 to leave at least one ephemeral slot.
+    let port_max = cfg_u32("LIBCSP_PORT_MAX_BIND", 48);
     let rtable_sz = cfg_u32("LIBCSP_RTABLE_SIZE", 10);
     let max_iface = cfg_u32("LIBCSP_MAX_INTERFACES", 8);
     let rdp_win = cfg_u32("LIBCSP_RDP_MAX_WINDOW", 20);
+    let padding_bytes = cfg_u32("LIBCSP_PACKET_PADDING_BYTES", 8);
+
+    // Export the sizing constants as cargo environment variables so Rust code
+    // can reference them via `env!("CSP_*")` without going through `sys::`.
+    for (name, val) in [
+        ("CSP_BUFFER_SIZE", buf_size),
+        ("CSP_BUFFER_COUNT", buf_count),
+        ("CSP_CONN_MAX", conn_max),
+        ("CSP_CONN_RXQUEUE_LEN", conn_rxq),
+        ("CSP_QFIFO_LEN", qfifo_len),
+        ("CSP_PORT_MAX_BIND", port_max),
+        ("CSP_RTABLE_SIZE", rtable_sz),
+        ("CSP_MAX_INTERFACES", max_iface),
+        ("CSP_RDP_MAX_WINDOW", rdp_win),
+        ("CSP_PACKET_PADDING_BYTES", padding_bytes),
+    ] {
+        println!("cargo:rustc-env={name}={val}");
+    }
 
     let content = format!(
         r#"/*
  * Auto-generated by Rust build script — DO NOT EDIT.
- * Cubesat Space Protocol v1.6 compile-time configuration.
+ * Cubesat Space Protocol v2.1 compile-time configuration.
  *
  * Copyright (C) 2012 GomSpace ApS (http://www.gomspace.com)
  * Licensed under the GNU Lesser General Public License v2.1+
@@ -201,30 +192,27 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
 #ifndef CSP_AUTOCONFIG_H
 #define CSP_AUTOCONFIG_H
 
-/* OS selection */
-{os_define}
-
 /* Endianness */
 {endian_define}
 
 /* Feature flags */
 #define CSP_USE_RDP               {use_rdp}
 #define CSP_USE_RDP_FAST_CLOSE    {use_rdp_fc}
-#define CSP_USE_CRC32             {use_crc32}
 #define CSP_USE_HMAC              {use_hmac}
-#define CSP_USE_XTEA              {use_xtea}
-#define CSP_USE_QOS               {use_qos}
 #define CSP_USE_PROMISC           {use_promisc}
-#define CSP_USE_DEDUP             {use_dedup}
 #define CSP_USE_RTABLE            1
+#define CSP_ENABLE_CSP_PRINT      {enable_csp_print}
+#define CSP_HAVE_STDIO            {have_stdio}
+#define CSP_PRINT_STDIO           {print_stdio}
+#define CSP_FIXUP_V1_ZMQ_LITTLE_ENDIAN {use_zmq_fixup}
+#define CSP_BUFFER_ZERO_CLEAR     {use_buf_zero}
+
+/* Dedup is a runtime toggle (csp_conf.dedup); this compile-time flag just
+ * gates inclusion of dedup-related source files. */
+#define CSP_USE_DEDUP             {use_dedup}
 
 /* Debug / logging */
 #define CSP_DEBUG                 {debug}
-#define CSP_DEBUG_TIMESTAMP       {debug_ts}
-#define CSP_LOG_LEVEL_DEBUG       {log_debug}
-#define CSP_LOG_LEVEL_INFO        {log_info}
-#define CSP_LOG_LEVEL_WARN        {log_warn}
-#define CSP_LOG_LEVEL_ERROR       {log_error}
 
 /* Buffer and connection sizing */
 #define CSP_BUFFER_SIZE           {buf_size}
@@ -236,137 +224,47 @@ fn generate_autoconfig(dest_dir: &std::path::Path) {
 #define CSP_RTABLE_SIZE           {rtable_sz}
 #define CSP_MAX_INTERFACES        {max_iface}
 #define CSP_RDP_MAX_WINDOW        {rdp_win}
+#define CSP_PACKET_PADDING_BYTES  {padding_bytes}
 
 /* Library version */
-#define LIBCSP_VERSION            "1.6"
+#define LIBCSP_VERSION            "2.1"
 #define GIT_REV                   "unknown"
-
-#include <stdio.h>
 
 #endif /* CSP_AUTOCONFIG_H */
 "#
     );
 
-    let dest = dest_dir.join("csp_autoconfig.h");
-    fs::write(&dest, &content).expect("failed to write csp_autoconfig.h");
+    let dest = dest_dir.join("autoconfig.h");
+    fs::write(&dest, &content).expect("failed to write autoconfig.h");
 }
 
+/// External-arch stub header: extra declarations that libcsp leaves out when
+/// none of its supported OS flavours (`CSP_POSIX`, `CSP_FREERTOS`,
+/// `CSP_ZEPHYR`) are selected. The `export_arch!` macro supplies the bodies
+/// from Rust.
 fn generate_external_arch_headers(dest_dir: &std::path::Path) {
-    let content = r#"/*
- * Hack to support external architecture implementation in Rust.
- * We define the types as void* so they always fit a pointer.
- */
-#ifndef CSP_EXTERNAL_ARCH_H
+    let content = r#"#ifndef CSP_EXTERNAL_ARCH_H
 #define CSP_EXTERNAL_ARCH_H
-
-/* Prevent libcsp's arch headers from declaring conflicting functions */
-#define _CSP_THREAD_H_
-#define _CSP_SEMAPHORE_H_
-#define _CSP_QUEUE_H_
-#define _CSP_TIME_H_
-#define _CSP_MALLOC_H_
-#define _CSP_SYSTEM_H_
-#define _CSP_ARCH_CLOCK_H_
 
 #include <stdint.h>
 #include <stddef.h>
 
-/* Thread types and macros normally provided by csp_thread.h */
-typedef void * csp_thread_handle_t;
-typedef void * csp_thread_return_t;
-typedef csp_thread_return_t (* csp_thread_func_t)(void *);
-#define CSP_DEFINE_TASK(task_name) csp_thread_return_t task_name(void * param)
-#define CSP_TASK_RETURN NULL
+/* Binary semaphore handle for external-arch targets.
+ * Declared as a pointer-sized opaque handle so it fits in the same slot
+ * whether the Rust backing store is a raw pointer or a boxed primitive. */
+typedef void * csp_bin_sem_t;
 
-typedef void * csp_bin_sem_handle_t;
-typedef void * csp_mutex_t;
-typedef void * csp_queue_handle_t;
-typedef int    CSP_BASE_TYPE;
-
-#define COLOR_MASK_COLOR 	0x0F
-#define COLOR_MASK_MODIFIER	0xF0
-
-typedef enum {
-    COLOR_RESET		= 0xF0,
-    COLOR_BLACK		= 0x01,
-    COLOR_RED		= 0x02,
-    COLOR_GREEN		= 0x03,
-    COLOR_YELLOW		= 0x04,
-    COLOR_BLUE		= 0x05,
-    COLOR_MAGENTA		= 0x06,
-    COLOR_CYAN		= 0x07,
-    COLOR_WHITE		= 0x08,
-    COLOR_NORMAL		= 0x0F,
-    COLOR_BOLD		= 0x10,
-    COLOR_UNDERLINE		= 0x20,
-    COLOR_BLINK		= 0x30,
-    COLOR_HIDE		= 0x40,
-} csp_color_t;
-
-#define CSP_SEMAPHORE_OK    1
-#define CSP_SEMAPHORE_ERROR 0
-#define CSP_MUTEX_OK        1
-#define CSP_MUTEX_ERROR     0
-
-#ifndef CSP_QUEUE_OK
-#define CSP_QUEUE_OK        1
-#endif
-#ifndef CSP_QUEUE_ERROR
-#define CSP_QUEUE_ERROR     0
-#endif
-#ifndef CSP_QUEUE_FULL
-#define CSP_QUEUE_FULL      0
-#endif
-
-/* Prototypes */
 uint32_t csp_get_ms(void);
 uint32_t csp_get_s(void);
 uint32_t csp_get_ms_isr(void);
 uint32_t csp_get_s_isr(void);
 uint32_t csp_get_uptime_s(void);
-
-typedef struct {
-    uint32_t tv_sec;
-    uint32_t tv_nsec;
-} csp_timestamp_t;
-
-void csp_clock_get_time(csp_timestamp_t * time);
-int  csp_clock_set_time(const csp_timestamp_t * time);
-
-int csp_mutex_create(csp_mutex_t * mutex);
-int csp_mutex_remove(csp_mutex_t * mutex);
-int csp_mutex_lock(csp_mutex_t * mutex, uint32_t timeout);
-int csp_mutex_unlock(csp_mutex_t * mutex);
-
-int csp_bin_sem_create(csp_bin_sem_handle_t * sem);
-int csp_bin_sem_remove(csp_bin_sem_handle_t * sem);
-int csp_bin_sem_wait(csp_bin_sem_handle_t * sem, uint32_t timeout);
-int csp_bin_sem_post(csp_bin_sem_handle_t * sem);
-int csp_bin_sem_post_isr(csp_bin_sem_handle_t * sem, CSP_BASE_TYPE * pxTaskWoken);
-
-csp_queue_handle_t csp_queue_create(int length, size_t item_size);
-void csp_queue_remove(csp_queue_handle_t queue);
-int csp_queue_enqueue(csp_queue_handle_t handle, const void *value, uint32_t timeout);
-int csp_queue_enqueue_isr(csp_queue_handle_t handle, const void * value, CSP_BASE_TYPE * pxTaskWoken);
-int csp_queue_dequeue(csp_queue_handle_t handle, void *buf, uint32_t timeout);
-int csp_queue_dequeue_isr(csp_queue_handle_t handle, void * buf, CSP_BASE_TYPE * pxTaskWoken);
-int csp_queue_size(csp_queue_handle_t handle);
-int csp_queue_size_isr(csp_queue_handle_t handle);
-
-void * csp_malloc(size_t size);
-void * csp_calloc(size_t nmemb, size_t size);
-void   csp_free(void * ptr);
-
-uint32_t csp_sys_memfree(void);
-int      csp_sys_tasklist(char * out);
-int      csp_sys_tasklist_size(void);
-void     csp_sys_set_color(csp_color_t color);
-int      csp_sys_reboot(void);
-int      csp_sys_shutdown(void);
 void     csp_sleep_ms(uint32_t ms);
-int      csp_thread_create(csp_thread_func_t func, const char * const name, unsigned int stack_size, void * parameter, unsigned int priority, csp_thread_handle_t * handle);
 
-#endif"#;
+int csp_thread_create(void (*f)(void *), const char * name, unsigned int stack, void * arg, unsigned int prio, void ** handle);
+
+#endif
+"#;
     fs::write(dest_dir.join("csp_external_arch.h"), content)
         .expect("failed to write csp_external_arch.h");
 }
@@ -385,9 +283,8 @@ fn compile_libcsp(
     // ── Include paths ──────────────────────────────────────────────────────
     build.include(include_dir); // libcsp/include
     build.include(src_dir); // private headers in src/
-    build.include(src_dir.join("transport"));
     build.include(src_dir.join("interfaces"));
-    build.include(gen_include_dir); // OUT_DIR/include (csp_autoconfig.h)
+    build.include(gen_include_dir); // OUT_DIR/include (csp/autoconfig.h)
 
     // ── Compiler flags ─────────────────────────────────────────────────────
     build
@@ -398,9 +295,10 @@ fn compile_libcsp(
         .flag("-Wshadow")
         .flag("-Wcast-align")
         .flag("-Wwrite-strings")
-        .flag("-Wno-unused-parameter");
+        .flag("-Wno-unused-parameter")
+        .flag("-Wno-address-of-packed-member");
 
-    // ── Feature defines — must match csp_autoconfig.h ─────────────────────
+    // ── Feature defines — must match csp/autoconfig.h ─────────────────────
     let feat_define = |b: &mut cc::Build, env: &str, name: &str| {
         let val = if env::var(env).is_ok() { "1" } else { "0" };
         b.define(name, val);
@@ -412,22 +310,29 @@ fn compile_libcsp(
         "CARGO_FEATURE_RDP_FAST_CLOSE",
         "CSP_USE_RDP_FAST_CLOSE",
     );
-    feat_define(&mut build, "CARGO_FEATURE_CRC32", "CSP_USE_CRC32");
     feat_define(&mut build, "CARGO_FEATURE_HMAC", "CSP_USE_HMAC");
-    feat_define(&mut build, "CARGO_FEATURE_XTEA", "CSP_USE_XTEA");
-    feat_define(&mut build, "CARGO_FEATURE_QOS", "CSP_USE_QOS");
     feat_define(&mut build, "CARGO_FEATURE_PROMISC", "CSP_USE_PROMISC");
     feat_define(&mut build, "CARGO_FEATURE_DEDUP", "CSP_USE_DEDUP");
     feat_define(&mut build, "CARGO_FEATURE_DEBUG", "CSP_DEBUG");
     feat_define(
         &mut build,
-        "CARGO_FEATURE_DEBUG_TIMESTAMP",
-        "CSP_DEBUG_TIMESTAMP",
+        "CARGO_FEATURE_ZMQ_V1_FIXUP",
+        "CSP_FIXUP_V1_ZMQ_LITTLE_ENDIAN",
+    );
+    feat_define(
+        &mut build,
+        "CARGO_FEATURE_BUFFER_ZERO_CLEAR",
+        "CSP_BUFFER_ZERO_CLEAR",
     );
 
+    build.define(
+        "CSP_ENABLE_CSP_PRINT",
+        if external_arch { "0" } else { "1" },
+    );
+    build.define("CSP_HAVE_STDIO", if external_arch { "0" } else { "1" });
+    build.define("CSP_PRINT_STDIO", if external_arch { "0" } else { "1" });
+
     if external_arch {
-        // Force-include our external arch header.
-        // The header defines guards to prevent libcsp's arch headers from being included.
         build.flag("-include").flag("csp/csp_external_arch.h");
     }
 
@@ -443,16 +348,6 @@ fn compile_libcsp(
 
     build.define("CSP_USE_RTABLE", "1");
 
-    let debug = if env::var("CARGO_FEATURE_DEBUG").is_ok() {
-        "1"
-    } else {
-        "0"
-    };
-    build.define("CSP_LOG_LEVEL_DEBUG", if debug == "1" { "1" } else { "0" });
-    build.define("CSP_LOG_LEVEL_INFO", if debug == "1" { "1" } else { "0" });
-    build.define("CSP_LOG_LEVEL_WARN", if debug == "1" { "1" } else { "0" });
-    build.define("CSP_LOG_LEVEL_ERROR", "1");
-
     // ── Core source files ──────────────────────────────────────────────────
     let core = [
         "csp_buffer.c",
@@ -461,8 +356,7 @@ fn compile_libcsp(
         "csp_crc32.c",
         "csp_debug.c",
         "csp_dedup.c",
-        "csp_endian.c",
-        "csp_hex_dump.c",
+        "csp_id.c",
         "csp_iflist.c",
         "csp_init.c",
         "csp_io.c",
@@ -470,6 +364,7 @@ fn compile_libcsp(
         "csp_promisc.c",
         "csp_qfifo.c",
         "csp_route.c",
+        "csp_rtable_cidr.c",
         "csp_service_handler.c",
         "csp_services.c",
         "csp_sfp.c",
@@ -478,24 +373,29 @@ fn compile_libcsp(
         build.file(src_dir.join(f));
     }
 
-    // Debug wrapper for Rust callback (handles va_list formatting)
-    if env::var("CARGO_FEATURE_DEBUG").is_ok() {
-        build.file("csp_debug_wrapper.c");
+    // Hex-dump and rtable stdio helpers depend on stdio being available;
+    // skip them on external-arch builds where CSP_ENABLE_CSP_PRINT=0.
+    if !external_arch {
+        build.file(src_dir.join("csp_hex_dump.c"));
+        build.file(src_dir.join("csp_rtable_stdio.c"));
+    }
+
+    // Transport
+    if env::var("CARGO_FEATURE_RDP").is_ok() {
+        build.file(src_dir.join("csp_rdp.c"));
+        build.file(src_dir.join("csp_rdp_queue.c"));
+    }
+
+    // Crypto
+    if env::var("CARGO_FEATURE_HMAC").is_ok() {
+        build.file(src_dir.join("crypto/csp_hmac.c"));
+        build.file(src_dir.join("crypto/csp_sha1.c"));
     }
 
     // Compile mini-scanf for external-arch (sscanf with varargs support)
     if external_arch {
         compile_mini_scanf();
     }
-
-    // Transport
-    build.file(src_dir.join("transport/csp_rdp.c"));
-    build.file(src_dir.join("transport/csp_udp.c"));
-
-    // Crypto
-    build.file(src_dir.join("crypto/csp_hmac.c"));
-    build.file(src_dir.join("crypto/csp_sha1.c"));
-    build.file(src_dir.join("crypto/csp_xtea.c"));
 
     // Interfaces
     let mut interfaces = vec![
@@ -505,6 +405,11 @@ fn compile_libcsp(
         "interfaces/csp_if_kiss.c",
         "interfaces/csp_if_lo.c",
     ];
+    // UDP and TUN interfaces only make sense when stdio / sockets exist.
+    if !external_arch {
+        interfaces.push("interfaces/csp_if_udp.c");
+        interfaces.push("interfaces/csp_if_tun.c");
+    }
     if env::var("CARGO_FEATURE_ZMQ").is_ok() {
         interfaces.push("interfaces/csp_if_zmqhub.c");
     }
@@ -512,66 +417,32 @@ fn compile_libcsp(
         build.file(src_dir.join(f));
     }
 
-    // Routing table
-    build.file(src_dir.join("rtable/csp_rtable.c"));
-    if env::var("CARGO_FEATURE_CIDR_RTABLE").is_ok() {
-        build.file(src_dir.join("rtable/csp_rtable_cidr.c"));
-    } else {
-        build.file(src_dir.join("rtable/csp_rtable_static.c"));
-    }
-
-    // Generic arch files (not OS-specific)
-    if !external_arch {
-        build.file(src_dir.join("arch/csp_system.c"));
-        build.file(src_dir.join("arch/csp_time.c"));
-    }
-
     // OS-specific arch files
     if !external_arch {
         match target_os.as_str() {
-            "windows" => {
-                build.define("CSP_WINDOWS", "1");
-                let win_src = src_dir.join("arch/windows");
-                for f in &[
-                    "csp_clock.c",
-                    "csp_malloc.c",
-                    "csp_queue.c",
-                    "csp_semaphore.c",
-                    "csp_system.c",
-                    "csp_thread.c",
-                    "csp_time.c",
-                    "windows_queue.c",
-                ] {
-                    build.file(win_src.join(f));
-                }
-            }
-            "macos" => {
-                build.define("CSP_MACOSX", "1");
-                let mac_src = src_dir.join("arch/macosx");
-                for f in &[
-                    "csp_clock.c",
-                    "csp_malloc.c",
-                    "csp_queue.c",
-                    "csp_semaphore.c",
-                    "csp_system.c",
-                    "csp_thread.c",
-                    "csp_time.c",
-                    "pthread_queue.c",
-                ] {
-                    build.file(mac_src.join(f));
-                }
-            }
-            _ => {
-                // Default: POSIX (Linux, etc.)
+            "macos" | "linux" => {
                 build.define("CSP_POSIX", "1");
                 let posix_src = src_dir.join("arch/posix");
                 for f in &[
                     "csp_clock.c",
-                    "csp_malloc.c",
                     "csp_queue.c",
                     "csp_semaphore.c",
                     "csp_system.c",
-                    "csp_thread.c",
+                    "csp_time.c",
+                    "pthread_queue.c",
+                ] {
+                    build.file(posix_src.join(f));
+                }
+            }
+            _ => {
+                // Unknown hosted OS — treat as POSIX; will fail to link if unsupported.
+                build.define("CSP_POSIX", "1");
+                let posix_src = src_dir.join("arch/posix");
+                for f in &[
+                    "csp_clock.c",
+                    "csp_queue.c",
+                    "csp_semaphore.c",
+                    "csp_system.c",
                     "csp_time.c",
                     "pthread_queue.c",
                 ] {
@@ -579,11 +450,6 @@ fn compile_libcsp(
                 }
             }
         }
-    } else {
-        // When using external-arch, the user must provide these symbols.
-        // We define CSP_POSIX as a sensible fallback for shared headers,
-        // but no arch-specific C files are compiled.
-        build.define("CSP_POSIX", "1");
     }
 
     // Optional: SocketCAN driver
@@ -595,10 +461,6 @@ fn compile_libcsp(
     if env::var("CARGO_FEATURE_USART_LINUX").is_ok() && target_os == "linux" {
         build.file(src_dir.join("drivers/usart/usart_kiss.c"));
         build.file(src_dir.join("drivers/usart/usart_linux.c"));
-    }
-    if env::var("CARGO_FEATURE_USART_WINDOWS").is_ok() && target_os == "windows" {
-        build.file(src_dir.join("drivers/usart/usart_kiss.c"));
-        build.file(src_dir.join("drivers/usart/usart_windows.c"));
     }
 
     build.compile("csp");
@@ -624,7 +486,7 @@ fn compile_mini_scanf() {
         .flag("-std=c99")
         .flag("-Os")
         .flag("-Wall")
-        .define("C_SSCANF", None) // Enable sscanf mode
+        .define("C_SSCANF", None)
         .compile("mini_scanf");
 
     println!("cargo:rerun-if-changed=libcsp-sys/mini-scanf/c_scan.c");
@@ -639,7 +501,6 @@ fn gcc_builtin_include() -> Vec<String> {
     let is_arm_embedded = target.contains("thumb") || target.contains("arm-none-eabi");
 
     if is_arm_embedded {
-        // Ask arm-none-eabi-gcc for its built-in include dir (e.g. stddef.h).
         if let Ok(output) = std::process::Command::new("arm-none-eabi-gcc")
             .arg("-print-file-name=include")
             .output()
@@ -652,7 +513,6 @@ fn gcc_builtin_include() -> Vec<String> {
                 paths.push(path);
             }
         }
-        // newlib / system headers (stdint.h, string.h, etc.)
         for candidate in &["/usr/arm-none-eabi/include", "/usr/include/newlib"] {
             if std::path::Path::new(candidate).exists() {
                 paths.push((*candidate).to_owned());
@@ -662,7 +522,6 @@ fn gcc_builtin_include() -> Vec<String> {
         return paths;
     }
 
-    // Hosted: use whatever CC is set (or the system cc).
     let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
     if let Ok(output) = std::process::Command::new(&cc)
         .arg("-print-file-name=include")
@@ -682,7 +541,7 @@ fn gcc_builtin_include() -> Vec<String> {
     paths
 }
 
-/// Use bindgen to generate Rust FFI bindings from `libcsp/include/csp/csp.h`.
+/// Use bindgen to generate Rust FFI bindings from the v2.1 public headers.
 fn generate_bindings(
     include_dir: &std::path::Path,
     gen_include_dir: &std::path::Path,
@@ -697,18 +556,9 @@ This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
 License as published by the Free Software Foundation; either
 version 2.1 of the License, or (at your option) any later version.
-
-This library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with this library; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 // AUTO-GENERATED FILE — DO NOT EDIT
-// Generated by bindgen from libcsp/include/csp/csp.h"#;
+// Generated by bindgen from libcsp v2.1 headers"#;
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target = env::var("TARGET").unwrap_or_default();
@@ -716,15 +566,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         || target.contains("arm-none-eabi")
         || matches!(target_os.as_str(), "none" | "unknown");
     let target_endian = env::var("CARGO_CFG_TARGET_ENDIAN").unwrap_or_else(|_| "little".into());
-
-    // For embedded bare-metal we use CSP_POSIX as a header-level placeholder
-    // (same as the external-arch fallback in compile_libcsp). The actual OS
-    // abstraction is provided by the CspArch trait.
-    let os_define = match target_os.as_str() {
-        "windows" => "CSP_WINDOWS=1",
-        "macos" => "CSP_MACOSX=1",
-        _ => "CSP_POSIX=1",
-    };
 
     let endian_define = if target_endian == "big" {
         "CSP_BIG_ENDIAN=1"
@@ -753,13 +594,37 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         )
         .header(
             include_dir
-                .join("csp/arch/csp_malloc.h")
+                .join("csp/csp_id.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),
         )
         .header(
             include_dir
-                .join("csp/arch/csp_system.h")
+                .join("csp/csp_hooks.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/csp_interface.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/csp_iflist.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/csp_rtable.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
+                .join("csp/csp_debug.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),
         )
@@ -768,38 +633,31 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
                 .join("csp/interfaces/csp_if_can.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),
-        )
-        .header(
-            include_dir
-                .join("csp/crypto/csp_xtea.h")
-                .to_str()
-                .expect("include path is not valid UTF-8"),
-        )
-        .header(
+        );
+
+    if env::var("CARGO_FEATURE_HMAC").is_ok() {
+        builder = builder.header(
             include_dir
                 .join("csp/crypto/csp_hmac.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),
-        )
+        );
+    }
+
+    builder = builder
         // Include paths
         .clang_arg(format!("-I{}", include_dir.display()))
         .clang_arg(format!("-I{}", gen_include_dir.display()))
-        // OS + endian defines so bindgen sees the correct conditional branches
-        .clang_arg(format!("-D{os_define}"))
+        // Endian defines so bindgen sees the correct conditional branches
         .clang_arg(format!("-D{endian_define}"))
         .clang_arg("-DCSP_USE_RTABLE=1");
 
     // For ARM embedded targets, tell clang to generate 32-bit layouts and
-    // point it at the ARM newlib/GCC headers instead of the host's. Forward
-    // the actual cargo TARGET so the `hf` / non-`hf` ABI matches what cc is
-    // compiling libcsp with.
+    // point it at the ARM newlib/GCC headers instead of the host's.
     if is_arm_embedded {
         builder = builder.clang_arg(format!("--target={target}"));
     }
 
-    // When using external-arch, force-include the stub header so bindgen sees
-    // the opaque pointer types (csp_mutex_t = void*, etc.) rather than the
-    // POSIX pthread types that would otherwise be included.
     if uses_external_arch() {
         let arch_header = gen_include_dir
             .join("csp/csp_external_arch.h")
@@ -833,7 +691,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
         // Allow-list: only emit CSP symbols
         .allowlist_function("csp_.*")
         .allowlist_type("csp_.*")
-        .allowlist_var("CSP_.*")
+        .allowlist_var("(CSP|csp)_.*")
         // Derive common traits where possible
         .derive_debug(true)
         .derive_copy(true)

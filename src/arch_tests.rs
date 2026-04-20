@@ -61,10 +61,6 @@ mod tests {
         fn queue_size(&self, _: *mut core::ffi::c_void) -> usize {
             0
         }
-        fn malloc(&self, _: usize) -> *mut core::ffi::c_void {
-            ptr::null_mut()
-        }
-        fn free(&self, _: *mut core::ffi::c_void) {}
     }
 
     const ARCH: TestArch = TestArch;

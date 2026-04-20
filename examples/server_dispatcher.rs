@@ -10,7 +10,6 @@ fn main() -> libcsp::Result<()> {
     // 1. Initialise CSP
     let node = CspConfig::new()
         .address(1)
-        .buffers(20, 256)
         .init()
         .expect("CSP init failed");
 
@@ -18,7 +17,7 @@ fn main() -> libcsp::Result<()> {
     node.route_load("0/0 LOOP").unwrap();
 
     // 2. Create a Dispatcher
-    let mut server = Dispatcher::new().expect("Failed to create dispatcher");
+    let mut server = Dispatcher::new();
 
     // 3. Register standard services (Ping, etc.)
     server.bind_service(Port::Ping)?;
@@ -49,9 +48,9 @@ fn main() -> libcsp::Result<()> {
 
     // Send to port 10 (Echo) — server returns the same packet as a reply.
     if let Some(conn) = node.connect(Priority::Norm, 1, 10, 1000, libcsp::conn_opts::NONE) {
-        let mut pkt = Packet::get(16).unwrap();
+        let mut pkt = Packet::get(16_usize).unwrap();
         pkt.write(b"Hello Dispatch!").unwrap();
-        conn.send_discard(pkt, 100).unwrap();
+        conn.send(pkt);
 
         if let Some(reply) = conn.read(500) {
             println!(
@@ -63,9 +62,9 @@ fn main() -> libcsp::Result<()> {
 
     // Send to port 11 (Logger) — server consumes packet, no reply expected.
     if let Some(conn) = node.connect(Priority::Norm, 1, 11, 1000, libcsp::conn_opts::NONE) {
-        let mut pkt = Packet::get(16).unwrap();
+        let mut pkt = Packet::get(16_usize).unwrap();
         pkt.write(b"log this").unwrap();
-        conn.send_discard(pkt, 100).unwrap();
+        conn.send(pkt);
     }
 
     // Ping

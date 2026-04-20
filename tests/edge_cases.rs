@@ -8,16 +8,18 @@ use std::thread;
 static NODE: OnceLock<CspNode> = OnceLock::new();
 static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
-// Port allocator to avoid conflicts
-// Starts at 40 and increments for each test
-// CSP ports are 6-bit (0-63), we reserve 0-39 for other tests
-static NEXT_PORT: AtomicU8 = AtomicU8::new(40);
+// Port allocator to avoid conflicts between tests.
+// Allocate from port 30 upward; the crate's default `CSP_PORT_MAX_BIND` is
+// 48, leaving 30..=48 = 19 unique ports for this file's tests (15 today).
+static NEXT_PORT: AtomicU8 = AtomicU8::new(30);
 
 fn allocate_port() -> u8 {
     let port = NEXT_PORT.fetch_add(1, Ordering::SeqCst);
-    if port >= 63 {
-        panic!("Ran out of CSP ports (max is 63)");
-    }
+    assert!(
+        (port as usize) <= libcsp::consts::PORT_MAX_BIND,
+        "test suite needs more bindable ports than CSP_PORT_MAX_BIND ({}). Raise LIBCSP_PORT_MAX_BIND at build time.",
+        libcsp::consts::PORT_MAX_BIND,
+    );
     port
 }
 
@@ -25,8 +27,6 @@ fn ensure_init() -> CspNode {
     NODE.get_or_init(|| {
         let node = CspConfig::new()
             .address(1)
-            .buffers(20, 256)
-            .port_max_bind(58) // Allow binding to ports 0-58, leaving 59-63 for ephemeral ports
             .init()
             .expect("init failed");
         node.route_start_task(4096, 0)
@@ -53,7 +53,7 @@ fn test_empty_packet_send() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -82,8 +82,7 @@ fn test_empty_packet_send() {
     let pkt = Packet::get(0).expect("Failed to get packet");
     assert_eq!(pkt.length(), 0, "New packet should have length 0");
 
-    conn.send(pkt, 100)
-        .expect("Should be able to send empty packet");
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -186,7 +185,7 @@ fn test_accept_timeout() {
     let _node = ensure_init();
 
     let port = allocate_port();
-    let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+    let mut sock = Socket::new(socket_opts::NONE);
     sock.bind(port).expect("Failed to bind");
     sock.listen(5).expect("Failed to listen");
 
@@ -236,7 +235,7 @@ fn test_any_port_binding() {
     let _lock = lock_csp();
     let _node = ensure_init();
 
-    let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+    let mut sock = Socket::new(socket_opts::NONE);
 
     // Bind to ANY port (255) - should accept packets on all unbound ports
     sock.bind(libcsp::ANY_PORT)
@@ -257,7 +256,7 @@ fn test_rdp_connection_properly_negotiated() {
 
     // Server requires RDP
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::RDP_REQ).expect("Failed to create RDP socket");
+        let mut sock = Socket::new(socket_opts::RDP_REQ);
         sock.bind(port).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -299,8 +298,7 @@ fn test_rdp_connection_properly_negotiated() {
     // Send data over RDP connection
     let mut pkt = Packet::get(10).expect("Failed to get packet");
     pkt.write(b"rdp-data").expect("Failed to write packet");
-    conn.send(pkt, 1000)
-        .expect("Failed to send over RDP connection");
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -317,7 +315,7 @@ fn test_rdp_prohibited_connection() {
     // Server creates a normal socket (no special RDP requirements)
     // The PROHIB options are only valid in connect(), not socket()
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -364,8 +362,7 @@ fn test_rdp_prohibited_connection() {
 
     let mut pkt = Packet::get(10).expect("Failed to get packet");
     pkt.write(b"no-rdp").expect("Failed to write packet");
-    conn.send(pkt, 1000)
-        .expect("Failed to send over non-RDP connection");
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -381,7 +378,7 @@ fn test_all_priority_levels() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(10).expect("Failed to listen");
 
@@ -421,7 +418,7 @@ fn test_all_priority_levels() {
 
         let mut pkt = Packet::get(10).expect("Failed to get packet");
         pkt.write(b"test").expect("Failed to write");
-        conn.send(pkt, 100).expect("Failed to send");
+        conn.send(pkt);
     }
 
     server_thread.join().expect("Server thread panicked");
@@ -438,7 +435,7 @@ fn test_concurrent_connections() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(10).expect("Failed to listen");
 
@@ -468,7 +465,7 @@ fn test_concurrent_connections() {
 
             let mut pkt = Packet::get(20).expect("Failed to get packet");
             pkt.write(b"concurrent").expect("Failed to write");
-            conn.send(pkt, 100).expect("Failed to send");
+            conn.send(pkt);
         });
         client_threads.push(handle);
     }
@@ -492,7 +489,7 @@ fn test_single_byte_packet() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -518,7 +515,7 @@ fn test_single_byte_packet() {
 
     let mut pkt = Packet::get(1).expect("Failed to get packet");
     pkt.write(b"X").expect("Failed to write");
-    conn.send(pkt, 100).expect("send failed");
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
 }
@@ -534,7 +531,7 @@ fn test_send_retry_after_failure() {
     let (ready_tx, ready_rx) = mpsc::channel();
 
     let server_thread = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(port).expect("Failed to bind");
         sock.listen(5).expect("Failed to listen");
 
@@ -561,17 +558,8 @@ fn test_send_retry_after_failure() {
     let mut pkt = Packet::get(10).expect("Failed to get packet");
     pkt.write(b"retry").expect("Failed to write");
 
-    // On success, packet is consumed
-    // On failure, we get it back
-    match conn.send(pkt, 100) {
-        Ok(()) => {
-            // Success - packet consumed
-        }
-        Err((_err, returned_pkt)) => {
-            // Failure - we can retry with the returned packet
-            conn.send(returned_pkt, 100).expect("Retry should succeed");
-        }
-    }
+    // Packet is always consumed by send in v2.x (void return).
+    conn.send(pkt);
 
     server_thread.join().expect("Server thread panicked");
 }

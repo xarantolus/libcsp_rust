@@ -11,7 +11,6 @@ fn ensure_init() -> CspNode {
     NODE.get_or_init(|| {
         let node = CspConfig::new()
             .address(1)
-            .buffers(20, 256)
             .init()
             .expect("init failed");
         node.route_start_task(4096, 0).unwrap();
@@ -33,14 +32,14 @@ fn test_csp_server_client_loopback() {
     SERVER_RECEIVED.store(0, Ordering::SeqCst);
 
     const MY_SERVER_PORT: u8 = 10;
-    const SERVER_ADDR: u8 = 1;
+    const SERVER_ADDR: u16 = 1;
 
     // Use a channel to signal when server is ready
     let (ready_tx, ready_rx) = mpsc::channel();
 
     // Start Server
     let server_handle = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("csp_socket failed");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(MY_SERVER_PORT).expect("csp_bind failed");
         sock.listen(10).expect("csp_listen failed");
 
@@ -75,7 +74,7 @@ fn test_csp_server_client_loopback() {
         let msg = format!("Hello World ({})", count);
         pkt.write(msg.as_bytes()).expect("Failed to write packet");
 
-        conn.send(pkt, 1000).expect("Send failed");
+        conn.send(pkt);
     }
 
     server_handle.join().expect("Server thread panicked");
@@ -97,7 +96,7 @@ fn test_csp_ping() {
 
     // Start a thread to handle pings (CSP service port is 1)
     let service_handle = thread::spawn(move || {
-        let sock = Socket::new(socket_opts::NONE).expect("Failed to create socket");
+        let mut sock = Socket::new(socket_opts::NONE);
         sock.bind(libcsp::ports::PING)
             .expect("Failed to bind ping port");
         sock.listen(5).expect("Failed to listen");

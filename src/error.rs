@@ -46,12 +46,12 @@ pub enum CspError {
     Again,
     /// HMAC verification failed (`CSP_ERR_HMAC = -100`).
     HmacFailed,
-    /// XTEA decryption failed (`CSP_ERR_XTEA = -101`).
-    XteaFailed,
     /// CRC32 check failed (`CSP_ERR_CRC32 = -102`).
     Crc32Failed,
     /// SFP protocol error or inconsistency (`CSP_ERR_SFP = -103`).
     SfpError,
+    /// Function not implemented (`CSP_ERR_NOSYS = -38`).
+    NotImplemented,
     /// A CspNode has already been initialized in this process.
     AlreadyInitialized,
     /// An error code not covered by the variants above.
@@ -78,9 +78,9 @@ impl CspError {
             sys::CSP_ERR_DRIVER => CspError::DriverError,
             sys::CSP_ERR_AGAIN => CspError::Again,
             sys::CSP_ERR_HMAC => CspError::HmacFailed,
-            sys::CSP_ERR_XTEA => CspError::XteaFailed,
             sys::CSP_ERR_CRC32 => CspError::Crc32Failed,
             sys::CSP_ERR_SFP => CspError::SfpError,
+            sys::CSP_ERR_NOSYS => CspError::NotImplemented,
             other => CspError::Other(other),
         }
     }
@@ -108,9 +108,9 @@ impl fmt::Display for CspError {
             CspError::DriverError => write!(f, "driver layer error"),
             CspError::Again => write!(f, "resource temporarily unavailable"),
             CspError::HmacFailed => write!(f, "HMAC verification failed"),
-            CspError::XteaFailed => write!(f, "XTEA decryption failed"),
             CspError::Crc32Failed => write!(f, "CRC32 check failed"),
             CspError::SfpError => write!(f, "SFP protocol error"),
+            CspError::NotImplemented => write!(f, "function not implemented"),
             CspError::AlreadyInitialized => write!(f, "CSP is already initialized"),
             CspError::Other(code) => write!(f, "libcsp error code {code}"),
         }

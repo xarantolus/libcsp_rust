@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(conn) = sock_data.accept(0) {
             let src_addr = conn.src_addr();
             let src_port = conn.src_port();
-            let is_rdp = (conn.flags() & libcsp::sys::CSP_FRDP as i32) != 0;
+            let is_rdp = conn.is_rdp();
             if is_rdp {
                 println!("[RX] RDP session started from {}:{}", src_addr, src_port);
             }
@@ -113,7 +113,7 @@ fn main() -> anyhow::Result<()> {
         // fail and forcing a reconnect per blob.
         if let Some(conn) = sock_sfp.accept(0) {
             let src_addr = conn.src_addr();
-            let is_rdp = (conn.flags() & libcsp::sys::CSP_FRDP as i32) != 0;
+            let is_rdp = conn.is_rdp();
             if is_rdp {
                 println!("[RX] SFP/RDP session started from {}", src_addr);
             } else {

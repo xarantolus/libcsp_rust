@@ -286,29 +286,9 @@ unsafe impl CspArch for TestArch {
         }
     }
 
-    fn malloc(&self, size: usize) -> *mut c_void {
-        unsafe { libc::malloc(size) }
-    }
-    fn free(&self, ptr: *mut c_void) {
-        unsafe { libc::free(ptr) }
-    }
-
-    fn memfree(&self) -> u32 {
-        0
-    }
-    fn reboot(&self) -> i32 {
-        0
-    }
-    fn shutdown(&self) -> i32 {
-        0
-    }
-    fn clock_get_time(&self, _time: *mut c_void) {}
-    fn clock_set_time(&self, _time: *mut c_void) {}
-    fn sys_tasklist_size(&self) -> i32 {
-        0
-    }
-    fn sys_tasklist(&self, _out: *mut c_char) {}
-    fn sys_set_color(&self, _color: crate::sys::csp_color_t) {}
+    // Hooks and clock primitives use the trait defaults, which are fine for
+    // tests: no memfree reporting, no reboot/shutdown side-effects, and a
+    // timestamp implementation is not exercised by the CSP test suite.
     fn thread_create(
         &self,
         f: unsafe extern "C" fn(*mut c_void),

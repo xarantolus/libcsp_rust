@@ -6,7 +6,7 @@
 //! Default interface: vcan0
 
 use libcsp::{interface, promisc, CspConfig, CspInterface, Packet};
-use socketcan::{CanSocket, EmbeddedFrame, Frame, Socket};
+use socketcan::{CanSocket, EmbeddedFrame, Socket};
 use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ impl CspInterface for RustCanIface {
     fn name(&self) -> &str {
         &self.name
     }
-    fn nexthop(&mut self, _via: u8, _pkt: Packet) {}
+    fn nexthop(&mut self, _via: u16, _pkt: Packet, _from_me: bool) {}
 }
 
 fn main() -> anyhow::Result<()> {
@@ -38,7 +38,6 @@ fn main() -> anyhow::Result<()> {
 
     let node = CspConfig::new()
         .address(10)
-        .buffers(100, 256)
         .init()
         .expect("CSP init failed");
 
@@ -53,7 +52,11 @@ fn main() -> anyhow::Result<()> {
         if let Ok(frame) = rx_socket.read_frame() {
             let data = EmbeddedFrame::data(&frame);
             if let Some(mut pkt) = Packet::get(data.len()) {
-                pkt.set_id_raw(frame.raw_id());
+                // NOTE: In libcsp v2.x the raw 32-bit CAN ID can no longer be
+                // stuffed straight into the packet header — the wire format is
+                // no longer a 1:1 mapping. A full sniffer would feed the CAN
+                // frame through libcsp's own CAN decoder; here we simply copy
+                // the payload so the subsequent promisc-queue code compiles.
                 pkt.write(data).unwrap();
                 rx_handle.rx(pkt);
             }
@@ -85,9 +88,6 @@ fn main() -> anyhow::Result<()> {
             let mut flags = Vec::new();
             if pkt.is_rdp() {
                 flags.push("RDP");
-            }
-            if pkt.is_xtea() {
-                flags.push("XTEA");
             }
             if pkt.is_hmac() {
                 flags.push("HMAC");

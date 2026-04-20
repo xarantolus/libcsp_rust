@@ -11,8 +11,14 @@ struct MyHardware {
 }
 
 impl CspInterface for MyHardware {
-    fn nexthop(&mut self, via: u8, pkt: Packet) {
-        println!("[{}] TX: {} bytes to via={}", self.name, pkt.length(), via);
+    fn nexthop(&mut self, via: u16, pkt: Packet, from_me: bool) {
+        println!(
+            "[{}] TX: {} bytes to via={} (from_me={})",
+            self.name,
+            pkt.length(),
+            via,
+            from_me
+        );
         // Packet is dropped and freed here
     }
 
@@ -25,7 +31,6 @@ fn main() {
     // 1. Initialise CSP
     let node = CspConfig::new()
         .address(1)
-        .buffers(10, 256)
         .init()
         .expect("init failed");
 
@@ -43,17 +48,17 @@ fn main() {
     // 4. Test TX
     println!("\n--- Testing TX ---");
     if let Some(conn) = node.connect(Priority::Norm, 2, 10, 100, libcsp::conn_opts::NONE) {
-        let mut pkt = Packet::get(16).unwrap();
+        let mut pkt = Packet::get(16_usize).unwrap();
         pkt.write(b"safe trait tx").unwrap();
-        let _ = conn.send_discard(pkt, 100);
+        conn.send(pkt);
     }
 
     // 5. Test RX
     println!("\n--- Testing RX ---");
-    let mut pkt = Packet::get(10).unwrap();
+    let mut pkt = Packet::get(10_usize).unwrap();
     pkt.write(b"safe rx").unwrap();
     handle.rx(pkt);
 
     // Process the received packet
-    node.route_work(100).unwrap();
+    node.route_work().unwrap();
 }

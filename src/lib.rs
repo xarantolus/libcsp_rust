@@ -7,66 +7,64 @@ This library is free software; you can redistribute it and/or
 modify it under the terms of the GNU Lesser General Public
 License as published by the Free Software Foundation; either
 version 2.1 of the License, or (at your option) any later version.
-
-This library is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-Lesser General Public License for more details.
-
-You should have received a copy of the GNU Lesser General Public
-License along with this library; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
-//! # libcsp — Safe Rust bindings for libcsp v1.6
+//! # libcsp — Safe Rust bindings for libcsp v2.1
 //!
-//! This crate provides idiomatic, zero-unsafe Rust wrappers around the
+//! Idiomatic, zero-unsafe Rust wrappers around the
 //! [Cubesat Space Protocol](https://github.com/libcsp/libcsp) C library.
+//!
+//! The default configuration selects CSP **wire format version 1** (5-bit
+//! host address, 4-byte header). Override via [`CspConfig::version`] if you
+//! need v2 framing.
 //!
 //! ## Important Limitation
 //!
-//! **Only one [`CspNode`] can exist at a time** in a process, due to global state
-//! in the underlying libcsp C library. Attempting to call [`CspConfig::init()`]
-//! twice will return [`CspError::AlreadyInitialized`].
-//!
-//! You can [`Clone`] a `CspNode` to share it across threads, but you cannot have
-//! two independent CSP stacks.
+//! **Only one [`CspNode`] can exist at a time** per process, because libcsp
+//! holds its state in globals. [`CspConfig::init()`] returns
+//! [`CspError::AlreadyInitialized`] on the second call. Clone the `CspNode`
+//! to share it across threads.
 //!
 //! ## Quick start
 //!
 //! ```no_run
 //! use libcsp::{CspConfig, Packet, Socket};
 //!
-//! // Initialise the CSP stack
 //! let node = CspConfig::new()
 //!     .address(1)
 //!     .hostname("my-sat")
-//!     .buffers(10, 256)
 //!     .init()
 //!     .expect("csp_init failed");
 //!
-//! // Start the router task (POSIX: spawns a pthread)
-//! node.route_start_task(4096, 0).expect("router task failed");
+//! node.route_start_task(0, 0).expect("router task failed");
 //!
-//! // Server: bind port 10
-//! let sock = Socket::new(0).expect("csp_socket failed");
+//! let mut sock = Socket::new(0);
 //! sock.bind(10).unwrap();
 //! sock.listen(5).unwrap();
 //!
 //! if let Some(conn) = sock.accept(1000) {
 //!     while let Some(pkt) = conn.read(100) {
-//!         // pkt is freed automatically on drop
 //!         let _ = pkt.data();
 //!     }
 //! }
 //!
-//! // Client: connect and send
 //! if let Some(conn) = node.connect(libcsp::Priority::Norm, 2, 10, 1000, 0) {
 //!     let mut pkt = Packet::get(32).expect("no packet buffers");
 //!     pkt.write(b"hello").unwrap();
-//!     let _ = conn.send_discard(pkt, 100);
+//!     conn.send(pkt);
 //! }
 //! ```
+//!
+//! ## Buffer sizing
+//!
+//! Buffer count, buffer size and connection limits are compile-time constants
+//! injected by the build script. Override them at build time:
+//!
+//! ```shell
+//! LIBCSP_BUFFER_SIZE=512 LIBCSP_BUFFER_COUNT=20 cargo build
+//! ```
+//!
+//! Read the resolved values back via the [`consts`] module.
 //!
 //! ## Feature flags
 //!
@@ -74,53 +72,44 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 //! |---------|---------|-------------|
 //! | `std` | ✓ | Enable `std::error::Error` impl and standard library helpers |
 //! | `rdp` | ✓ | Reliable Datagram Protocol transport |
-//! | `crc32` | ✓ | CRC32 packet integrity |
 //! | `hmac` | ✓ | HMAC-SHA1 authentication |
-//! | `xtea` | ✓ | XTEA encryption |
-//! | `qos` | ✓ | Quality of Service (priority queues) |
 //! | `promisc` | ✓ | Promiscuous mode |
-//! | `dedup` | ✓ | Packet deduplication |
-//! | `cidr-rtable` | – | CIDR routing table (instead of static) |
+//! | `dedup` | ✓ | Packet deduplication (runtime toggle: [`init::DedupMode`]) |
 //! | `socketcan` | – | Linux SocketCAN driver |
 //! | `zmq` | – | ZMQ hub interface |
 //! | `usart-linux` | – | Linux USART/KISS driver |
-//! | `usart-windows` | – | Windows USART driver |
 //! | `debug` | – | Enable CSP debug output |
-//! | `debug-timestamp` | – | Add timestamps to debug output |
+//! | `zmq-v1-fixup` | – | Swap to little-endian CSP v1 headers over ZMQ |
+//! | `buffer-zero-clear` | – | Zero freed buffers on release |
 //!
 //! ## `no_std` support
 //!
-//! Disable the `std` feature to build for `no_std` targets.  The `alloc` crate
-//! is still required (for `CString` in [`CspConfig`]).  All other modules use
-//! only `core`.
+//! Disable the `std` feature. `alloc` is still required (for `CString` in
+//! [`CspConfig`]).
 //!
 //! ```toml
 //! [dependencies]
-//! libcsp = { version = "1.6", default-features = false, features = ["rdp", "crc32"] }
+//! libcsp = { version = "2.1", default-features = false, features = ["rdp"] }
 //! ```
 
 // ── no_std configuration ─────────────────────────────────────────────────────
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// We need `alloc` for CString in init.rs on no_std targets.
 extern crate alloc;
 
 // ── Modules ───────────────────────────────────────────────────────────────────
 
 /// Raw, unsafe FFI bindings generated by bindgen.
-///
-/// Prefer the safe wrappers in the crate root.  The raw API is available here
-/// for advanced use cases (e.g. custom interfaces, direct `csp_rtable_*` calls).
 pub mod sys;
 
 pub mod arch;
 pub mod can;
 mod connection;
+pub mod consts;
 mod error;
-mod init;
+pub mod init;
 pub mod interface;
 mod packet;
-pub mod peek_poke;
 pub mod promisc;
 pub mod route;
 pub mod service;
@@ -141,7 +130,7 @@ pub mod debug;
     feature = "std",
     feature = "external-arch",
     feature = "host-default-arch",
-    any(target_os = "linux", target_os = "macos", target_os = "windows")
+    any(target_os = "linux", target_os = "macos")
 ))]
 mod arch_default_export {
     use crate::arch::test_arch::{TestArch, ARCH};
@@ -154,7 +143,7 @@ pub use arch::CspArch;
 pub use can::{CanDriver, CanInterfaceHandle};
 pub use connection::Connection;
 pub use error::CspError;
-pub use init::{CspConfig, CspNode};
+pub use init::{CspConfig, CspNode, DedupMode};
 pub use interface::{CspInterface, InterfaceHandle};
 pub use packet::Packet;
 pub use service::{Dispatcher, Ident, IfStats};
@@ -170,9 +159,7 @@ pub type Result<T> = core::result::Result<T, CspError>;
 
 // ── Priority enum ─────────────────────────────────────────────────────────────
 
-/// CSP message priority.
-///
-/// Matches `csp_prio_t` in `csp_types.h`.
+/// CSP message priority (matches `csp_prio_t`).
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Priority {
@@ -189,50 +176,36 @@ pub enum Priority {
 // ── Socket / connection option constants ──────────────────────────────────────
 
 /// Socket options bitmask (`CSP_SO_*`).
-///
-/// These map directly to the `CSP_SO_*` constants in `csp_types.h` and can be
-/// combined with `|`.
 pub mod socket_opts {
     use crate::sys;
 
-    /// No options.
     pub const NONE: u32 = sys::CSP_SO_NONE;
-    /// Require RDP.
     pub const RDP_REQ: u32 = sys::CSP_SO_RDPREQ;
-    /// Prohibit RDP.
     pub const RDP_PROHIB: u32 = sys::CSP_SO_RDPPROHIB;
-    /// Require HMAC.
     pub const HMAC_REQ: u32 = sys::CSP_SO_HMACREQ;
-    /// Prohibit HMAC.
     pub const HMAC_PROHIB: u32 = sys::CSP_SO_HMACPROHIB;
-    /// Require XTEA.
-    pub const XTEA_REQ: u32 = sys::CSP_SO_XTEAREQ;
-    /// Prohibit XTEA.
-    pub const XTEA_PROHIB: u32 = sys::CSP_SO_XTEAPROHIB;
-    /// Require CRC32.
     pub const CRC32_REQ: u32 = sys::CSP_SO_CRC32REQ;
-    /// Prohibit CRC32.
     pub const CRC32_PROHIB: u32 = sys::CSP_SO_CRC32PROHIB;
-    /// Enable connection-less mode.
     pub const CONN_LESS: u32 = sys::CSP_SO_CONN_LESS;
 }
 
 /// Connection options aliases (`CSP_O_*`).
-///
-/// Same numeric values as [`socket_opts`] — provided as a separate module
-/// for clarity at call sites.
 pub mod conn_opts {
     pub use super::socket_opts::{
         CRC32_PROHIB as NOCRC32, CRC32_REQ as CRC32, HMAC_PROHIB as NOHMAC, HMAC_REQ as HMAC, NONE,
-        RDP_PROHIB as NORDP, RDP_REQ as RDP, XTEA_PROHIB as NOXTEA, XTEA_REQ as XTEA,
+        RDP_PROHIB as NORDP, RDP_REQ as RDP,
     };
 }
 
-/// Broadcast address (all nodes).
-pub const BROADCAST_ADDR: u8 = sys::CSP_ID_HOST_MAX as u8; // CSP_ID_HOST_MAX = (1 << 5) - 1
+/// Broadcast address for CSP wire version 1 (`2^5 - 1 = 31`).
+///
+/// For wire version 2 the broadcast address is `2^14 - 1`. Call
+/// `sys::csp_id_get_max_nodeid()` after [`CspConfig::init()`] for a
+/// version-correct value at runtime.
+pub const BROADCAST_ADDR: u16 = 31;
 
 /// Accept packets on any port (use with [`Socket::bind`]).
-pub const ANY_PORT: u8 = sys::CSP_ANY as u8; // CSP_ANY
+pub const ANY_PORT: u8 = sys::CSP_ANY as u8;
 
 /// Infinite timeout (block until event occurs).
 pub const MAX_TIMEOUT: u32 = u32::MAX;
@@ -244,21 +217,21 @@ pub const MAX_TIMEOUT: u32 = u32::MAX;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Port {
     /// CSP Management Protocol (0).
-    Cmp = sys::csp_service_port_t_CSP_CMP as u8,
+    Cmp = 0,
     /// Ping / echo (1).
-    Ping = sys::csp_service_port_t_CSP_PING as u8,
+    Ping = 1,
     /// Process list (2).
-    Ps = sys::csp_service_port_t_CSP_PS as u8,
+    Ps = 2,
     /// Free memory query (3).
-    MemFree = sys::csp_service_port_t_CSP_MEMFREE as u8,
+    MemFree = 3,
     /// Reboot / shutdown (4).
-    Reboot = sys::csp_service_port_t_CSP_REBOOT as u8,
+    Reboot = 4,
     /// Free buffer count (5).
-    BufFree = sys::csp_service_port_t_CSP_BUF_FREE as u8,
+    BufFree = 5,
     /// Uptime query (6).
-    Uptime = sys::csp_service_port_t_CSP_UPTIME as u8,
+    Uptime = 6,
     /// Accept packets on any port (255).
-    Any = sys::CSP_ANY as u8,
+    Any = 255,
     /// Custom user-defined port.
     Custom(u8) = 254,
 }
@@ -305,24 +278,15 @@ impl Port {
 
 // ── Standard ports ────────────────────────────────────────────────────────────
 
-/// Reserved CSP service port numbers (`csp_service_port_t`).
+/// Reserved CSP service port numbers.
 pub mod ports {
-    use crate::sys;
-
-    /// CSP Management Protocol.
-    pub const CMP: u8 = sys::csp_service_port_t_CSP_CMP as u8;
-    /// Ping / echo.
-    pub const PING: u8 = sys::csp_service_port_t_CSP_PING as u8;
-    /// Process list.
-    pub const PS: u8 = sys::csp_service_port_t_CSP_PS as u8;
-    /// Free memory query.
-    pub const MEMFREE: u8 = sys::csp_service_port_t_CSP_MEMFREE as u8;
-    /// Reboot / shutdown.
-    pub const REBOOT: u8 = sys::csp_service_port_t_CSP_REBOOT as u8;
-    /// Free buffer count.
-    pub const BUF_FREE: u8 = sys::csp_service_port_t_CSP_BUF_FREE as u8;
-    /// Uptime query.
-    pub const UPTIME: u8 = sys::csp_service_port_t_CSP_UPTIME as u8;
+    pub const CMP: u8 = 0;
+    pub const PING: u8 = 1;
+    pub const PS: u8 = 2;
+    pub const MEMFREE: u8 = 3;
+    pub const REBOOT: u8 = 4;
+    pub const BUF_FREE: u8 = 5;
+    pub const UPTIME: u8 = 6;
 }
 
 #[cfg(test)]
@@ -350,26 +314,26 @@ pub(crate) mod test_helpers {
     use crate::CspConfig;
     use std::sync::Mutex;
 
-    /// Global test lock to serialize CSP initialization across all tests.
-    /// Since libcsp only allows one node at a time, tests must run sequentially.
+    /// Global test lock that serialises CSP initialisation. libcsp keeps its
+    /// state in globals, so tests must not run in parallel.
     pub static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Helper to run a test with CSP initialized.
-    /// Automatically serializes test execution and cleans up after the test.
+    /// Run a closure with an initialised CSP stack; the stack is torn down
+    /// when the closure returns.
     pub fn with_csp_node<F: FnOnce(&crate::CspNode)>(f: F) {
-        // Lock the mutex - DO NOT ignore poison panics as they indicate test failures
-        let _guard = TEST_LOCK.lock().unwrap();
+        // Recover from a poisoned lock so one panicking test doesn't
+        // cascade into the whole suite. Individual tests are expected to
+        // run single-threaded (cargo test --test-threads=1) since libcsp
+        // keeps global state.
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Initialize CSP for this test
         let node = CspConfig::new()
             .address(1)
-            .buffers(10, 256)
             .init()
             .expect("failed to init CSP for tests");
 
-        // Run the test with the node
         f(&node);
-
-        // Node is dropped here, calling csp_free_resources
     }
 }
