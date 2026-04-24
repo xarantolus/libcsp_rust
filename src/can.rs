@@ -13,6 +13,63 @@ use core::ptr;
 
 use crate::sys;
 
+/// CFP (CAN Fragmentation Protocol) layout constants and helpers.
+///
+/// libcsp packs source / destination addresses, a fragment flag, a
+/// remaining-fragments counter and a connection identifier into the 29-bit
+/// extended CAN ID. Mirrors the `CFP_*_SIZE` / `CFP_MAKE_*` macros in
+/// `libcsp/include/csp/interfaces/csp_if_can.h`.
+///
+/// ```text
+///  bit  28 .. 24 | 23 .. 19 | 18 | 17 .. 10 |  9 .. 0
+///       src (5)  | dst (5)  | T  | remain(8)| id (10)
+/// ```
+pub mod cfp {
+    /// Width of the src / dst host-address fields (bits).
+    pub const HOST_BITS: u32 = 5;
+    /// Width of the CFP fragment-type flag.
+    pub const TYPE_BITS: u32 = 1;
+    /// Width of the remaining-fragments counter.
+    pub const REMAIN_BITS: u32 = 8;
+    /// Width of the CFP connection-identifier field.
+    pub const ID_BITS: u32 = 10;
+
+    /// `(1 << HOST_BITS) - 1` — mask for one host-address field.
+    pub const HOST_MASK: u32 = (1 << HOST_BITS) - 1;
+    /// LSB position of the dst field inside the 29-bit CAN ID.
+    pub const DST_SHIFT: u32 = TYPE_BITS + REMAIN_BITS + ID_BITS;
+    /// LSB position of the src field inside the 29-bit CAN ID.
+    pub const SRC_SHIFT: u32 = HOST_BITS + TYPE_BITS + REMAIN_BITS + ID_BITS;
+
+    /// All-ones in the dst field — libcsp's on-CAN broadcast target.
+    /// Regardless of CSP wire version, CFP only carries 5 bits of dst.
+    pub const BROADCAST_ADDR: u8 = HOST_MASK as u8;
+
+    /// Encode `dst` (low 5 bits kept) into its CFP position in the CAN ID.
+    /// Equivalent to libcsp's C `CFP_MAKE_DST` macro.
+    pub const fn make_dst(dst: u8) -> u32 {
+        ((dst as u32) & HOST_MASK) << DST_SHIFT
+    }
+
+    /// Encode `src` (low 5 bits kept) into its CFP position in the CAN ID.
+    /// Equivalent to libcsp's C `CFP_MAKE_SRC` macro.
+    pub const fn make_src(src: u8) -> u32 {
+        ((src as u32) & HOST_MASK) << SRC_SHIFT
+    }
+
+    /// Extract the dst host address from a 29-bit CFP CAN ID.
+    /// Equivalent to libcsp's C `CFP_DST` macro.
+    pub const fn dst(id: u32) -> u8 {
+        ((id >> DST_SHIFT) & HOST_MASK) as u8
+    }
+
+    /// Extract the src host address from a 29-bit CFP CAN ID.
+    /// Equivalent to libcsp's C `CFP_SRC` macro.
+    pub const fn src(id: u32) -> u8 {
+        ((id >> SRC_SHIFT) & HOST_MASK) as u8
+    }
+}
+
 /// Trait for a CAN driver that can transmit raw CAN frames.
 ///
 /// Implement this for your hardware-specific CAN peripheral.
