@@ -167,6 +167,20 @@ pub unsafe trait CspArch: Send + Sync {
     /// **Required.**
     fn queue_size(&self, queue: *mut c_void) -> usize;
 
+    /// Number of free slots in the queue (capacity − items).
+    ///
+    /// Backs `csp_queue_free`. Upstream's POSIX/FreeRTOS/Zephyr backends all
+    /// return free-slot count here, and `csp_rdp_rx_queue_flush` relies on
+    /// that — it bails out early when fewer than two slots are free.
+    ///
+    /// **Optional.** The default returns `usize::MAX` (i.e. "always has
+    /// space"), which keeps callers like `csp_rdp_rx_queue_flush` working
+    /// without forcing every existing arch impl to grow a method overnight.
+    /// Implement it for accurate flow control.
+    fn queue_free_slots(&self, _queue: *mut c_void) -> usize {
+        usize::MAX
+    }
+
     /// Enqueue an item from ISR context.
     ///
     /// **Optional.** Defaults to [`queue_enqueue`] with timeout=0.
@@ -660,10 +674,20 @@ macro_rules! export_arch {
             }
             <$impl_type as $crate::CspArch>::queue_create(&$instance, length as usize, item_size)
         }
+        /// Upstream contract: `csp_queue_free` returns the number of free
+        /// slots in the queue (capacity − used), NOT a destructor. All three
+        /// in-tree backends (POSIX/FreeRTOS/Zephyr) match this. Misreading
+        /// it as a destructor used to tear down `conn->rx_queue` the first
+        /// time `csp_rdp_rx_queue_flush` checked for headroom — UAF on the
+        /// next enqueue. Cap to `i32::MAX` since the C return type is `int`.
         #[no_mangle]
         pub unsafe extern "C" fn csp_queue_free(queue: *mut ::core::ffi::c_void) -> i32 {
-            <$impl_type as $crate::CspArch>::queue_remove(&$instance, queue);
-            0
+            let free = <$impl_type as $crate::CspArch>::queue_free_slots(&$instance, queue);
+            if free > i32::MAX as usize {
+                i32::MAX
+            } else {
+                free as i32
+            }
         }
         /// Drain without freeing. The default impl loops `queue_dequeue` into
         /// a small scratch buffer until empty; backends may override for a
