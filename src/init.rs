@@ -189,9 +189,18 @@ impl CspConfig {
 
             // Zero the built-in loopback's netmask so subnet lookup never
             // picks it up — the rtable is the only delivery path now.
+            //
+            // Also set LOOP.addr to our own CSP address. libcsp ships
+            // `csp_if_lo` with `addr = 0`, which makes
+            // `csp_iflist_get_by_addr(0)` find LOOP and report any packet
+            // with `dst = 0` as "for me". Effect: a remote `ping 0` would
+            // be answered by every node on the bus that hadn't fixed this.
+            // Re-pointing LOOP at our real address restores the intuition
+            // that only `dst = self.address` (and broadcast) are us.
             let lo = sys::csp_iflist_get_by_name(b"LOOP\0".as_ptr() as *const c_char);
             if !lo.is_null() {
                 (*lo).netmask = 0;
+                (*lo).addr = self.address;
             }
 
             // Host-specific route for our own address. `-1` tells

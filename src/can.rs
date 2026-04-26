@@ -113,13 +113,20 @@ unsafe impl Sync for CanInterfaceInner {}
 
 /// Register a CAN interface with the CSP stack.
 ///
-/// - `name`: interface name (e.g. `"CAN"`)
-/// - `driver`: your [`CanDriver`] implementation
+/// - `name`: interface name (e.g. `"CAN"`).
+/// - `addr`: this interface's CSP address. Outgoing packets the upper
+///   layer leaves with `id.src = 0` get backfilled from this field by
+///   `csp_send_direct_iface`. Forgetting to set it is the kind of bug
+///   that silently leaves you sending frames with `src=0` and never
+///   seeing replies — so it's a required argument, not a setter you
+///   might forget.
+/// - `driver`: your [`CanDriver`] implementation.
 ///
-/// Returns a [`CanInterfaceHandle`] that must be kept alive. Use it to feed
-/// received CAN frames via [`CanInterfaceHandle::feed_rx`].
+/// Returns a [`CanInterfaceHandle`] that must be kept alive. Use it to
+/// feed received CAN frames via [`CanInterfaceHandle::feed_rx`].
 pub fn add_interface(
     name: &str,
+    addr: u16,
     driver: impl CanDriver + 'static,
 ) -> crate::Result<CanInterfaceHandle> {
     let c_name = CString::new(name).map_err(|_| crate::CspError::InvalidArgument)?;
@@ -137,6 +144,7 @@ pub fn add_interface(
 
         let c_iface = inner.c_iface.get();
         (*c_iface).name = inner._c_name.as_ptr();
+        (*c_iface).addr = addr;
         // Store a pointer to inner as driver_data so the TX callback can find us.
         (*c_iface).driver_data = &*inner as *const CanInterfaceInner as *mut c_void;
         (*c_iface).interface_data = can_data as *mut c_void;
@@ -170,7 +178,19 @@ impl CanInterfaceHandle {
         }
     }
 
-    /// Get the raw C interface pointer (for use with `csp_rtable_set`, etc).
+    /// This interface's CSP address (the value passed to
+    /// [`add_interface`]).
+    pub fn addr(&self) -> u16 {
+        // Safety: `addr` is a plain `u16` field initialised in
+        // `add_interface` and never mutated from C after that.
+        unsafe { (*self.inner.c_iface.get()).addr }
+    }
+
+    /// Raw `csp_iface_t *` for the rare case you need to call into C
+    /// directly (e.g. extra `csp_rtable_set` entries beyond what the
+    /// safe `route::*` helpers expose). Marked low-level — prefer the
+    /// route helpers.
+    #[doc(hidden)]
     pub fn c_iface_ptr(&self) -> *mut sys::csp_iface_t {
         self.inner.c_iface.get()
     }
