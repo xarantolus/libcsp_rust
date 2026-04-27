@@ -1,12 +1,10 @@
 //! Example: Implementing a CSP Interface using the Rust `socketcan` crate.
 //!
-//! This shows how to plug a Rust SocketCAN driver into the CSP stack via the
-//! [`CspInterface`] trait. The CAN-frame encoding here is **illustrative only**
-//! — a production CSP-on-CAN deployment must use the CFP fragmentation
-//! protocol (multiple CAN frames per CSP packet) which is non-trivial. Use
-//! `node.add_interface_socketcan(...)` for real CFP-compliant CAN; this
-//! example is meant to demonstrate the safe-trait wiring, not the wire
-//! format.
+//! Demonstrates the [`CspInterface`] trait wiring. The CAN encoding is a
+//! toy: no CFP fragmentation (payloads >8 bytes are silently truncated)
+//! and no source authentication (any node on the bus can spoof frames
+//! with the same ID — production code must enable `CSP_O_HMAC`). Use
+//! `node.add_interface_socketcan(...)` for the real CFP-compliant driver.
 //!
 //! Run with: `cargo run --example rust_socketcan_iface --features socketcan`.
 
@@ -26,9 +24,6 @@ impl CspInterface for RustCanIface {
     }
 
     fn nexthop(&mut self, via: u16, pkt: Packet, _from_me: bool) {
-        // Toy encoding: stuff the next-hop address into the CAN ID and the
-        // first 8 bytes of the CSP payload into the CAN frame. A real driver
-        // must implement CFP fragmentation across multiple frames.
         let Some(can_id) = ExtendedId::new(via as u32) else {
             return;
         };
@@ -37,7 +32,6 @@ impl CspInterface for RustCanIface {
         if let Some(frame) = CanFrame::new(Id::Extended(can_id), chunk) {
             let _ = self.socket.write_frame(&frame);
         }
-        // pkt is dropped (and freed) when this scope exits.
     }
 }
 

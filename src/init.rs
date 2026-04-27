@@ -187,24 +187,18 @@ impl CspConfig {
             SELF_IFACE.nexthop = Some(self_iface_tx);
             csp_iflist_add(&raw mut SELF_IFACE);
 
-            // Zero the built-in loopback's netmask so subnet lookup never
-            // picks it up — the rtable is the only delivery path now.
-            //
-            // Leave `csp_if_lo.addr` at libcsp's default of 0. It is tempting
-            // to retarget it to `self.address` so that
-            // `csp_iflist_get_by_addr(0)` no longer treats `dst = 0` as "for
-            // me" (a libcsp footgun where remote `ping 0` is answered by
-            // every node), but doing so triggers the loopback fast-path in
-            // `csp_send_direct` for self-traffic — and that fast-path skips
-            // the `idout->src = iface->addr` fix-up that the rtable path
-            // applies. The result: client packets to ourselves leave with
-            // `src = 0`, the server replies to `dst = 0`, and the reply has
-            // nowhere to go (split-horizon kills the only 0/0 route),
-            // breaking ping/transaction/RDP self-loop. Routing through
-            // SELF_IFACE via the rtable host-route below keeps `src`
-            // correct.
+            // Park LOOP at an address that no CSP packet can target.
+            // Reasons: keeps `csp_iflist_get_by_addr(0)` from claiming
+            // dst=0 as "for me" (unauthenticated `ping 0`/`reboot 0`
+            // attack), and keeps the `idout->dst == csp_if_lo.addr`
+            // fast-path in `csp_send_direct` from firing — that path
+            // skips the `idout->src = iface->addr` fix-up and breaks
+            // self-loop replies. Self-traffic flows through SELF_IFACE
+            // via the rtable host-route below.
+            const LOOPBACK_SENTINEL: u16 = u16::MAX;
             let lo = sys::csp_iflist_get_by_name(c"LOOP".as_ptr());
             if !lo.is_null() {
+                (*lo).addr = LOOPBACK_SENTINEL;
                 (*lo).netmask = 0;
             }
 

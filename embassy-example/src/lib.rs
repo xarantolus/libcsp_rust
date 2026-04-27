@@ -163,28 +163,31 @@ unsafe impl CspArch for EmbassyArch {
 
 }
 
-// libcsp v2.1 dropped `malloc`/`free` from `CspArch` — its packet pool /
-// connection table are statically sized at compile time. SFP and a couple of
-// drivers still call libc `malloc`/`free` directly, so on bare-metal we have
-// to expose those symbols ourselves; we route them through `HEAP` below.
+// SFP and some drivers in libcsp call libc `malloc`/`free` directly. On
+// bare-metal we route them through `HEAP`. Layout: an ALIGN-byte size
+// header precedes the returned pointer so `free` can rebuild the Layout.
+// Padding the header to `ALIGN` (not just `size_of::<usize>()`) keeps the
+// returned pointer ALIGN-aligned on 32-bit targets.
 //
-// Methods kept on `EmbassyArch` so the in-crate `queue_create` can still
-// allocate its backing buffer the same way.
+// `free` requires its argument to have come from this `malloc`; foreign
+// pointers read garbage as the size header and corrupt the allocator.
 impl EmbassyArch {
+    const ALIGN: usize = 8;
+
     fn malloc(&self, size: usize) -> *mut c_void {
-        // Store size in a header before the returned pointer so we can free it later
-        const HEADER: usize = core::mem::size_of::<usize>();
-        let total = HEADER + size;
+        let Some(total) = size.checked_add(Self::ALIGN) else {
+            return core::ptr::null_mut();
+        };
+        let Ok(layout) = core::alloc::Layout::from_size_align(total, Self::ALIGN) else {
+            return core::ptr::null_mut();
+        };
         unsafe {
-            let layout = core::alloc::Layout::from_size_align_unchecked(total, 8);
-            let ptr = core::alloc::GlobalAlloc::alloc(&HEAP, layout);
-            if ptr.is_null() {
+            let base = core::alloc::GlobalAlloc::alloc(&HEAP, layout);
+            if base.is_null() {
                 return core::ptr::null_mut();
             }
-            // Store the size in the header
-            *(ptr as *mut usize) = size;
-            // Return pointer after the header
-            ptr.add(HEADER) as *mut c_void
+            *(base as *mut usize) = size;
+            base.add(Self::ALIGN) as *mut c_void
         }
     }
 
@@ -192,24 +195,22 @@ impl EmbassyArch {
         if ptr.is_null() {
             return;
         }
-        const HEADER: usize = core::mem::size_of::<usize>();
         unsafe {
-            // Get the original pointer (before the header)
-            let original = (ptr as *mut u8).sub(HEADER);
-            // Read the size from the header
-            let size = *(original as *const usize);
-            // Deallocate with the correct layout
-            let layout = core::alloc::Layout::from_size_align_unchecked(HEADER + size, 8);
-            core::alloc::GlobalAlloc::dealloc(&HEAP, original, layout);
+            let base = (ptr as *mut u8).sub(Self::ALIGN);
+            let size = *(base as *const usize);
+            let layout =
+                core::alloc::Layout::from_size_align_unchecked(size + Self::ALIGN, Self::ALIGN);
+            core::alloc::GlobalAlloc::dealloc(&HEAP, base, layout);
         }
     }
 }
 
 pub static ARCH: EmbassyArch = EmbassyArch;
 
-// `csp_sfp.c` and a couple of optional drivers still call libc `malloc`/
-// `free` directly. On bare-metal the host C lib isn't linked in, so we
-// publish C-compatible shims that route through the embedded heap.
+// This crate owns the `malloc`/`free` symbols. Pulling in another libc
+// shim alongside it (e.g. `tinyrlibc` with malloc enabled) lets the
+// linker pick one definition with a size-header layout the other side
+// doesn't share — every `free` then corrupts the heap.
 #[no_mangle]
 pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
     ARCH.malloc(size)

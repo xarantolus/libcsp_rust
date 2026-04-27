@@ -32,11 +32,11 @@ use embassy_example::ARCH;
 // Use the export_arch! macro to generate all CSP arch C shims automatically
 libcsp::export_arch!(embassy_example::EmbassyArch, ARCH);
 
+// Toy CAN encoding (see stress_tx.rs).
 struct Stm32CanIface { tx: embassy_stm32::can::CanTx<'static, 'static, CAN1> }
 impl CspInterface for Stm32CanIface {
     fn name(&self) -> &str { "CAN" }
     fn nexthop(&mut self, via: u16, pkt: Packet, _from_me: bool) {
-        // Toy encoding (see stress_tx.rs for the same caveat).
         use embassy_stm32::can::bxcan::{ExtendedId, Frame, Data, Id};
         let Some(id) = ExtendedId::new(via as u32) else { return };
         let payload = pkt.data();

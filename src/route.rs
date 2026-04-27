@@ -165,10 +165,11 @@ pub fn free_all() {
 
 /// Print the routing table to stdout.
 ///
-/// Only available when libcsp is built with stdio support (i.e. not on
-/// `external-arch` targets, where `CSP_ENABLE_CSP_PRINT=0` makes
-/// `csp_rtable_print` an empty inline stub with no extern symbol).
-#[cfg(not(feature = "external-arch"))]
+/// Gated on `feature = "debug"` so production builds don't expose the
+/// topology to whatever stdout is wired to. `not(external-arch)` is
+/// required because `csp_rtable_print` is an inline stub (no extern
+/// symbol) when `CSP_ENABLE_CSP_PRINT=0`.
+#[cfg(all(feature = "debug", not(feature = "external-arch")))]
 pub fn print() {
     unsafe { sys::csp_rtable_print() }
 }
