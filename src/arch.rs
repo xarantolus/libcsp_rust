@@ -695,7 +695,7 @@ macro_rules! export_arch {
         #[no_mangle]
         pub unsafe extern "C" fn csp_queue_empty(queue: *mut ::core::ffi::c_void) {
             /* 8 bytes is large enough for libcsp's internal queue items
-               (`csp_packet_t *` or `csp_qfifo_t` = one or two pointers). */
+            (`csp_packet_t *` or `csp_qfifo_t` = one or two pointers). */
             let mut scratch = [0u8; 16];
             while <$impl_type as $crate::CspArch>::queue_dequeue(
                 &$instance,

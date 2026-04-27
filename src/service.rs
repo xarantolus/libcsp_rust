@@ -191,6 +191,12 @@ pub struct Dispatcher {
     error_callback: Option<ErrorCallback>,
 }
 
+impl Default for Dispatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Dispatcher {
     pub fn new() -> Self {
         Dispatcher {

@@ -25,7 +25,7 @@ static_cell = "2.1"
 panic-probe = "0.3"
 
 embedded-alloc = "0.5"
-libcsp = { path = "..", default-features = false, features = ["external-arch", "rdp", "crc32"] }
+libcsp = { path = "..", default-features = false, features = ["external-arch", "rdp"] }
 
 [profile.release]
 debug = 2

@@ -90,11 +90,12 @@ unsafe impl CspArch for MyCustomArch {
     }
 
     // ── Memory ──────────────────────────────────────────────────────────────
-    // libcsp uses these for connection and packet-pool bookkeeping.
-    fn malloc(&self, _size: usize) -> *mut c_void {
-        core::ptr::null_mut()
-    }
-    fn free(&self, _ptr: *mut c_void) {}
+    //
+    // libcsp v2.1 no longer routes packet-pool / connection-table allocations
+    // through the arch trait — those buffers are statically sized at compile
+    // time (via `LIBCSP_BUFFER_*` env vars) so no `malloc` hook is needed.
+    // The Rust crate uses `extern crate alloc`; on bare-metal targets pair
+    // this example with a `#[global_allocator]` (e.g. `embedded-alloc`).
 }
 
 // A single static instance is sufficient — the trait takes &self.

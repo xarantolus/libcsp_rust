@@ -1,10 +1,17 @@
 //! Example: Implementing a CSP Interface using the Rust `socketcan` crate.
 //!
-//! This shows how to implement a fully custom transport (TX and RX) using
-//! safe Rust libraries instead of the built-in C drivers.
+//! This shows how to plug a Rust SocketCAN driver into the CSP stack via the
+//! [`CspInterface`] trait. The CAN-frame encoding here is **illustrative only**
+//! — a production CSP-on-CAN deployment must use the CFP fragmentation
+//! protocol (multiple CAN frames per CSP packet) which is non-trivial. Use
+//! `node.add_interface_socketcan(...)` for real CFP-compliant CAN; this
+//! example is meant to demonstrate the safe-trait wiring, not the wire
+//! format.
+//!
+//! Run with: `cargo run --example rust_socketcan_iface --features socketcan`.
 
 use libcsp::{interface, CspConfig, CspInterface, Packet, Priority};
-use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Frame, Id, Socket};
+use socketcan::{CanFrame, CanSocket, EmbeddedFrame, ExtendedId, Id, Socket};
 use std::sync::Arc;
 use std::thread;
 
@@ -18,42 +25,42 @@ impl CspInterface for RustCanIface {
         &self.name
     }
 
-    fn nexthop(&mut self, _via: u8, pkt: Packet) {
-        // 1. Convert CSP packet to CAN frame(s)
-        let can_id = pkt.id_raw();
-
-        let id = Id::Extended(ExtendedId::new(can_id).unwrap());
-        if let Some(frame) = CanFrame::new(id, pkt.data()) {
+    fn nexthop(&mut self, via: u16, pkt: Packet, _from_me: bool) {
+        // Toy encoding: stuff the next-hop address into the CAN ID and the
+        // first 8 bytes of the CSP payload into the CAN frame. A real driver
+        // must implement CFP fragmentation across multiple frames.
+        let Some(can_id) = ExtendedId::new(via as u32) else {
+            return;
+        };
+        let payload = pkt.data();
+        let chunk = &payload[..payload.len().min(8)];
+        if let Some(frame) = CanFrame::new(Id::Extended(can_id), chunk) {
             let _ = self.socket.write_frame(&frame);
         }
-
-        // Packet pkt is dropped and freed here automatically.
+        // pkt is dropped (and freed) when this scope exits.
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    // 1. Setup local vcan0 interface
     let iface_name = "vcan0";
     let socket = Arc::new(CanSocket::open(iface_name).map_err(|e| {
-        anyhow::anyhow!("Failed to open {}: {}. Ensure it exists: sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 up", iface_name, e)
+        anyhow::anyhow!(
+            "Failed to open {}: {}. Ensure it exists: \
+             sudo ip link add dev vcan0 type vcan && sudo ip link set vcan0 up",
+            iface_name,
+            e,
+        )
     })?);
 
-    // 2. Initialise CSP
-    let node = CspConfig::new()
-        .address(1)
-        .buffers(20, 256)
-        .init()
-        .expect("CSP init failed");
+    let node = CspConfig::new().address(1).init().expect("CSP init failed");
 
-    // 3. Register our Rust-based interface
     let can_iface = RustCanIface {
         name: "RUST_CAN".to_string(),
         socket: Arc::clone(&socket),
     };
     let handle = interface::register(can_iface);
 
-    // 4. Start RX thread
-    let rx_handle = handle.clone();
+    let rx_handle = handle;
     let rx_socket = Arc::clone(&socket);
     thread::spawn(move || {
         println!("RX Thread: Listening on vcan0...");
@@ -61,28 +68,26 @@ fn main() -> anyhow::Result<()> {
             if let Ok(frame) = rx_socket.read_frame() {
                 let data = EmbeddedFrame::data(&frame);
                 if let Some(mut pkt) = Packet::get(data.len()) {
-                    pkt.set_id_raw(frame.raw_id());
-                    pkt.write(data).unwrap();
-                    rx_handle.rx(pkt);
+                    if pkt.write(data).is_ok() {
+                        rx_handle.rx(pkt);
+                    }
                 }
             }
         }
     });
 
-    // 5. Setup routing
     node.route_load("2 RUST_CAN").unwrap();
     node.route_start_task(4096, 0).unwrap();
 
     println!("Interface registered and RX thread started.");
     println!("Sending test packet to node 2...");
 
-    // 6. Test TX — send a test packet to node 2 port 10.
     let conn = node
         .connect(Priority::Norm, 2, 10, 1000, libcsp::conn_opts::NONE)
         .expect("Connect failed");
     let mut pkt = Packet::get(16).unwrap();
     pkt.write(b"Rust SocketCAN!").unwrap();
-    conn.send_discard(pkt, 100).unwrap();
+    conn.send(pkt);
 
     thread::sleep(std::time::Duration::from_secs(1));
     Ok(())

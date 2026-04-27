@@ -30,9 +30,11 @@ version 2.1 of the License, or (at your option) any later version.
 
 extern crate alloc;
 
+#[cfg(not(feature = "external-arch"))]
 use alloc::ffi::CString;
-#[allow(unused_imports)]
+#[cfg(not(feature = "external-arch"))]
 use alloc::vec;
+#[cfg(not(feature = "external-arch"))]
 use alloc::vec::Vec;
 
 use crate::error::csp_result;
@@ -161,8 +163,12 @@ pub fn free_all() {
     unsafe { sys::csp_rtable_free() }
 }
 
-/// Print the routing table to stdout (requires `debug` feature / `CSP_DEBUG`).
-#[cfg(feature = "debug")]
+/// Print the routing table to stdout.
+///
+/// Only available when libcsp is built with stdio support (i.e. not on
+/// `external-arch` targets, where `CSP_ENABLE_CSP_PRINT=0` makes
+/// `csp_rtable_print` an empty inline stub with no extern symbol).
+#[cfg(not(feature = "external-arch"))]
 pub fn print() {
     unsafe { sys::csp_rtable_print() }
 }
@@ -224,10 +230,7 @@ pub fn iterate<F>(f: F)
 where
     F: FnMut(RouteEntry) -> bool,
 {
-    unsafe extern "C" fn shim<F>(
-        ctx: *mut core::ffi::c_void,
-        route: *mut sys::csp_route_t,
-    ) -> bool
+    unsafe extern "C" fn shim<F>(ctx: *mut core::ffi::c_void, route: *mut sys::csp_route_t) -> bool
     where
         F: FnMut(RouteEntry) -> bool,
     {

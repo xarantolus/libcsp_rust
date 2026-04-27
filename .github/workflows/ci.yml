@@ -9,9 +9,18 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # All features except ropi-rwpi (requires ARM asm trampolines) and
-  # usart-windows (wrong platform).
-  CI_FEATURES: "std,rdp,rdp-fast-close,crc32,hmac,xtea,qos,promisc,dedup,cidr-rtable,socketcan,zmq,usart-linux,debug,debug-timestamp,external-arch"
+  # Features used to actually run the test suite on hosted Linux. Excluded:
+  #   - ropi-rwpi: requires ARM asm trampolines, only meaningful on cortex-m.
+  #   - external-arch: forces CSP_ENABLE_CSP_PRINT=0 / CSP_HAVE_STDIO=0, so
+  #     stdio-dependent helpers like `csp_rtable_load`/`save`/`check` and
+  #     `csp_rtable_print` are *not* compiled into libcsp. Several integration
+  #     tests rely on `route::load(...)`, so we run the test suite without
+  #     external-arch and then build (only build, not test) with it enabled
+  #     in a separate step.
+  CI_FEATURES: "std,rdp,rdp-fast-close,hmac,promisc,dedup,socketcan,zmq,usart-linux,debug,zmq-v1-fixup,buffer-zero-clear"
+  # Same as CI_FEATURES but with external-arch added — used only for build
+  # checks (not `cargo test`) on hosted Linux.
+  CI_FEATURES_EXTERNAL_ARCH: "std,rdp,rdp-fast-close,hmac,promisc,dedup,socketcan,zmq,usart-linux,debug,zmq-v1-fixup,buffer-zero-clear,external-arch"
 
 jobs:
   test-linux:
@@ -43,6 +52,16 @@ jobs:
 
       - name: Check Formatting
         run: cargo fmt --all -- --check
+
+      - name: Build with external-arch
+        # external-arch swaps the OS shim implementation; combined with the
+        # default `host-default-arch` it auto-exports the POSIX TestArch so
+        # the static lib still links. We can build but not run the full test
+        # suite (see CI_FEATURES_EXTERNAL_ARCH note above).
+        run: cargo build --all-targets --features "$CI_FEATURES_EXTERNAL_ARCH"
+
+      - name: Clippy with external-arch
+        run: cargo clippy --all-targets --features "$CI_FEATURES_EXTERNAL_ARCH" -- -D warnings
 
       - name: Build custom_arch external example
         # Standalone crate that disables `host-default-arch` so it can supply

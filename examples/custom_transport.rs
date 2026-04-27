@@ -29,10 +29,7 @@ impl CspInterface for MyHardware {
 
 fn main() {
     // 1. Initialise CSP
-    let node = CspConfig::new()
-        .address(1)
-        .init()
-        .expect("init failed");
+    let node = CspConfig::new().address(1).init().expect("init failed");
 
     // 2. Register the custom interface
     let my_hw = MyHardware {

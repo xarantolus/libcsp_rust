@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         _socket: Arc::clone(&socket),
     });
 
-    let rx_handle = handle.clone();
+    let rx_handle = handle;
     let rx_socket = Arc::clone(&socket);
     thread::spawn(move || loop {
         if let Ok(frame) = rx_socket.read_frame() {

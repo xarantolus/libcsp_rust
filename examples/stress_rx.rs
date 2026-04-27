@@ -18,22 +18,17 @@ fn main() -> anyhow::Result<()> {
         iface_name
     );
 
-    let node = CspConfig::new()
-        .address(2)
-        .buffers(1000, 256)
-        .fifo_length(100)
-        .init()
-        .expect("CSP init failed");
+    let node = CspConfig::new().address(2).init().expect("CSP init failed");
 
     node.add_interface_socketcan(&iface_name, 0, true)?;
     node.route_load("1 CAN")?;
     node.route_start_task(4096, 0)?;
 
-    let sock_data = Socket::new(socket_opts::NONE).unwrap();
+    let mut sock_data = Socket::new(socket_opts::NONE);
     sock_data.bind(DATA_PORT)?;
     sock_data.listen(10)?;
 
-    let sock_sfp = Socket::new(socket_opts::NONE).unwrap();
+    let mut sock_sfp = Socket::new(socket_opts::NONE);
     sock_sfp.bind(SFP_PORT)?;
     sock_sfp.listen(10)?;
 

@@ -161,7 +161,16 @@ unsafe impl CspArch for EmbassyArch {
         }
     }
 
-    // ── Heap ──────────────────────────────────────────────────────────────────
+}
+
+// libcsp v2.1 dropped `malloc`/`free` from `CspArch` — its packet pool /
+// connection table are statically sized at compile time. SFP and a couple of
+// drivers still call libc `malloc`/`free` directly, so on bare-metal we have
+// to expose those symbols ourselves; we route them through `HEAP` below.
+//
+// Methods kept on `EmbassyArch` so the in-crate `queue_create` can still
+// allocate its backing buffer the same way.
+impl EmbassyArch {
     fn malloc(&self, size: usize) -> *mut c_void {
         // Store size in a header before the returned pointer so we can free it later
         const HEADER: usize = core::mem::size_of::<usize>();
@@ -197,6 +206,19 @@ unsafe impl CspArch for EmbassyArch {
 }
 
 pub static ARCH: EmbassyArch = EmbassyArch;
+
+// `csp_sfp.c` and a couple of optional drivers still call libc `malloc`/
+// `free` directly. On bare-metal the host C lib isn't linked in, so we
+// publish C-compatible shims that route through the embedded heap.
+#[no_mangle]
+pub unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+    ARCH.malloc(size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn free(ptr: *mut c_void) {
+    ARCH.free(ptr);
+}
 
 // NOTE: C string functions (strcpy, strncpy, strnlen, strncasecmp, strtok_r)
 // and other stubs (rand, srand, _embassy_time_schedule_wake) are provided

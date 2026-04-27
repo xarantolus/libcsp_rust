@@ -49,12 +49,17 @@ libcsp::export_arch!(embassy_example::EmbassyArch, ARCH);
 struct Stm32CanIface { tx: embassy_stm32::can::CanTx<'static, 'static, CAN1> }
 impl CspInterface for Stm32CanIface {
     fn name(&self) -> &str { "CAN" }
-    fn nexthop(&mut self, _v: u8, pkt: Packet) {
+    fn nexthop(&mut self, via: u16, pkt: Packet, _from_me: bool) {
+        // Toy encoding: real CSP-on-CAN needs CFP fragmentation and packs the
+        // 6-byte v2 (or 4-byte v1) header into the 29-bit extended ID. This
+        // stress test just stuffs the via-address into the ID and the first
+        // 8 payload bytes into a single CAN frame.
         use embassy_stm32::can::bxcan::{ExtendedId, Frame, Data, Id};
-        if let Some(id) = ExtendedId::new(pkt.id_raw()) {
-            if let Some(data) = Data::new(pkt.data()) {
-                let _ = self.tx.try_write(&Frame::new_data(Id::Extended(id), data));
-            }
+        let Some(id) = ExtendedId::new(via as u32) else { return };
+        let payload = pkt.data();
+        let chunk = &payload[..payload.len().min(8)];
+        if let Some(data) = Data::new(chunk) {
+            let _ = self.tx.try_write(&Frame::new_data(Id::Extended(id), data));
         }
     }
 }
@@ -77,13 +82,11 @@ async fn main(spawner: Spawner) {
 
     let node = CspConfig::new()
         .address(1)
-        .buffers(1000, 256)
-        .fifo_length(100)
         .init()
         .expect("CSP INIT FAIL");
 
     // Make RDP aggressive
-    unsafe { libcsp::sys::csp_rdp_set_opt(20, 500, 100, 1, 100, 2); }
+    node.rdp_set_opt(20, 500, 100, 1, 100, 2);
 
     let mut can = Can::new(p.CAN1, p.PA11, p.PA12, Irqs);
     let _ = can.as_mut().modify_config().set_loopback(false).set_silent(false);
@@ -142,10 +145,9 @@ async fn main(spawner: Spawner) {
                     let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
-                    if node.sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0).is_ok() {
-                        bytes_sent += 200;
-                        count += 1;
-                    }
+                    node.sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt);
+                    bytes_sent += 200;
+                    count += 1;
                 }
             }
             ProtocolMode::Rdp => {
@@ -160,10 +162,9 @@ async fn main(spawner: Spawner) {
                     let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
-                    if conn.send_discard(pkt, 0).is_ok() {
-                        bytes_sent += 200;
-                        count += 1;
-                    } else { active_conn = None; }
+                    conn.send(pkt);
+                    bytes_sent += 200;
+                    count += 1;
                 }
             }
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
@@ -201,9 +202,6 @@ async fn can_rx_task(mut rx: embassy_stm32::can::CanRx<'static, 'static, CAN1>, 
         let envelope = rx.read().await.unwrap();
         if let Some(data) = envelope.frame.data() {
             if let Some(mut pkt) = Packet::get(data.len() as usize) {
-                use embassy_stm32::can::bxcan::Id;
-                let id = match envelope.frame.id() { Id::Standard(s) => s.as_raw() as u32, Id::Extended(e) => e.as_raw() };
-                pkt.set_id_raw(id);
                 pkt.write(data.as_ref()).unwrap();
                 handle.rx(pkt);
             }
@@ -214,7 +212,7 @@ async fn can_rx_task(mut rx: embassy_stm32::can::CanRx<'static, 'static, CAN1>, 
 #[embassy_executor::task]
 async fn csp_router_task(node: libcsp::CspNode) {
     loop {
-        let _ = node.route_work(10); 
+        let _ = node.route_work();
         Timer::after(Duration::from_millis(1)).await;
     }
 }

@@ -8,10 +8,7 @@ use std::thread;
 
 fn main() -> libcsp::Result<()> {
     // 1. Initialise CSP
-    let node = CspConfig::new()
-        .address(1)
-        .init()
-        .expect("CSP init failed");
+    let node = CspConfig::new().address(1).init().expect("CSP init failed");
 
     node.route_start_task(4096, 0).unwrap();
     node.route_load("0/0 LOOP").unwrap();

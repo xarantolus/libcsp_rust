@@ -35,12 +35,14 @@ libcsp::export_arch!(embassy_example::EmbassyArch, ARCH);
 struct Stm32CanIface { tx: embassy_stm32::can::CanTx<'static, 'static, CAN1> }
 impl CspInterface for Stm32CanIface {
     fn name(&self) -> &str { "CAN" }
-    fn nexthop(&mut self, _v: u8, pkt: Packet) {
+    fn nexthop(&mut self, via: u16, pkt: Packet, _from_me: bool) {
+        // Toy encoding (see stress_tx.rs for the same caveat).
         use embassy_stm32::can::bxcan::{ExtendedId, Frame, Data, Id};
-        if let Some(id) = ExtendedId::new(pkt.id_raw()) {
-            if let Some(data) = Data::new(pkt.data()) {
-                let _ = self.tx.try_write(&Frame::new_data(Id::Extended(id), data));
-            }
+        let Some(id) = ExtendedId::new(via as u32) else { return };
+        let payload = pkt.data();
+        let chunk = &payload[..payload.len().min(8)];
+        if let Some(data) = Data::new(chunk) {
+            let _ = self.tx.try_write(&Frame::new_data(Id::Extended(id), data));
         }
     }
 }
@@ -63,8 +65,6 @@ async fn main(spawner: Spawner) {
 
     let node = CspConfig::new()
         .address(2)
-        .buffers(1000, 256)
-        .fifo_length(100)
         .init()
         .expect("CSP INIT FAIL");
 
@@ -86,7 +86,7 @@ async fn main(spawner: Spawner) {
     let mut errors = 0u64;
     let mut last_log = Instant::now();
 
-    let mut server = libcsp::Dispatcher::new().unwrap();
+    let mut server = libcsp::Dispatcher::new();
     
     // 1. DATA PORT (Normal / RDP)
     server.register(DATA_PORT, move |conn, pkt| {
@@ -116,7 +116,7 @@ async fn main(spawner: Spawner) {
     }).unwrap();
 
     // 2. SFP PORT
-    let sfp_sock = libcsp::Socket::new(socket_opts::NONE).unwrap();
+    let mut sfp_sock = libcsp::Socket::new(socket_opts::NONE);
     sfp_sock.bind(SFP_PORT).unwrap();
     sfp_sock.listen(5).unwrap();
 
@@ -174,9 +174,6 @@ async fn can_rx_task(mut rx: embassy_stm32::can::CanRx<'static, 'static, CAN1>, 
         let envelope = rx.read().await.unwrap();
         if let Some(data) = envelope.frame.data() {
             if let Some(mut pkt) = Packet::get(data.len() as usize) {
-                use embassy_stm32::can::bxcan::Id;
-                let id = match envelope.frame.id() { Id::Standard(s) => s.as_raw() as u32, Id::Extended(e) => e.as_raw() };
-                pkt.set_id_raw(id);
                 pkt.write(data.as_ref()).unwrap();
                 handle.rx(pkt);
             }
@@ -187,7 +184,7 @@ async fn can_rx_task(mut rx: embassy_stm32::can::CanRx<'static, 'static, CAN1>, 
 #[embassy_executor::task]
 async fn csp_router_task(node: libcsp::CspNode) {
     loop {
-        let _ = node.route_work(10); 
+        let _ = node.route_work();
         Timer::after(Duration::from_millis(1)).await;
     }
 }

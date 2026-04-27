@@ -190,17 +190,22 @@ impl CspConfig {
             // Zero the built-in loopback's netmask so subnet lookup never
             // picks it up — the rtable is the only delivery path now.
             //
-            // Also set LOOP.addr to our own CSP address. libcsp ships
-            // `csp_if_lo` with `addr = 0`, which makes
-            // `csp_iflist_get_by_addr(0)` find LOOP and report any packet
-            // with `dst = 0` as "for me". Effect: a remote `ping 0` would
-            // be answered by every node on the bus that hadn't fixed this.
-            // Re-pointing LOOP at our real address restores the intuition
-            // that only `dst = self.address` (and broadcast) are us.
-            let lo = sys::csp_iflist_get_by_name(b"LOOP\0".as_ptr() as *const c_char);
+            // Leave `csp_if_lo.addr` at libcsp's default of 0. It is tempting
+            // to retarget it to `self.address` so that
+            // `csp_iflist_get_by_addr(0)` no longer treats `dst = 0` as "for
+            // me" (a libcsp footgun where remote `ping 0` is answered by
+            // every node), but doing so triggers the loopback fast-path in
+            // `csp_send_direct` for self-traffic — and that fast-path skips
+            // the `idout->src = iface->addr` fix-up that the rtable path
+            // applies. The result: client packets to ourselves leave with
+            // `src = 0`, the server replies to `dst = 0`, and the reply has
+            // nowhere to go (split-horizon kills the only 0/0 route),
+            // breaking ping/transaction/RDP self-loop. Routing through
+            // SELF_IFACE via the rtable host-route below keeps `src`
+            // correct.
+            let lo = sys::csp_iflist_get_by_name(c"LOOP".as_ptr());
             if !lo.is_null() {
                 (*lo).netmask = 0;
-                (*lo).addr = self.address;
             }
 
             // Host-specific route for our own address. `-1` tells

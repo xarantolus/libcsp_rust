@@ -25,10 +25,7 @@ fn allocate_port() -> u8 {
 
 fn ensure_init() -> CspNode {
     NODE.get_or_init(|| {
-        let node = CspConfig::new()
-            .address(1)
-            .init()
-            .expect("init failed");
+        let node = CspConfig::new().address(1).init().expect("init failed");
         node.route_start_task(4096, 0)
             .expect("Failed to start route task");
         node.route_load("0/0 LOOP")

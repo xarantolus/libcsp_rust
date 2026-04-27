@@ -3,7 +3,9 @@
 //! upstream CI pipeline as the canonical smoke test). Each test exercises
 //! one piece of service-handler functionality over loopback.
 
-use libcsp::{service::Dispatcher, socket_opts, CspConfig, CspNode, Packet, Port, Priority, Socket};
+use libcsp::{
+    service::Dispatcher, socket_opts, CspConfig, CspNode, Packet, Port, Priority, Socket,
+};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -52,7 +54,9 @@ fn ensure_service_dispatcher() {
                 }
             }
         });
-        ready_rx.recv().expect("dispatcher thread died before binding");
+        ready_rx
+            .recv()
+            .expect("dispatcher thread died before binding");
         handle
     });
 }
@@ -153,7 +157,7 @@ fn upstream_cmp_uptime_monotonic() {
     let b = node.uptime(1, 1000).expect("uptime #2 failed");
 
     assert!(b >= a, "uptime went backwards ({b} < {a})");
-    assert!(b >= a + 1, "uptime should advance by at least 1s: {a} → {b}");
+    assert!(b > a, "uptime should advance by at least 1s: {a} → {b}");
 }
 
 // ── Ping round-trip ──────────────────────────────────────────────────────────

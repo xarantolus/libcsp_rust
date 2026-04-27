@@ -15,18 +15,14 @@ fn main() -> anyhow::Result<()> {
 
     println!("[TX] Starting CSP Stress Test on {}...", iface_name);
 
-    let node = CspConfig::new()
-        .address(1)
-        .buffers(1000, 256)
-        .fifo_length(100)
-        .init()
-        .expect("CSP init failed");
+    let node = CspConfig::new().address(1).init().expect("CSP init failed");
 
     node.add_interface_socketcan(&iface_name, 0, true)?;
     node.route_load("2 CAN")?;
     node.route_start_task(4096, 0)?;
 
     // Fast RDP close for stress tests
+    #[cfg(feature = "rdp")]
     node.rdp_set_opt(20, 500, 100, 1, 100, 2);
 
     let mut count = 0u64;
@@ -91,13 +87,9 @@ fn main() -> anyhow::Result<()> {
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
 
-                    if node
-                        .sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt, 0)
-                        .is_ok()
-                    {
-                        bytes_sent += 200;
-                        count += 1;
-                    }
+                    node.sendto(Priority::Norm, 2, DATA_PORT, 10, socket_opts::NONE, pkt);
+                    bytes_sent += 200;
+                    count += 1;
                 }
             }
             ProtocolMode::Rdp => {
@@ -114,12 +106,9 @@ fn main() -> anyhow::Result<()> {
                     let mut packet_prng = Prng::new(PRNG_SEED ^ (count as u32));
                     packet_prng.fill(&mut data[8..]);
                     pkt.write(&data).unwrap();
-                    if conn.send_discard(pkt, 0).is_ok() {
-                        bytes_sent += 200;
-                        count += 1;
-                    } else {
-                        active_conn = None;
-                    }
+                    conn.send(pkt);
+                    bytes_sent += 200;
+                    count += 1;
                 }
             }
             ProtocolMode::SFP | ProtocolMode::RdpSfp => {
