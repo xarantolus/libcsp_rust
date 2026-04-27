@@ -42,7 +42,17 @@ impl Socket {
         Socket { inner }
     }
 
+    /// Pointer for libcsp APIs that mutate the socket (bind/listen/close).
+    /// Requires `&mut self` to keep aliasing tracked at the type level.
+    fn as_mut_ptr(&mut self) -> *mut sys::csp_socket_t {
+        &mut *self.inner as *mut sys::csp_socket_t
+    }
+
+    /// Pointer for libcsp APIs that only read the socket struct
+    /// (accept/recvfrom rely on libcsp's internal locking on the rx queue).
     fn as_ptr(&self) -> *mut sys::csp_socket_t {
+        // SAFETY: only used with libcsp APIs whose mutations are confined to
+        // fields protected by libcsp's own internal queue locks.
         &*self.inner as *const sys::csp_socket_t as *mut sys::csp_socket_t
     }
 
@@ -59,8 +69,8 @@ impl Socket {
     ///
     /// [`listen`]: Self::listen
     pub fn bind(&mut self, port: u8) -> Result<()> {
-        csp_result(unsafe { sys::csp_bind(self.as_ptr(), port) })?;
-        csp_result(unsafe { sys::csp_listen(self.as_ptr(), 0) })
+        csp_result(unsafe { sys::csp_bind(self.as_mut_ptr(), port) })?;
+        csp_result(unsafe { sys::csp_listen(self.as_mut_ptr(), 0) })
     }
 
     /// Re-initialise the receive queue (normally unnecessary — [`bind`]
@@ -68,7 +78,7 @@ impl Socket {
     ///
     /// [`bind`]: Self::bind
     pub fn listen(&mut self, backlog: usize) -> Result<()> {
-        csp_result(unsafe { sys::csp_listen(self.as_ptr(), backlog) })
+        csp_result(unsafe { sys::csp_listen(self.as_mut_ptr(), backlog) })
     }
 
     /// Wait for and return the next incoming connection.
@@ -100,7 +110,7 @@ impl Socket {
 
 impl Drop for Socket {
     fn drop(&mut self) {
-        unsafe { sys::csp_socket_close(self.as_ptr()) };
+        unsafe { sys::csp_socket_close(self.as_mut_ptr()) };
     }
 }
 

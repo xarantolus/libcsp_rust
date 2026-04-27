@@ -124,7 +124,11 @@ impl Connection {
 
     /// Perform a complete request/reply exchange on this *existing* connection.
     ///
-    /// Returns `Ok(reply_len)` on success.
+    /// `in_len` — expected reply length; pass `0` if no reply is expected.
+    /// Returns `Ok(reply_bytes)` on success (always `0` when `in_len == 0`).
+    ///
+    /// libcsp returns `1` for "no reply expected, send succeeded" and `> 0`
+    /// for "received this many reply bytes"; both are mapped to `Ok` here.
     pub fn transaction(
         &self,
         timeout: u32,
@@ -142,10 +146,13 @@ impl Connection {
                 in_len,
             )
         };
-        if ret > 0 || (ret == 1 && in_len == 0) {
-            Ok(ret as usize)
-        } else {
-            Err(CspError::TransmitFailed)
+        match (ret, in_len) {
+            // No reply expected: libcsp returns 1 for "send ok", 0 (CSP_ERR_NONE)
+            // is also accepted defensively.
+            (1, 0) | (0, 0) => Ok(0),
+            // Reply received: ret carries the number of bytes.
+            (n, _) if n > 0 => Ok(n as usize),
+            _ => Err(CspError::TransmitFailed),
         }
     }
 
@@ -229,9 +236,12 @@ impl Drop for Connection {
     }
 }
 
-// libcsp guards connection access with internal OS primitives.
+// libcsp guards connection access with internal OS primitives, but the
+// *user-visible* operations on a connection are racy at the API level
+// (e.g. concurrent `read()` calls would each pop a different packet from
+// the rx queue with no defined ordering). Make the connection movable
+// across threads but pin its use to one thread at a time.
 unsafe impl Send for Connection {}
-unsafe impl Sync for Connection {}
 
 impl fmt::Debug for Connection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

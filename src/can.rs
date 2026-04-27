@@ -11,6 +11,7 @@ use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr;
 
+use crate::ffi_util;
 use crate::sys;
 
 /// CFP (CAN Fragmentation Protocol) layout constants and helpers.
@@ -87,12 +88,16 @@ pub trait CanDriver: Send {
 
 /// Handle for a registered CAN interface.
 ///
-/// Must be kept alive for the lifetime of the interface. Use [`feed_rx`] to
-/// pass received CAN frames to the CSP stack.
+/// The interface state is leaked into static memory at registration time
+/// (matching libcsp's "register once, run forever" lifecycle). The handle
+/// itself is `Copy`; dropping it does **not** unregister the interface.
+///
+/// Use [`feed_rx`] to pass received CAN frames to the CSP stack.
 ///
 /// [`feed_rx`]: CanInterfaceHandle::feed_rx
+#[derive(Clone, Copy)]
 pub struct CanInterfaceHandle {
-    inner: Box<CanInterfaceInner>,
+    inner: &'static CanInterfaceInner,
 }
 
 // Safety: the CanInterfaceHandle is only accessed from contexts where CSP
@@ -131,12 +136,14 @@ pub fn add_interface(
 ) -> crate::Result<CanInterfaceHandle> {
     let c_name = CString::new(name).map_err(|_| crate::CspError::InvalidArgument)?;
 
-    let inner = Box::new(CanInterfaceInner {
+    // Leak the inner state: libcsp will keep raw pointers into `c_iface`,
+    // `can_data` and the CString name for the rest of the process lifetime.
+    let inner: &'static CanInterfaceInner = Box::leak(Box::new(CanInterfaceInner {
         driver: spin::Mutex::new(Box::new(driver)),
         c_iface: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         can_data: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         _c_name: c_name,
-    });
+    }));
 
     unsafe {
         let can_data = inner.can_data.get();
@@ -146,11 +153,13 @@ pub fn add_interface(
         (*c_iface).name = inner._c_name.as_ptr();
         (*c_iface).addr = addr;
         // Store a pointer to inner as driver_data so the TX callback can find us.
-        (*c_iface).driver_data = &*inner as *const CanInterfaceInner as *mut c_void;
+        (*c_iface).driver_data = inner as *const CanInterfaceInner as *mut c_void;
         (*c_iface).interface_data = can_data as *mut c_void;
 
         let rc = sys::csp_can_add_interface(c_iface);
         if rc != 0 {
+            // The inner state is already leaked; that's fine for this
+            // run-forever model — registration just didn't happen.
             return Err(crate::CspError::DriverError);
         }
     }
@@ -197,6 +206,8 @@ impl CanInterfaceHandle {
 }
 
 /// C callback invoked by libcsp's CAN TX path. Forwards to the Rust CanDriver.
+///
+/// Catches Rust panics so unwinding never crosses the C frame.
 unsafe extern "C" fn can_tx_trampoline(
     driver_data: *mut c_void,
     id: u32,
@@ -208,8 +219,14 @@ unsafe extern "C" fn can_tx_trampoline(
     }
     let inner = unsafe { &*(driver_data as *const CanInterfaceInner) };
     let slice = unsafe { core::slice::from_raw_parts(data, dlc as usize) };
-    match inner.driver.lock().transmit(id, slice, dlc) {
-        Ok(()) => 0,
-        Err(()) => -1,
-    }
+
+    let mut rc = -1;
+    let rc_ref = &mut rc;
+    ffi_util::guard("can_tx_trampoline", move || {
+        *rc_ref = match inner.driver.lock().transmit(id, slice, dlc) {
+            Ok(()) => 0,
+            Err(()) => -1,
+        };
+    });
+    rc
 }

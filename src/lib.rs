@@ -107,6 +107,7 @@ pub mod can;
 mod connection;
 pub mod consts;
 mod error;
+mod ffi_util;
 pub mod init;
 pub mod interface;
 mod packet;
@@ -311,29 +312,33 @@ mod tests {
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use crate::CspConfig;
-    use std::sync::Mutex;
+    use crate::{CspConfig, CspNode};
+    use std::sync::{Mutex, OnceLock};
 
-    /// Global test lock that serialises CSP initialisation. libcsp keeps its
-    /// state in globals, so tests must not run in parallel.
+    /// Global test lock that serialises access to libcsp globals. libcsp keeps
+    /// its state in process-wide singletons, so tests must not run in
+    /// parallel — even though `init()` only happens once.
     pub static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Run a closure with an initialised CSP stack; the stack is torn down
-    /// when the closure returns.
-    pub fn with_csp_node<F: FnOnce(&crate::CspNode)>(f: F) {
-        // Recover from a poisoned lock so one panicking test doesn't
-        // cascade into the whole suite. Individual tests are expected to
-        // run single-threaded (cargo test --test-threads=1) since libcsp
-        // keeps global state.
+    /// One-shot CSP stack shared by every test. Init is now strictly
+    /// once-per-process (matching the production contract); we lazily build
+    /// the node the first time a test asks for it and reuse the clone
+    /// thereafter.
+    static TEST_NODE: OnceLock<CspNode> = OnceLock::new();
+
+    /// Run a closure with the (shared) initialised CSP stack.
+    pub fn with_csp_node<F: FnOnce(&CspNode)>(f: F) {
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let node = CspConfig::new()
-            .address(1)
-            .init()
-            .expect("failed to init CSP for tests");
+        let node = TEST_NODE.get_or_init(|| {
+            CspConfig::new()
+                .address(1)
+                .init()
+                .expect("failed to init CSP for tests")
+        });
 
-        f(&node);
+        f(node);
     }
 }

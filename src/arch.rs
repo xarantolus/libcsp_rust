@@ -826,7 +826,15 @@ macro_rules! export_arch {
             )
         }
 
-        // C String Functions - Required by libcsp's C code
+        // C string / PRNG fallbacks for bare-metal targets that don't link
+        // libc. On hosted targets (Linux/macOS/Windows) the system libc
+        // already provides these and `#[no_mangle]` would either collide at
+        // link time or shadow libc — see issue #18 in the safety review.
+        // Gate on `target_os = "none"` (the convention for thumb*-none-eabi
+        // / arm-none-eabi etc.) so the macro stays usable on hosts for
+        // tests, while still providing the symbols where they're actually
+        // needed.
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strncpy(
             dest: *mut ::core::ffi::c_char,
@@ -835,6 +843,7 @@ macro_rules! export_arch {
         ) -> *mut ::core::ffi::c_char {
             <$impl_type as $crate::CspArch>::strncpy(&$instance, dest, src, n)
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strcpy(
             dest: *mut ::core::ffi::c_char,
@@ -842,10 +851,12 @@ macro_rules! export_arch {
         ) -> *mut ::core::ffi::c_char {
             <$impl_type as $crate::CspArch>::strcpy(&$instance, dest, src)
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strnlen(s: *const ::core::ffi::c_char, maxlen: usize) -> usize {
             <$impl_type as $crate::CspArch>::strnlen(&$instance, s, maxlen)
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strncasecmp(
             s1: *const ::core::ffi::c_char,
@@ -854,6 +865,7 @@ macro_rules! export_arch {
         ) -> i32 {
             <$impl_type as $crate::CspArch>::strncasecmp(&$instance, s1, s2, n)
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strtok_r(
             s: *mut ::core::ffi::c_char,
@@ -866,6 +878,7 @@ macro_rules! export_arch {
         // when external-arch feature is enabled. It's linked automatically.
         // On POSIX platforms, the system libc sscanf is used.
 
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn strncmp(
             s1: *const ::core::ffi::c_char,
@@ -890,6 +903,7 @@ macro_rules! export_arch {
         // Additional C library stubs that may be needed by some platforms.
         // xorshift32 PRNG — libcsp uses this for RDP retransmit jitter, so any
         // deterministic pseudo-random sequence works.
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub extern "C" fn rand() -> i32 {
             static STATE: ::core::sync::atomic::AtomicU32 =
@@ -904,8 +918,10 @@ macro_rules! export_arch {
             STATE.store(s, ::core::sync::atomic::Ordering::Relaxed);
             (s & 0x7FFF_FFFF) as i32
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub extern "C" fn srand(_seed: u32) {}
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
             if seed.is_null() {
@@ -921,6 +937,7 @@ macro_rules! export_arch {
             unsafe { *seed = s };
             (s & 0x7FFF_FFFF) as i32
         }
+        #[cfg(target_os = "none")]
         #[no_mangle]
         pub extern "C" fn _embassy_time_schedule_wake(_at: u64) {}
     };

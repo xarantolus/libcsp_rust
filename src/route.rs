@@ -212,6 +212,14 @@ impl RouteEntry {
 /// Iterate over all entries in the routing table.
 ///
 /// Return `true` from the closure to continue iterating, or `false` to stop.
+///
+/// # Re-entrancy
+///
+/// libcsp's `csp_rtable_iterate` walks the table while holding any internal
+/// rtable lock; calling back into routing APIs (e.g. [`set_raw`], [`load`])
+/// from inside the closure would alias the `&mut F` we hand to the C shim and
+/// risk re-entrant locking. Treat the closure as **read-only with respect to
+/// the routing table**.
 pub fn iterate<F>(f: F)
 where
     F: FnMut(RouteEntry) -> bool,
@@ -224,7 +232,12 @@ where
         F: FnMut(RouteEntry) -> bool,
     {
         let f = &mut *(ctx as *mut F);
-        f(RouteEntry { inner: route })
+        let mut keep_going = false;
+        let kg = &mut keep_going;
+        crate::ffi_util::guard("rtable_iterate", move || {
+            *kg = f(RouteEntry { inner: route });
+        });
+        keep_going
     }
 
     let mut f_ref = f;

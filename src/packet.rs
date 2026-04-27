@@ -47,11 +47,11 @@ impl Packet {
             None
         } else {
             // Buffers returned by the pool may be reused and retain stale
-            // header bytes; clear length + id so callers see a clean packet.
-            unsafe {
-                (*ptr).length = 0;
-                (*ptr).id = core::mem::zeroed();
-            }
+            // header / scratch bytes (frame_begin, frame_length, rx_count, …).
+            // Zero the whole struct so a freshly-allocated packet never leaks
+            // state from the previous user, then leave the data union alone
+            // (callers fill it via `write` / `data_buf_mut`).
+            unsafe { core::ptr::write_bytes(ptr, 0, 1) };
             Some(Packet { inner: ptr })
         }
     }
@@ -65,10 +65,13 @@ impl Packet {
     /// Set the payload length.
     ///
     /// Must be called before sending to tell CSP how many bytes to transmit.
+    /// Clamped to [`BUFFER_SIZE`]; otherwise [`Self::data`] / [`Self::data_mut`]
+    /// would form an out-of-bounds slice from safe code.
     #[inline]
     pub fn set_length(&mut self, len: u16) {
+        let clamped = core::cmp::min(len as usize, BUFFER_SIZE) as u16;
         unsafe {
-            (*self.inner).length = len;
+            (*self.inner).length = clamped;
         }
     }
 
@@ -85,6 +88,14 @@ impl Packet {
     }
 
     /// Message priority from the id header.
+    ///
+    /// `pri` is a 2-bit field on the wire (0..=3) so values 4..=255 should be
+    /// impossible if libcsp filled in the id correctly. Any out-of-range
+    /// value indicates a corrupted packet or a bug somewhere upstream:
+    /// in debug builds we panic to surface it, in release builds we return
+    /// [`Priority::Norm`] to avoid taking down a flight node over a logging
+    /// glitch. Callers that care about the distinction should inspect
+    /// [`Self::id`] directly.
     pub fn priority(&self) -> Priority {
         let id = self.id();
         match id.pri {
@@ -156,13 +167,15 @@ impl Packet {
 
     /// Immutable view of the **used** payload (`[0..length()]`).
     pub fn data(&self) -> &[u8] {
-        let len = self.length() as usize;
+        // `set_length` already clamps, but the field is also writable from
+        // C code; re-clamp here defensively so this slice is always in-bounds.
+        let len = core::cmp::min(self.length() as usize, BUFFER_SIZE);
         unsafe { slice::from_raw_parts(self.data_ptr(), len) }
     }
 
     /// Mutable view of the **used** payload (`[0..length()]`).
     pub fn data_mut(&mut self) -> &mut [u8] {
-        let len = self.length() as usize;
+        let len = core::cmp::min(self.length() as usize, BUFFER_SIZE);
         unsafe { slice::from_raw_parts_mut(self.data_ptr(), len) }
     }
 
@@ -180,6 +193,11 @@ impl Packet {
         if bytes.len() > BUFFER_SIZE {
             return Err(bytes.len());
         }
+        // BUFFER_SIZE is a compile-time constant. Today it defaults to 256, but
+        // it is overridable via `LIBCSP_BUFFER_SIZE`; assert the cast can't
+        // truncate so a future bump past u16::MAX trips here in debug builds
+        // instead of silently losing the high bits.
+        debug_assert!(bytes.len() <= u16::MAX as usize);
         self.data_buf_mut()[..bytes.len()].copy_from_slice(bytes);
         self.set_length(bytes.len() as u16);
         Ok(())

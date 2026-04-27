@@ -1,6 +1,27 @@
 use crate::arch::CspArch;
 use core::ffi::{c_char, c_void};
 
+use std::collections::VecDeque;
+use std::sync::{Condvar, Mutex};
+
+/// Single canonical layout for the test backend's queue handle.
+///
+/// The previous implementation redeclared `TestQueue` inside each
+/// `queue_create` / `queue_enqueue` / `queue_dequeue` / `queue_size` method.
+/// Locally-defined nominal types in different functions are *distinct* even
+/// when structurally identical, and `repr(Rust)` makes no layout guarantees
+/// across distinct types — so the cross-method casts were technically UB.
+/// Hoisting it once here, with `#[repr(C)]`, makes the layout an FFI-stable
+/// contract.
+#[repr(C)]
+struct TestQueue {
+    data: Mutex<VecDeque<Vec<u8>>>,
+    not_empty: Condvar,
+    not_full: Condvar,
+    max_len: usize,
+    item_size: usize,
+}
+
 pub struct TestArch;
 
 // Allow clippy::not_unsafe_ptr_arg_deref because:
@@ -28,6 +49,9 @@ unsafe impl CspArch for TestArch {
     fn bin_sem_create(&self) -> *mut c_void {
         unsafe {
             let sem = libc::malloc(core::mem::size_of::<libc::sem_t>()) as *mut libc::sem_t;
+            if sem.is_null() {
+                return core::ptr::null_mut();
+            }
             if libc::sem_init(sem, 0, 1) == 0 {
                 sem as *mut c_void
             } else {
@@ -70,6 +94,9 @@ unsafe impl CspArch for TestArch {
         unsafe {
             let mutex = libc::malloc(core::mem::size_of::<libc::pthread_mutex_t>())
                 as *mut libc::pthread_mutex_t;
+            if mutex.is_null() {
+                return core::ptr::null_mut();
+            }
             if libc::pthread_mutex_init(mutex, core::ptr::null()) == 0 {
                 mutex as *mut c_void
             } else {
@@ -95,18 +122,6 @@ unsafe impl CspArch for TestArch {
     fn queue_create(&self, length: usize, item_size: usize) -> *mut c_void {
         // A simple queue implementation for testing using std primitives.
         // In a real system, this would be backed by an RTOS queue.
-        use std::collections::VecDeque;
-        use std::sync::{Condvar, Mutex};
-
-        #[allow(dead_code)]
-        struct TestQueue {
-            data: Mutex<VecDeque<Vec<u8>>>,
-            not_empty: Condvar,
-            not_full: Condvar,
-            max_len: usize,
-            item_size: usize,
-        }
-
         let q = Box::new(TestQueue {
             data: Mutex::new(VecDeque::with_capacity(length)),
             not_empty: Condvar::new(),
@@ -119,19 +134,7 @@ unsafe impl CspArch for TestArch {
 
     fn queue_remove(&self, queue: *mut c_void) {
         if !queue.is_null() {
-            use std::collections::VecDeque;
-            use std::sync::{Condvar, Mutex};
-
-            #[allow(dead_code)]
-            struct TestQueue {
-                data: Mutex<VecDeque<Vec<u8>>>,
-                not_empty: Condvar,
-                not_full: Condvar,
-                max_len: usize,
-                item_size: usize,
-            }
-
-            // Safety: We created this pointer in queue_create, so we know the type
+            // Safety: We created this pointer in queue_create.
             unsafe {
                 let _ = Box::from_raw(queue as *mut TestQueue);
             }
@@ -139,18 +142,7 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_enqueue(&self, queue: *mut c_void, item: *const c_void, timeout: u32) -> bool {
-        use std::collections::VecDeque;
-        use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
-
-        #[allow(dead_code)]
-        struct TestQueue {
-            data: Mutex<VecDeque<Vec<u8>>>,
-            not_empty: Condvar,
-            not_full: Condvar,
-            max_len: usize,
-            item_size: usize,
-        }
 
         if queue.is_null() || item.is_null() {
             return false;
@@ -199,18 +191,7 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_dequeue(&self, queue: *mut c_void, item: *mut c_void, timeout: u32) -> bool {
-        use std::collections::VecDeque;
-        use std::sync::{Condvar, Mutex};
         use std::time::{Duration, Instant};
-
-        #[allow(dead_code)]
-        struct TestQueue {
-            data: Mutex<VecDeque<Vec<u8>>>,
-            not_empty: Condvar,
-            not_full: Condvar,
-            max_len: usize,
-            item_size: usize,
-        }
 
         if queue.is_null() || item.is_null() {
             return false;
@@ -263,18 +244,6 @@ unsafe impl CspArch for TestArch {
     }
 
     fn queue_size(&self, queue: *mut c_void) -> usize {
-        use std::collections::VecDeque;
-        use std::sync::{Condvar, Mutex};
-
-        #[allow(dead_code)]
-        struct TestQueue {
-            data: Mutex<VecDeque<Vec<u8>>>,
-            not_empty: Condvar,
-            not_full: Condvar,
-            max_len: usize,
-            item_size: usize,
-        }
-
         if queue.is_null() {
             return 0;
         }

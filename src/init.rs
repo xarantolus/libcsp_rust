@@ -290,11 +290,13 @@ struct CspNodeInner {
     _config: CspConfig,
 }
 
-impl Drop for CspNodeInner {
-    fn drop(&mut self) {
-        INITIALIZED.store(false, Ordering::SeqCst);
-    }
-}
+// Intentionally **no** `Drop` impl: libcsp has no symmetric `csp_deinit`,
+// the architecture impls heap-allocate queues / mutexes / semaphores that are
+// never freed by the C side, and the router thread (if any) holds a clone of
+// `CspNode` and runs forever. The crate's contract is "init once, run
+// forever"; resetting `INITIALIZED` would let a second `init()` corrupt
+// libcsp's state by re-running `csp_buffer_init` / `csp_conn_init` /
+// `csp_qfifo_init` over the live globals.
 
 impl CspNode {
     /// Return the CSP address of this node.
@@ -391,7 +393,7 @@ impl CspNode {
     /// Perform a full request/reply transaction (new connection each call).
     ///
     /// `in_len` — expected reply length; `-1` for unknown, `0` for no reply.
-    /// Returns `Ok(reply_len)` on success.
+    /// Returns `Ok(reply_bytes)` on success (always `0` when `in_len == 0`).
     #[allow(clippy::too_many_arguments)]
     pub fn transaction(
         &self,
@@ -419,10 +421,10 @@ impl CspNode {
                 opts,
             )
         };
-        if ret > 0 || (ret == 1 && in_len == 0) {
-            Ok(ret as usize)
-        } else {
-            Err(crate::CspError::TransmitFailed)
+        match (ret, in_len) {
+            (1, 0) | (0, 0) => Ok(0),
+            (n, _) if n > 0 => Ok(n as usize),
+            _ => Err(crate::CspError::TransmitFailed),
         }
     }
 
@@ -564,6 +566,12 @@ impl CspNode {
     // ── Drivers ───────────────────────────────────────────────────────────────
 
     /// Open a Linux SocketCAN interface and add it to CSP.
+    ///
+    /// Matches libcsp's "register once, run forever" lifecycle: the returned
+    /// `csp_iface_t` is owned by libcsp and lives until process exit, and the
+    /// device-name allocation is leaked into static memory so it can never
+    /// dangle behind libcsp's back even though the C call only borrows it
+    /// during the open path.
     #[cfg(feature = "socketcan")]
     pub fn add_interface_socketcan(
         &self,
@@ -571,7 +579,11 @@ impl CspNode {
         bitrate: i32,
         promisc: bool,
     ) -> Result<*mut sys::csp_iface_t> {
-        let c_device = CString::new(device).map_err(|_| crate::CspError::InvalidArgument)?;
+        let c_device: &'static core::ffi::CStr = alloc::boxed::Box::leak(
+            CString::new(device)
+                .map_err(|_| crate::CspError::InvalidArgument)?
+                .into_boxed_c_str(),
+        );
         let mut iface_ptr: *mut sys::csp_iface_t = core::ptr::null_mut();
 
         csp_result(unsafe {
