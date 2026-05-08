@@ -160,24 +160,40 @@ impl Connection {
 
     /// Send a large blob of data over this connection using SFP.
     ///
-    /// Data is chopped into chunks of at most `mtu` bytes.
+    /// Data is chopped into chunks of at most `mtu` bytes. The post-malloc
+    /// upstream API takes a user-provided read callback; we adapt by handing
+    /// the slice in via `data` and copying out at the requested offset.
     pub fn sfp_send(&self, data: &[u8], mtu: u32, timeout: u32) -> Result<()> {
-        extern "C" {
-            fn memcpy(
-                dest: *mut core::ffi::c_void,
-                src: *const core::ffi::c_void,
-                n: usize,
-            ) -> *mut core::ffi::c_void;
+        #[repr(C)]
+        struct SliceCtx {
+            ptr: *const u8,
+            len: u32,
         }
+        unsafe extern "C" fn read_cb(
+            buffer: *mut u8,
+            size: u32,
+            offset: u32,
+            data: *mut core::ffi::c_void,
+        ) -> core::ffi::c_int {
+            let ctx = unsafe { &*(data as *const SliceCtx) };
+            if offset.saturating_add(size) > ctx.len {
+                return sys::CSP_ERR_INVAL as i32;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(ctx.ptr.add(offset as usize), buffer, size as usize);
+            }
+            sys::CSP_ERR_NONE as i32
+        }
+        let ctx = SliceCtx {
+            ptr: data.as_ptr(),
+            len: data.len() as u32,
+        };
+        let user = sys::csp_sfp_read_t {
+            data: &ctx as *const _ as *mut core::ffi::c_void,
+            read: Some(read_cb),
+        };
         let ret = unsafe {
-            sys::csp_sfp_send_own_memcpy(
-                self.inner,
-                data.as_ptr() as *const core::ffi::c_void,
-                data.len() as u32,
-                mtu,
-                timeout,
-                Some(memcpy),
-            )
+            sys::csp_sfp_send(self.inner, &user, data.len() as u32, mtu, timeout)
         };
         if ret == (sys::CSP_ERR_NONE as i32) {
             Ok(())
@@ -188,33 +204,51 @@ impl Connection {
 
     /// Receive a large blob of data over this connection using SFP.
     ///
-    /// Returns the received data as a `Vec<u8>`. The buffer is allocated by
-    /// libcsp and copied into Rust-owned memory before release.
+    /// Returns the received data as a `Vec<u8>`. The post-malloc upstream
+    /// API delivers data via a write callback; we accumulate into a Vec
+    /// sized on the first call from `totalsz`.
     pub fn sfp_recv(&self, timeout: u32) -> Result<alloc::vec::Vec<u8>> {
-        let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-        let mut data_size: core::ffi::c_int = 0;
-        let ret = unsafe {
-            sys::csp_sfp_recv_fp(
-                self.inner,
-                &mut data_ptr,
-                &mut data_size,
-                timeout,
-                core::ptr::null_mut(),
-            )
-        };
-
-        if ret == (sys::CSP_ERR_NONE as i32) && !data_ptr.is_null() {
-            // Safety: `data_ptr` was allocated by libcsp and `data_size` is valid.
-            let slice =
-                unsafe { core::slice::from_raw_parts(data_ptr as *const u8, data_size as usize) };
-            let vec = slice.to_vec();
-            // Free the sfp-internal allocation through libc since libcsp uses
-            // the system allocator (posix) / csp_malloc shim (external-arch).
-            extern "C" {
-                fn free(ptr: *mut core::ffi::c_void);
+        use alloc::vec::Vec;
+        struct VecCtx {
+            buf: Vec<u8>,
+        }
+        unsafe extern "C" fn write_cb(
+            buffer: *const u8,
+            size: u32,
+            offset: u32,
+            totalsz: u32,
+            data: *mut core::ffi::c_void,
+        ) -> core::ffi::c_int {
+            let ctx = unsafe { &mut *(data as *mut VecCtx) };
+            if ctx.buf.is_empty() && totalsz > 0 {
+                ctx.buf.resize(totalsz as usize, 0);
             }
-            unsafe { free(data_ptr) };
-            Ok(vec)
+            let end = match (offset as usize).checked_add(size as usize) {
+                Some(e) => e,
+                None => return sys::CSP_ERR_INVAL as i32,
+            };
+            if end > ctx.buf.len() {
+                return sys::CSP_ERR_INVAL as i32;
+            }
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buffer,
+                    ctx.buf.as_mut_ptr().add(offset as usize),
+                    size as usize,
+                );
+            }
+            sys::CSP_ERR_NONE as i32
+        }
+        let mut ctx = VecCtx { buf: Vec::new() };
+        let user = sys::csp_sfp_recv_t {
+            data: &mut ctx as *mut _ as *mut core::ffi::c_void,
+            write: Some(write_cb),
+        };
+        let ret = unsafe {
+            sys::csp_sfp_recv_fp(self.inner, &user, timeout, core::ptr::null_mut())
+        };
+        if ret == (sys::CSP_ERR_NONE as i32) {
+            Ok(ctx.buf)
         } else {
             Err(CspError::from(ret))
         }

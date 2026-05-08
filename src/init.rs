@@ -234,6 +234,7 @@ static mut SELF_IFACE: sys::csp_iface_t = sys::csp_iface_t {
     interface_data: core::ptr::null_mut(),
     driver_data: core::ptr::null_mut(),
     nexthop: None,
+    add_alias: None,
     is_default: 0,
     tx: 0,
     rx: 0,
