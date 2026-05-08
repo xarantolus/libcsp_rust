@@ -46,7 +46,7 @@ unsafe impl Send for InterfaceHandle {}
 unsafe impl Sync for InterfaceHandle {}
 
 struct InterfaceState {
-    user_iface: spin::Mutex<Box<dyn CspInterface>>,
+    user_iface: spin::mutex::Mutex<Box<dyn CspInterface>, crate::arch::ArchRelax>,
     // Wrapped in UnsafeCell because C library mutates it (counters, next pointers)
     // while we hold a shared reference.
     c_iface: UnsafeCell<sys::csp_iface_t>,
@@ -74,7 +74,7 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
     // (and `c_iface.name` keeps a pointer into `_c_name`) for as long as the
     // process lives.
     let state: &'static InterfaceState = Box::leak(Box::new(InterfaceState {
-        user_iface: spin::Mutex::new(Box::new(interface)),
+        user_iface: spin::mutex::Mutex::new(Box::new(interface)),
         c_iface: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         _c_name: c_name,
     }));

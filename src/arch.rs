@@ -2,6 +2,26 @@
 
 use core::ffi::{c_char, c_void};
 
+/// `spin::RelaxStrategy` that delegates to [`CspArch::relax`] via the C
+/// `csp_relax` symbol exported by [`export_arch!`]. Used as the second
+/// type parameter of every internal `spin::Mutex`, so contention on a
+/// driver/interface lock yields to the OS scheduler when the arch
+/// provides a non-default `relax` (otherwise it's identical to
+/// `spin::relax::Spin`). With `external-arch` off, `csp_relax` comes
+/// from the bundled host arch; on no_std with `external-arch` on, the
+/// caller's [`export_arch!`]-emitted symbol is linked.
+pub struct ArchRelax;
+
+impl spin::RelaxStrategy for ArchRelax {
+    #[inline(always)]
+    fn relax() {
+        unsafe extern "C" {
+            fn csp_relax();
+        }
+        unsafe { csp_relax() }
+    }
+}
+
 /// Trait for implementing OS-specific primitives for libcsp.
 ///
 /// ## Minimal Required Implementation
@@ -302,6 +322,17 @@ pub unsafe trait CspArch: Send + Sync {
     /// On POSIX systems, use `nanosleep()`.
     fn sleep_ms(&self, _ms: u32) {}
 
+    /// Yield/relax the CPU during spin-lock contention.
+    ///
+    /// **Optional.** Called by the internal `spin::Mutex` wrappers around
+    /// driver/interface state when the lock is held by another thread.
+    /// The default no-op preserves the historical pure-spin behaviour;
+    /// override with a scheduler yield (e.g. `sched_yield`, FreeRTOS
+    /// `taskYIELD`, a 0-tick sleep) on preemptive multi-threaded targets
+    /// to avoid priority inversion when a high-priority caller spins on
+    /// a lock held by a preempted lower-priority thread.
+    fn relax(&self) {}
+
     // ── C String Functions (OPTIONAL) ───────────────────────────────────────
     // These are required by libcsp's C code but may not be available in no_std environments.
     // Default implementations are provided via tinyrlibc (when external-arch is enabled)
@@ -510,6 +541,10 @@ macro_rules! export_arch {
         #[no_mangle]
         pub unsafe extern "C" fn csp_sleep_ms(ms: u32) {
             <$impl_type as $crate::CspArch>::sleep_ms(&$instance, ms)
+        }
+        #[no_mangle]
+        pub unsafe extern "C" fn csp_relax() {
+            <$impl_type as $crate::CspArch>::relax(&$instance)
         }
 
         // libcsp v2.1 convention: CSP_SEMAPHORE_OK = 0, _ERROR = -1.

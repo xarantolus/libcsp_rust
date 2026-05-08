@@ -106,7 +106,7 @@ unsafe impl Send for CanInterfaceHandle {}
 unsafe impl Sync for CanInterfaceHandle {}
 
 struct CanInterfaceInner {
-    driver: spin::Mutex<Box<dyn CanDriver>>,
+    driver: spin::mutex::Mutex<Box<dyn CanDriver>, crate::arch::ArchRelax>,
     c_iface: UnsafeCell<sys::csp_iface_t>,
     can_data: UnsafeCell<sys::csp_can_interface_data_t>,
     _c_name: CString,
@@ -139,7 +139,7 @@ pub fn add_interface(
     // Leak the inner state: libcsp will keep raw pointers into `c_iface`,
     // `can_data` and the CString name for the rest of the process lifetime.
     let inner: &'static CanInterfaceInner = Box::leak(Box::new(CanInterfaceInner {
-        driver: spin::Mutex::new(Box::new(driver)),
+        driver: spin::mutex::Mutex::new(Box::new(driver)),
         c_iface: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         can_data: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         _c_name: c_name,
