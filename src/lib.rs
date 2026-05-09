@@ -188,13 +188,15 @@ pub mod socket_opts {
     pub const CRC32_REQ: u32 = sys::CSP_SO_CRC32REQ;
     pub const CRC32_PROHIB: u32 = sys::CSP_SO_CRC32PROHIB;
     pub const CONN_LESS: u32 = sys::CSP_SO_CONN_LESS;
+    /// Reuse the incoming packet's flags on `csp_sendto_reply`.
+    pub const SAME: u32 = sys::CSP_SO_SAME;
 }
 
 /// Connection options aliases (`CSP_O_*`).
 pub mod conn_opts {
     pub use super::socket_opts::{
         CRC32_PROHIB as NOCRC32, CRC32_REQ as CRC32, HMAC_PROHIB as NOHMAC, HMAC_REQ as HMAC, NONE,
-        RDP_PROHIB as NORDP, RDP_REQ as RDP,
+        RDP_PROHIB as NORDP, RDP_REQ as RDP, SAME,
     };
 }
 
