@@ -477,9 +477,7 @@ fn compile_libcsp(
         // default: sched_yield() on posix, no-op elsewhere.
         let relax_src = gen_include_dir.join("csp_relax_default.c");
         let relax_body = match target_os.as_str() {
-            "linux" | "macos" => {
-                "#include <sched.h>\nvoid csp_relax(void) { sched_yield(); }\n"
-            }
+            "linux" | "macos" => "#include <sched.h>\nvoid csp_relax(void) { sched_yield(); }\n",
             _ => "void csp_relax(void) { }\n",
         };
         fs::write(&relax_src, relax_body).expect("failed to write csp_relax_default.c");

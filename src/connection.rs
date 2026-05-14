@@ -192,9 +192,7 @@ impl Connection {
             data: &ctx as *const _ as *mut core::ffi::c_void,
             read: Some(read_cb),
         };
-        let ret = unsafe {
-            sys::csp_sfp_send(self.inner, &user, data.len() as u32, mtu, timeout)
-        };
+        let ret = unsafe { sys::csp_sfp_send(self.inner, &user, data.len() as u32, mtu, timeout) };
         if ret == (sys::CSP_ERR_NONE as i32) {
             Ok(())
         } else {
@@ -244,9 +242,8 @@ impl Connection {
             data: &mut ctx as *mut _ as *mut core::ffi::c_void,
             write: Some(write_cb),
         };
-        let ret = unsafe {
-            sys::csp_sfp_recv_fp(self.inner, &user, timeout, core::ptr::null_mut())
-        };
+        let ret =
+            unsafe { sys::csp_sfp_recv_fp(self.inner, &user, timeout, core::ptr::null_mut()) };
         if ret == (sys::CSP_ERR_NONE as i32) {
             Ok(ctx.buf)
         } else {
