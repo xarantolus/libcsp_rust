@@ -177,7 +177,7 @@ impl Connection {
         ) -> core::ffi::c_int {
             let ctx = unsafe { &*(data as *const SliceCtx) };
             if offset.saturating_add(size) > ctx.len {
-                return sys::CSP_ERR_INVAL as i32;
+                return sys::CSP_ERR_INVAL;
             }
             unsafe {
                 core::ptr::copy_nonoverlapping(ctx.ptr.add(offset as usize), buffer, size as usize);
@@ -225,10 +225,10 @@ impl Connection {
             }
             let end = match (offset as usize).checked_add(size as usize) {
                 Some(e) => e,
-                None => return sys::CSP_ERR_INVAL as i32,
+                None => return sys::CSP_ERR_INVAL,
             };
             if end > ctx.buf.len() {
-                return sys::CSP_ERR_INVAL as i32;
+                return sys::CSP_ERR_INVAL;
             }
             unsafe {
                 core::ptr::copy_nonoverlapping(
