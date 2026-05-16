@@ -176,7 +176,19 @@ impl CanInterfaceHandle {
     /// - `data`: frame payload
     /// - `dlc`: data length code
     pub fn feed_rx(&self, id: u32, data: &[u8], dlc: u8) {
+        self.feed_rx_ts(id, data, dlc, 0);
+    }
+
+    /// Like [`feed_rx`](Self::feed_rx), but records `timestamp` so a
+    /// reassembled packet carries its *first* (BEGIN) fragment's value
+    /// on [`Packet::hw_timestamp_rx`]; later fragments' values are
+    /// unused. `timestamp` is opaque (caller defines epoch/units);
+    /// [`feed_rx`](Self::feed_rx) forwards `0`.
+    pub fn feed_rx_ts(&self, id: u32, data: &[u8], dlc: u8, timestamp: u64) {
         unsafe {
+            // Set before csp_can_rx; only read on BEGIN. Race-free for
+            // the usual single-threaded feeder.
+            sys::csp_can_rx_set_timestamp(self.inner.c_iface.get(), timestamp);
             sys::csp_can_rx(
                 self.inner.c_iface.get(),
                 id,
