@@ -108,6 +108,7 @@ mod connection;
 pub mod consts;
 mod error;
 mod ffi_util;
+pub mod iflist;
 pub mod init;
 pub mod interface;
 mod packet;
