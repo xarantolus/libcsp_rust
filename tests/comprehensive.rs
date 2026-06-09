@@ -122,6 +122,71 @@ fn test_sfp_large_transfer() {
 }
 
 #[test]
+fn test_sfp_progress_callbacks() {
+    let _lock = lock_csp();
+    let node = ensure_init();
+
+    let data_to_send = vec![0x5Au8; 1000]; // > MTU, so several fragments
+    let total = data_to_send.len() as u32;
+    let data_clone = data_to_send.clone();
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    let server_thread = thread::spawn(move || {
+        let mut sock = Socket::new(socket_opts::NONE);
+        sock.bind(18).expect("Failed to bind");
+        sock.listen(5).expect("Failed to listen");
+        ready_tx.send(()).expect("Failed to signal ready");
+
+        if let Some(conn) = sock.accept(5000) {
+            // (received, total, prefix_len) per fragment.
+            let mut ticks: Vec<(u32, u32, usize)> = Vec::new();
+            let received = conn
+                .sfp_recv_with_progress(5000, |recv, tot, prefix| {
+                    ticks.push((recv, tot, prefix.len()));
+                })
+                .expect("SFP receive failed");
+            assert_eq!(received, data_clone, "content mismatch");
+            assert!(ticks.len() > 1, "expected multiple recv fragments");
+
+            let mut last = 0;
+            for (recv, tot, plen) in &ticks {
+                assert_eq!(*tot, total, "recv total mismatch");
+                assert_eq!(*recv as usize, *plen, "prefix len must equal received");
+                assert!(*recv >= last, "recv count must be monotonic");
+                last = *recv;
+            }
+            assert_eq!(last, total, "recv did not reach the full size");
+        } else {
+            panic!("Server failed to accept SFP connection");
+        }
+    });
+
+    ready_rx.recv().expect("Server failed to start");
+
+    let conn = node
+        .connect(Priority::Norm, 1, 18, 1000, conn_opts::NONE)
+        .expect("SFP connect failed");
+
+    let mut sent_ticks: Vec<(u32, u32)> = Vec::new();
+    conn.sfp_send_with_progress(&data_to_send, 200, 5000, |sent, tot| {
+        sent_ticks.push((sent, tot));
+    })
+    .expect("SFP send failed");
+
+    assert!(sent_ticks.len() > 1, "expected multiple send fragments");
+    let mut last = 0;
+    for (sent, tot) in &sent_ticks {
+        assert_eq!(*tot, total, "send total mismatch");
+        assert!(*sent >= last, "send count must be monotonic");
+        last = *sent;
+    }
+    assert_eq!(last, total, "send did not reach the full size");
+
+    server_thread.join().expect("Server thread panicked");
+}
+
+#[test]
 fn test_transaction_oneshot() {
     let _lock = lock_csp();
     let node = ensure_init();
