@@ -211,7 +211,11 @@ fn test_sfp_send_abort() {
         })
         .expect_err("aborted send should return an error");
 
-    assert_eq!(err, CspError::Aborted, "abort should map to CspError::Aborted");
+    assert_eq!(
+        err,
+        CspError::Aborted,
+        "abort should map to CspError::Aborted"
+    );
     assert_eq!(fragments, 1, "send should stop after the first fragment");
 }
 

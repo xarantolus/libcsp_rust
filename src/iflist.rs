@@ -78,7 +78,9 @@ impl IfaceRef {
 
 impl core::fmt::Debug for IfaceRef {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("IfaceRef").field("name", &self.name()).finish()
+        f.debug_struct("IfaceRef")
+            .field("name", &self.name())
+            .finish()
     }
 }
 
