@@ -1,4 +1,6 @@
-use libcsp::{conn_opts, ports, socket_opts, CspConfig, CspNode, Packet, Priority, Socket};
+use libcsp::{
+    conn_opts, ports, socket_opts, CspConfig, CspError, CspNode, Packet, Priority, Socket,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
@@ -144,6 +146,7 @@ fn test_sfp_progress_callbacks() {
             let received = conn
                 .sfp_recv_with_progress(5000, |recv, tot, prefix| {
                     ticks.push((recv, tot, prefix.len()));
+                    true
                 })
                 .expect("SFP receive failed");
             assert_eq!(received, data_clone, "content mismatch");
@@ -171,6 +174,7 @@ fn test_sfp_progress_callbacks() {
     let mut sent_ticks: Vec<(u32, u32)> = Vec::new();
     conn.sfp_send_with_progress(&data_to_send, 200, 5000, |sent, tot| {
         sent_ticks.push((sent, tot));
+        true
     })
     .expect("SFP send failed");
 
@@ -184,6 +188,31 @@ fn test_sfp_progress_callbacks() {
     assert_eq!(last, total, "send did not reach the full size");
 
     server_thread.join().expect("Server thread panicked");
+}
+
+#[test]
+fn test_sfp_send_abort() {
+    let _lock = lock_csp();
+    let node = ensure_init();
+
+    // No receiver: over loopback the unrouted fragments are simply freed. We
+    // only care that returning `false` from the progress callback stops the
+    // send after exactly one fragment with CspError::Aborted.
+    let conn = node
+        .connect(Priority::Norm, 1, 19, 1000, conn_opts::NONE)
+        .expect("SFP connect failed");
+
+    let data = vec![0x33u8; 1000]; // > MTU, would be several fragments
+    let mut fragments = 0u32;
+    let err = conn
+        .sfp_send_with_progress(&data, 200, 1000, |_, _| {
+            fragments += 1;
+            false // abort immediately
+        })
+        .expect_err("aborted send should return an error");
+
+    assert_eq!(err, CspError::Aborted, "abort should map to CspError::Aborted");
+    assert_eq!(fragments, 1, "send should stop after the first fragment");
 }
 
 #[test]

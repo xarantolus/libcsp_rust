@@ -164,16 +164,18 @@ impl Connection {
     /// upstream API takes a user-provided read callback; we adapt by handing
     /// the slice in via `data` and copying out at the requested offset.
     pub fn sfp_send(&self, data: &[u8], mtu: u32, timeout: u32) -> Result<()> {
-        self.sfp_send_with_progress(data, mtu, timeout, |_, _| {})
+        self.sfp_send_with_progress(data, mtu, timeout, |_, _| true)
     }
 
     /// Send a large blob of data over this connection using SFP, reporting
     /// progress as each fragment is handed to the transmit path.
     ///
-    /// `on_progress(sent, total)` is invoked once per fragment, where `sent`
-    /// is the cumulative number of bytes read out so far (a multiple of `mtu`
-    /// except for the final fragment) and `total` is the full transfer size
-    /// (`data.len()`, known up front). It fires synchronously on the calling
+    /// `on_progress(sent, total) -> bool` is invoked once per fragment, where
+    /// `sent` is the cumulative number of bytes read out so far (a multiple of
+    /// `mtu` except for the final fragment) and `total` is the full transfer
+    /// size (`data.len()`, known up front). Returning `false` aborts the
+    /// transfer before the next fragment ([`CspError::Aborted`]) — the hook for
+    /// cancelling an in-flight send. It fires synchronously on the calling
     /// thread between fragments, so it must not block; over an RDP connection
     /// `csp_sfp_send` can stall on a full window, pausing then resuming the
     /// reported `sent` (it never decreases).
@@ -185,14 +187,14 @@ impl Connection {
         on_progress: F,
     ) -> Result<()>
     where
-        F: FnMut(u32, u32),
+        F: FnMut(u32, u32) -> bool,
     {
         struct SendCtx<F> {
             ptr: *const u8,
             len: u32,
             progress: F,
         }
-        unsafe extern "C" fn read_cb<F: FnMut(u32, u32)>(
+        unsafe extern "C" fn read_cb<F: FnMut(u32, u32) -> bool>(
             buffer: *mut u8,
             size: u32,
             offset: u32,
@@ -206,7 +208,9 @@ impl Connection {
             unsafe {
                 core::ptr::copy_nonoverlapping(ctx.ptr.add(offset as usize), buffer, size as usize);
             }
-            (ctx.progress)(end, ctx.len);
+            if !(ctx.progress)(end, ctx.len) {
+                return crate::error::CSP_ERR_ABORTED;
+            }
             sys::CSP_ERR_NONE as i32
         }
         let mut ctx = SendCtx {
@@ -232,16 +236,18 @@ impl Connection {
     /// API delivers data via a write callback; we accumulate into a Vec
     /// sized on the first call from `totalsz`.
     pub fn sfp_recv(&self, timeout: u32) -> Result<alloc::vec::Vec<u8>> {
-        self.sfp_recv_with_progress(timeout, |_, _, _| {})
+        self.sfp_recv_with_progress(timeout, |_, _, _| true)
     }
 
     /// Receive a large blob of data over this connection using SFP, reporting
     /// progress as each fragment arrives.
     ///
-    /// `on_progress(received, total, prefix)` is invoked once per in-order
-    /// fragment: `received` is the cumulative byte count, `total` is the full
-    /// transfer size (from the SFP header, valid from the first fragment), and
-    /// `prefix` is the contiguous bytes received so far (`&buf[..received]`).
+    /// `on_progress(received, total, prefix) -> bool` is invoked once per
+    /// in-order fragment: `received` is the cumulative byte count, `total` is
+    /// the full transfer size (from the SFP header, valid from the first
+    /// fragment), and `prefix` is the contiguous bytes received so far
+    /// (`&buf[..received]`). Returning `false` aborts the receive
+    /// ([`CspError::Aborted`]) — the hook for cancelling an in-flight transfer.
     /// It fires synchronously on the calling thread, so it must not block.
     /// Over RDP, fragments are still delivered in order, so `received` is
     /// monotonic and reflects in-order delivered bytes.
@@ -251,14 +257,14 @@ impl Connection {
         on_progress: F,
     ) -> Result<alloc::vec::Vec<u8>>
     where
-        F: FnMut(u32, u32, &[u8]),
+        F: FnMut(u32, u32, &[u8]) -> bool,
     {
         use alloc::vec::Vec;
         struct VecCtx<F> {
             buf: Vec<u8>,
             progress: F,
         }
-        unsafe extern "C" fn write_cb<F: FnMut(u32, u32, &[u8])>(
+        unsafe extern "C" fn write_cb<F: FnMut(u32, u32, &[u8]) -> bool>(
             buffer: *const u8,
             size: u32,
             offset: u32,
@@ -283,7 +289,9 @@ impl Connection {
                     size as usize,
                 );
             }
-            (ctx.progress)(end as u32, totalsz, &ctx.buf[..end]);
+            if !(ctx.progress)(end as u32, totalsz, &ctx.buf[..end]) {
+                return crate::error::CSP_ERR_ABORTED;
+            }
             sys::CSP_ERR_NONE as i32
         }
         let mut ctx = VecCtx {

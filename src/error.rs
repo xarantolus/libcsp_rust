@@ -15,6 +15,10 @@ use core::fmt;
 
 use crate::sys;
 
+/// Sentinel returned by an SFP progress callback to abort the transfer. Outside
+/// the libcsp `CSP_ERR_*` range so it round-trips to [`CspError::Aborted`].
+pub const CSP_ERR_ABORTED: i32 = -200;
+
 /// All error codes returned by libcsp functions.
 ///
 /// Integer values are taken verbatim from `include/csp/csp_error.h`.
@@ -52,6 +56,8 @@ pub enum CspError {
     SfpError,
     /// Function not implemented (`CSP_ERR_NOSYS = -38`).
     NotImplemented,
+    /// An SFP transfer was aborted by its progress callback ([`CSP_ERR_ABORTED`]).
+    Aborted,
     /// A CspNode has already been initialized in this process.
     AlreadyInitialized,
     /// An error code not covered by the variants above.
@@ -81,6 +87,7 @@ impl CspError {
             sys::CSP_ERR_CRC32 => CspError::Crc32Failed,
             sys::CSP_ERR_SFP => CspError::SfpError,
             sys::CSP_ERR_NOSYS => CspError::NotImplemented,
+            CSP_ERR_ABORTED => CspError::Aborted,
             other => CspError::Other(other),
         }
     }
@@ -111,6 +118,7 @@ impl fmt::Display for CspError {
             CspError::Crc32Failed => write!(f, "CRC32 check failed"),
             CspError::SfpError => write!(f, "SFP protocol error"),
             CspError::NotImplemented => write!(f, "function not implemented"),
+            CspError::Aborted => write!(f, "transfer aborted by caller"),
             CspError::AlreadyInitialized => write!(f, "CSP is already initialized"),
             CspError::Other(code) => write!(f, "libcsp error code {code}"),
         }
@@ -145,6 +153,7 @@ mod tests {
         assert_eq!(CspError::from_code(-3), CspError::TimedOut);
         assert_eq!(CspError::from_code(-100), CspError::HmacFailed);
         assert_eq!(CspError::from_code(-103), CspError::SfpError);
+        assert_eq!(CspError::from_code(CSP_ERR_ABORTED), CspError::Aborted);
         assert_eq!(CspError::from_code(-999), CspError::Other(-999));
     }
 
