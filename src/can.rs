@@ -179,21 +179,20 @@ impl CanInterfaceHandle {
         self.feed_rx_ts(id, data, dlc, 0);
     }
 
-    /// Like [`feed_rx`](Self::feed_rx), but records `timestamp` so a
-    /// reassembled packet carries its *first* (BEGIN) fragment's value
-    /// on [`Packet::hw_timestamp_rx`]; later fragments' values are
-    /// unused. `timestamp` is opaque (caller defines epoch/units);
-    /// [`feed_rx`](Self::feed_rx) forwards `0`.
-    pub fn feed_rx_ts(&self, id: u32, data: &[u8], dlc: u8, timestamp: u64) {
+    /// Like [`feed_rx`](Self::feed_rx), but passes `timestamp` down to
+    /// the CFP reassembler, which stores the *last* (END) fragment's
+    /// value on [`Packet::hw_timestamp_rx`]; earlier fragments' values
+    /// are unused. `timestamp` is opaque (caller defines epoch/units);
+    /// [`feed_rx`](Self::feed_rx) forwards `0`. Ignored under CSP v1
+    /// framing, which has no reassembly timestamp.
+    pub fn feed_rx_ts(&self, id: u32, data: &[u8], dlc: u8, timestamp: u32) {
         unsafe {
-            // Set before csp_can_rx; only read on BEGIN. Race-free for
-            // the usual single-threaded feeder.
-            sys::csp_can_rx_set_timestamp(self.inner.c_iface.get(), timestamp);
             sys::csp_can_rx(
                 self.inner.c_iface.get(),
                 id,
                 data.as_ptr(),
                 dlc,
+                timestamp,
                 ptr::null_mut(),
             );
         }
@@ -219,12 +218,18 @@ impl CanInterfaceHandle {
 
 /// C callback invoked by libcsp's CAN TX path. Forwards to the Rust CanDriver.
 ///
+/// `packet` is the CSP packet the frame was fragmented from, and libcsp only
+/// passes it on END frames (NULL otherwise). It is not surfaced to
+/// [`CanDriver`]: the buffer is still owned by the CSP stack, so handing it to
+/// safe code would risk a double free.
+///
 /// Catches Rust panics so unwinding never crosses the C frame.
 unsafe extern "C" fn can_tx_trampoline(
     driver_data: *mut c_void,
     id: u32,
     data: *const u8,
     dlc: u8,
+    _packet: *const sys::csp_packet_t,
 ) -> i32 {
     if driver_data.is_null() || data.is_null() {
         return -1;

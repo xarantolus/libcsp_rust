@@ -298,7 +298,11 @@ fn test_cmp_ident() {
     // Wait for service to be ready
     ready_rx.recv().expect("Service thread failed to start");
 
-    let out_buf = vec![0u8, 1u8]; // type = 0 (REQUEST), code = 1 (IDENT)
+    // The CMP dispatcher rejects requests shorter than the message it is
+    // about to fill in, so send a full-size IDENT request.
+    let mut out_buf = vec![0u8; core::mem::size_of::<libcsp::sys::csp_cmp_ident_msg>()];
+    out_buf[0] = 0; // type = REQUEST
+    out_buf[1] = 1; // code = IDENT
     let mut in_buf = vec![0u8; 256];
 
     let ret = node

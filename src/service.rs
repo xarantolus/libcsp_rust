@@ -48,9 +48,9 @@ impl crate::CspNode {
             sys::csp_cmp(
                 node,
                 timeout,
-                sys::CSP_CMP_IDENT as u8,
+                sys::csp_cmp_code_t_CSP_CMP_IDENT as u8,
                 size as i32,
-                &mut msg,
+                (&mut msg as *mut sys::csp_cmp_message).cast(),
             )
         };
         if ret == 0 {
@@ -94,9 +94,9 @@ impl crate::CspNode {
             sys::csp_cmp(
                 node,
                 timeout,
-                sys::CSP_CMP_PEEK as u8,
+                sys::csp_cmp_code_t_CSP_CMP_PEEK as u8,
                 size as i32,
-                &mut msg,
+                (&mut msg as *mut sys::csp_cmp_message).cast(),
             )
         };
         if ret == 0 {
@@ -133,9 +133,9 @@ impl crate::CspNode {
             sys::csp_cmp(
                 node,
                 timeout,
-                sys::CSP_CMP_POKE as u8,
+                sys::csp_cmp_code_t_CSP_CMP_POKE as u8,
                 size as i32,
-                &mut msg,
+                (&mut msg as *mut sys::csp_cmp_message).cast(),
             )
         };
         if ret == 0 {

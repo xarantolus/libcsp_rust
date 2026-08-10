@@ -388,6 +388,14 @@ fn compile_libcsp(
         "csp_service_handler.c",
         "csp_services.c",
         "csp_sfp.c",
+        // CMP request handlers (src/cmp/CMakeLists.txt)
+        "cmp/csp_cmp_clock.c",
+        "cmp/csp_cmp_dispatch.c",
+        "cmp/csp_cmp_ident.c",
+        "cmp/csp_cmp_if_stats.c",
+        "cmp/csp_cmp_mem.c",
+        "cmp/csp_cmp_peek_poke.c",
+        "cmp/csp_cmp_route.c",
     ];
     for f in &core {
         build.file(src_dir.join(f));

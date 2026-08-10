@@ -62,10 +62,10 @@ impl Packet {
         unsafe { (*self.inner).length }
     }
 
-    /// Driver timestamp of this packet's **first** CAN frame (the
-    /// value given to [`crate::CanInterfaceHandle::feed_rx_ts`] for the
-    /// BEGIN fragment). Opaque; caller-defined epoch/units. `0` for
-    /// `feed_rx` or non-CAN interfaces.
+    /// Driver timestamp of this packet's **last** CAN frame (the value
+    /// given to [`crate::CanInterfaceHandle::feed_rx_ts`] for the END
+    /// fragment). Opaque; caller-defined epoch/units. `0` for `feed_rx`,
+    /// for CSP v1 framing, or for non-CAN interfaces.
     #[inline]
     pub fn hw_timestamp_rx(&self) -> u64 {
         unsafe { (*self.inner).timestamp_rx }

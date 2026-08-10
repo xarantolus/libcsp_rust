@@ -1,6 +1,7 @@
 [submodule "libcsp"]
 	path = libcsp
 	url = https://github.com/xarantolus/libcsp.git
+	branch = move-iii
 [submodule "libcsp-sys/mini-scanf"]
 	path = libcsp-sys/mini-scanf
 	url = https://github.com/MuratovAS/mini-scanf.git
