@@ -710,8 +710,33 @@ version 2.1 of the License, or (at your option) any later version.
     // On some systems libclang cannot locate GCC's built-in headers
     // (stddef.h, stdint.h, …) on its own. Ask the C compiler where they live
     // and forward that as a -isystem path to clang.
-    for gcc_include in gcc_builtin_include() {
-        builder = builder.clang_arg(format!("-isystem{gcc_include}"));
+    //
+    // NOT on macOS: `cc -print-file-name=include` returns the Xcode toolchain's
+    // clang builtin dir there, and mixing a second clang builtin dir into
+    // libclang's search breaks include_next chaining — both stdint.h copies
+    // share the __CLANG_STDINT_H guard, so the second is skipped and the SDK's
+    // stdint.h (with the actual typedefs) is never reached. libclang finds its
+    // own builtin headers on macOS.
+    if target_os != "macos" {
+        for gcc_include in gcc_builtin_include() {
+            builder = builder.clang_arg(format!("-isystem{gcc_include}"));
+        }
+    } else {
+        // System headers live in the SDK, not /usr/include, and libclang does
+        // not find the sysroot on its own. A sysroot supplied through
+        // BINDGEN_EXTRA_CLANG_ARGS still wins: bindgen appends those last.
+        if let Ok(output) = std::process::Command::new("xcrun")
+            .args(["--show-sdk-path"])
+            .output()
+        {
+            let sdk = std::str::from_utf8(&output.stdout)
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if !sdk.is_empty() {
+                builder = builder.clang_arg(format!("-isysroot{sdk}"));
+            }
+        }
     }
 
     // SocketCAN header is Linux-only — skip for embedded/non-Linux targets
