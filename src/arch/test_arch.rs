@@ -47,47 +47,16 @@ unsafe impl CspArch for TestArch {
         self.get_ms() / 1000
     }
     fn bin_sem_create(&self) -> *mut c_void {
-        unsafe {
-            let sem = libc::malloc(core::mem::size_of::<libc::sem_t>()) as *mut libc::sem_t;
-            if sem.is_null() {
-                return core::ptr::null_mut();
-            }
-            if libc::sem_init(sem, 0, 1) == 0 {
-                sem as *mut c_void
-            } else {
-                libc::free(sem as *mut c_void);
-                core::ptr::null_mut()
-            }
-        }
+        bin_sem::create()
     }
     fn bin_sem_remove(&self, sem: *mut c_void) {
-        unsafe {
-            libc::sem_destroy(sem as *mut libc::sem_t);
-            libc::free(sem);
-        }
+        bin_sem::remove(sem)
     }
     fn bin_sem_wait(&self, sem: *mut c_void, timeout: u32) -> bool {
-        unsafe {
-            if timeout == 0xFFFF_FFFF {
-                libc::sem_wait(sem as *mut libc::sem_t) == 0
-            } else {
-                let mut ts = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                };
-                libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
-                ts.tv_sec += (timeout / 1000) as libc::time_t;
-                ts.tv_nsec += ((timeout % 1000) * 1_000_000) as libc::c_long;
-                if ts.tv_nsec >= 1_000_000_000 {
-                    ts.tv_sec += 1;
-                    ts.tv_nsec -= 1_000_000_000;
-                }
-                libc::sem_timedwait(sem as *mut libc::sem_t, &ts) == 0
-            }
-        }
+        bin_sem::wait(sem, timeout)
     }
     fn bin_sem_post(&self, sem: *mut c_void) -> bool {
-        unsafe { libc::sem_post(sem as *mut libc::sem_t) == 0 }
+        bin_sem::post(sem)
     }
 
     fn mutex_create(&self) -> *mut c_void {
@@ -329,3 +298,160 @@ unsafe impl CspArch for TestArch {
 }
 
 pub static ARCH: TestArch = TestArch;
+
+/// Binary semaphore for the host `TestArch`.
+///
+/// macOS has no working unnamed POSIX semaphores -- `sem_init`/`sem_destroy`
+/// are deprecated there and `sem_timedwait` does not exist at all -- so it uses
+/// a pthread mutex + condvar with the same semantics, mirroring what libcsp's
+/// own POSIX shim does. Everywhere else keeps `sem_t`.
+mod bin_sem {
+    use core::ffi::c_void;
+
+    const WAIT_FOREVER: u32 = 0xFFFF_FFFF;
+
+    /// Absolute CLOCK_REALTIME deadline `timeout` milliseconds from now, which
+    /// is what both `sem_timedwait` and `pthread_cond_timedwait` expect.
+    #[allow(dead_code)]
+    fn deadline(timeout: u32) -> libc::timespec {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // Safety: `ts` is a valid pointer.
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+        ts.tv_sec += (timeout / 1000) as libc::time_t;
+        ts.tv_nsec += ((timeout % 1000) * 1_000_000) as libc::c_long;
+        if ts.tv_nsec >= 1_000_000_000 {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1_000_000_000;
+        }
+        ts
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn create() -> *mut c_void {
+        unsafe {
+            let sem = libc::malloc(core::mem::size_of::<libc::sem_t>()) as *mut libc::sem_t;
+            if sem.is_null() {
+                return core::ptr::null_mut();
+            }
+            if libc::sem_init(sem, 0, 1) == 0 {
+                sem as *mut c_void
+            } else {
+                libc::free(sem as *mut c_void);
+                core::ptr::null_mut()
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn remove(sem: *mut c_void) {
+        unsafe {
+            libc::sem_destroy(sem as *mut libc::sem_t);
+            libc::free(sem);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn wait(sem: *mut c_void, timeout: u32) -> bool {
+        unsafe {
+            if timeout == WAIT_FOREVER {
+                libc::sem_wait(sem as *mut libc::sem_t) == 0
+            } else {
+                let ts = deadline(timeout);
+                libc::sem_timedwait(sem as *mut libc::sem_t, &ts) == 0
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn post(sem: *mut c_void) -> bool {
+        unsafe { libc::sem_post(sem as *mut libc::sem_t) == 0 }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[repr(C)]
+    struct BinSem {
+        mutex: libc::pthread_mutex_t,
+        cond: libc::pthread_cond_t,
+        value: i32,
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn create() -> *mut c_void {
+        unsafe {
+            let sem = libc::malloc(core::mem::size_of::<BinSem>()) as *mut BinSem;
+            if sem.is_null() {
+                return core::ptr::null_mut();
+            }
+            if libc::pthread_mutex_init(&mut (*sem).mutex, core::ptr::null()) != 0 {
+                libc::free(sem as *mut c_void);
+                return core::ptr::null_mut();
+            }
+            if libc::pthread_cond_init(&mut (*sem).cond, core::ptr::null()) != 0 {
+                libc::pthread_mutex_destroy(&mut (*sem).mutex);
+                libc::free(sem as *mut c_void);
+                return core::ptr::null_mut();
+            }
+            (*sem).value = 1;
+            sem as *mut c_void
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn remove(sem: *mut c_void) {
+        unsafe {
+            let sem = sem as *mut BinSem;
+            libc::pthread_cond_destroy(&mut (*sem).cond);
+            libc::pthread_mutex_destroy(&mut (*sem).mutex);
+            libc::free(sem as *mut c_void);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn wait(sem: *mut c_void, timeout: u32) -> bool {
+        unsafe {
+            let sem = sem as *mut BinSem;
+            if libc::pthread_mutex_lock(&mut (*sem).mutex) != 0 {
+                return false;
+            }
+            let mut ok = true;
+            while (*sem).value == 0 {
+                let rc = if timeout == WAIT_FOREVER {
+                    libc::pthread_cond_wait(&mut (*sem).cond, &mut (*sem).mutex)
+                } else {
+                    let ts = deadline(timeout);
+                    libc::pthread_cond_timedwait(&mut (*sem).cond, &mut (*sem).mutex, &ts)
+                };
+                if rc != 0 {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                (*sem).value = 0;
+            }
+            libc::pthread_mutex_unlock(&mut (*sem).mutex);
+            ok
+        }
+    }
+
+    /// Binary: posting an already-unlocked semaphore is a no-op, matching the
+    /// clamp in libcsp's own macOS shim.
+    #[cfg(target_os = "macos")]
+    pub fn post(sem: *mut c_void) -> bool {
+        unsafe {
+            let sem = sem as *mut BinSem;
+            if libc::pthread_mutex_lock(&mut (*sem).mutex) != 0 {
+                return false;
+            }
+            if (*sem).value == 0 {
+                (*sem).value = 1;
+                libc::pthread_cond_signal(&mut (*sem).cond);
+            }
+            libc::pthread_mutex_unlock(&mut (*sem).mutex);
+            true
+        }
+    }
+}
