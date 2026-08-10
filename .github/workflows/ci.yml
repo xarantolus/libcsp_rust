@@ -21,6 +21,10 @@ env:
   # Same as CI_FEATURES but with external-arch added — used only for build
   # checks (not `cargo test`) on hosted Linux.
   CI_FEATURES_EXTERNAL_ARCH: "std,rdp,rdp-fast-close,hmac,promisc,dedup,socketcan,zmq,usart-linux,debug,zmq-v1-fixup,buffer-zero-clear,external-arch"
+  # macOS drops the Linux-only drivers (socketcan, usart-linux) and zmq, which
+  # would only add a brew dependency. What this job exists to prove is that
+  # bindgen resolves the SDK headers on macOS at all.
+  CI_FEATURES_MACOS: "std,rdp,rdp-fast-close,hmac,promisc,dedup,debug,buffer-zero-clear"
 
 jobs:
   test-linux:
@@ -69,6 +73,23 @@ jobs:
         # parent crate's full feature build (which includes `host-default-arch`)
         # doesn't try to link both copies.
         run: cargo build --manifest-path examples/custom_arch_external/Cargo.toml
+
+  test-macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build
+        run: cargo build --all-targets --features "$CI_FEATURES_MACOS"
+
+      - name: Test
+        run: cargo test --features "$CI_FEATURES_MACOS"
 
   build-embedded:
     name: Build (Embassy Example)
