@@ -378,51 +378,78 @@ mod bin_sem {
         value: i32,
     }
 
+    // The pthread objects below are shared with other threads by design: while
+    // one thread waits on the condvar another is signalling it. Forming a Rust
+    // `&mut` to them would assert unique access and break that, so every field
+    // is reached with `addr_of_mut!` and stays a raw pointer. It also keeps
+    // `create` from taking a reference to still-uninitialised malloc memory.
+    #[cfg(target_os = "macos")]
+    #[inline]
+    fn parts(
+        sem: *mut c_void,
+    ) -> (
+        *mut libc::pthread_mutex_t,
+        *mut libc::pthread_cond_t,
+        *mut i32,
+    ) {
+        let sem = sem as *mut BinSem;
+        // Safety: `sem` points to a live BinSem allocated by `create`.
+        unsafe {
+            (
+                core::ptr::addr_of_mut!((*sem).mutex),
+                core::ptr::addr_of_mut!((*sem).cond),
+                core::ptr::addr_of_mut!((*sem).value),
+            )
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub fn create() -> *mut c_void {
         unsafe {
-            let sem = libc::malloc(core::mem::size_of::<BinSem>()) as *mut BinSem;
-            if sem.is_null() {
+            let raw = libc::malloc(core::mem::size_of::<BinSem>());
+            if raw.is_null() {
                 return core::ptr::null_mut();
             }
-            if libc::pthread_mutex_init(&mut (*sem).mutex, core::ptr::null()) != 0 {
-                libc::free(sem as *mut c_void);
+            let (mutex, cond, value) = parts(raw);
+            if libc::pthread_mutex_init(mutex, core::ptr::null()) != 0 {
+                libc::free(raw);
                 return core::ptr::null_mut();
             }
-            if libc::pthread_cond_init(&mut (*sem).cond, core::ptr::null()) != 0 {
-                libc::pthread_mutex_destroy(&mut (*sem).mutex);
-                libc::free(sem as *mut c_void);
+            if libc::pthread_cond_init(cond, core::ptr::null()) != 0 {
+                libc::pthread_mutex_destroy(mutex);
+                libc::free(raw);
                 return core::ptr::null_mut();
             }
-            (*sem).value = 1;
-            sem as *mut c_void
+            value.write(1);
+            raw
         }
     }
 
     #[cfg(target_os = "macos")]
     pub fn remove(sem: *mut c_void) {
+        let (mutex, cond, _) = parts(sem);
         unsafe {
-            let sem = sem as *mut BinSem;
-            libc::pthread_cond_destroy(&mut (*sem).cond);
-            libc::pthread_mutex_destroy(&mut (*sem).mutex);
-            libc::free(sem as *mut c_void);
+            libc::pthread_cond_destroy(cond);
+            libc::pthread_mutex_destroy(mutex);
+            libc::free(sem);
         }
     }
 
     #[cfg(target_os = "macos")]
     pub fn wait(sem: *mut c_void, timeout: u32) -> bool {
+        let (mutex, cond, value) = parts(sem);
         unsafe {
-            let sem = sem as *mut BinSem;
-            if libc::pthread_mutex_lock(&mut (*sem).mutex) != 0 {
+            if libc::pthread_mutex_lock(mutex) != 0 {
                 return false;
             }
             let mut ok = true;
-            while (*sem).value == 0 {
+            // Loop: pthread_cond_wait may wake spuriously.
+            while value.read() == 0 {
                 let rc = if timeout == WAIT_FOREVER {
-                    libc::pthread_cond_wait(&mut (*sem).cond, &mut (*sem).mutex)
+                    libc::pthread_cond_wait(cond, mutex)
                 } else {
                     let ts = deadline(timeout);
-                    libc::pthread_cond_timedwait(&mut (*sem).cond, &mut (*sem).mutex, &ts)
+                    libc::pthread_cond_timedwait(cond, mutex, &ts)
                 };
                 if rc != 0 {
                     ok = false;
@@ -430,9 +457,9 @@ mod bin_sem {
                 }
             }
             if ok {
-                (*sem).value = 0;
+                value.write(0);
             }
-            libc::pthread_mutex_unlock(&mut (*sem).mutex);
+            libc::pthread_mutex_unlock(mutex);
             ok
         }
     }
@@ -441,16 +468,16 @@ mod bin_sem {
     /// clamp in libcsp's own macOS shim.
     #[cfg(target_os = "macos")]
     pub fn post(sem: *mut c_void) -> bool {
+        let (mutex, cond, value) = parts(sem);
         unsafe {
-            let sem = sem as *mut BinSem;
-            if libc::pthread_mutex_lock(&mut (*sem).mutex) != 0 {
+            if libc::pthread_mutex_lock(mutex) != 0 {
                 return false;
             }
-            if (*sem).value == 0 {
-                (*sem).value = 1;
-                libc::pthread_cond_signal(&mut (*sem).cond);
+            if value.read() == 0 {
+                value.write(1);
+                libc::pthread_cond_signal(cond);
             }
-            libc::pthread_mutex_unlock(&mut (*sem).mutex);
+            libc::pthread_mutex_unlock(mutex);
             true
         }
     }
