@@ -130,3 +130,11 @@ behaviour:
    and the default `csp_panic` just returns). The port returns an error.
 8. **`csp_transaction` demands an exact reply length** unless given `-1`. All three
    existing consumers work around this identically; the port returns an owned reply.
+9. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+   building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
+   broadcast maths at init, so flipping the version afterwards misroutes every packet
+   into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the
+   same 18 sends after switching to v2 leak **one buffer per fragment** until the pool is
+   empty and every call returns `CSP_ERR_NOMEM` — with no error reported at the point of
+   misuse. Nothing in the API says the field is init-only. In the port the version is an
+   immutable field of the `Csp` value, so this is unrepresentable.
