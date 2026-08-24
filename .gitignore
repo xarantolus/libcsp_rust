@@ -1,0 +1,8 @@
+/target
+**/target
+Cargo.lock
+/build
+/oracle/build
+compile_commands.json
+*.o
+*.a
