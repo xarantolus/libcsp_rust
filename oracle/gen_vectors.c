@@ -72,6 +72,10 @@ static void cap_reset(void) { cap_n = 0; }
 
 static int cap_tx(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
 	(void)iface; (void)via; (void)from_me;
+	/* A nexthop is handed an UNFRAMED packet: frame_begin/frame_length are only
+	 * valid after the interface prepends the header itself. csp_kiss_tx and
+	 * csp_can_tx both do this. Skipping it captures zero-length frames. */
+	csp_id_prepend(packet);
 	/* The nexthop owns the packet on success, so it must free it. */
 	if (cap_n < CAP_MAX) {
 		uint16_t n = packet->frame_length;

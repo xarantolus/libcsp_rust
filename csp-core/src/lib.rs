@@ -35,6 +35,9 @@ pub mod hmac;
 #[cfg(feature = "if-kiss")]
 pub mod kiss;
 
+#[cfg(feature = "sfp")]
+pub mod sfp;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
@@ -66,6 +69,12 @@ pub enum Error {
     BadChecksum,
     /// The frame is structurally invalid (bad framing, impossible length, bad offset).
     Malformed,
+    /// The packet is a plain datagram, not an SFP fragment.
+    ///
+    /// Distinct from [`Error::Malformed`] on purpose: nothing is wrong, the caller just
+    /// asked the wrong question. Its bytes are untouched and can be delivered as a
+    /// datagram. The C frees the packet in this case and reports a generic SFP error.
+    NotAFragment,
 }
 
 /// Identifies the field in [`Error::FieldOutOfRange`].

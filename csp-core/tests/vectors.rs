@@ -331,3 +331,102 @@ fn kiss_framing_matches_the_c() {
     assert!(checked >= 6, "only checked {checked} kiss vectors");
     println!("checked {checked} kiss vectors");
 }
+
+/// SFP fragmentation, end to end against the C.
+///
+/// The oracle emitted one vector per fragment. Each frame is
+/// `header || chunk || offset:u32 || total:u32`. The ephemeral source port differs per
+/// connection, so the header is decoded rather than reconstructed.
+#[test]
+fn sfp_fragmentation_matches_the_c() {
+    use csp_core::{flags, sfp};
+    use std::collections::BTreeMap;
+
+    let vectors = load();
+    // The oracle's source data: big[i] = i * 7, truncated to a byte.
+    let big: Vec<u8> = (0..900u32).map(|i| (i.wrapping_mul(7) & 0xff) as u8).collect();
+
+    // group by (version, total, mtu) -> fragments in order
+    let mut groups: BTreeMap<(u8, u32, u32), Vec<&Vector>> = BTreeMap::new();
+    for v in vectors.iter().filter(|v| v.kind.starts_with("sfp_v")) {
+        let (Some(total), Some(mtu)) = (v.num("total"), v.num("mtu")) else { continue };
+        if v.get("rc").is_some() {
+            continue; // a refusal, not a frame
+        }
+        let ver = v.num("v").unwrap() as u8;
+        groups.entry((ver, total as u32, mtu as u32)).or_default().push(v);
+    }
+    assert!(!groups.is_empty(), "no sfp vectors found");
+
+    let mut transfers = 0;
+    let mut frames = 0;
+    for ((ver, total, mtu), frags) in &groups {
+        let version = if *ver == 1 { Version::V1 } else { Version::V2 };
+        let hdr_len = version.header_size();
+        let message = &big[..*total as usize];
+
+        let ours: Vec<_> = sfp::Fragmenter::new(message, *mtu as usize)
+            .unwrap()
+            .collect();
+        assert_eq!(
+            ours.len(),
+            frags.len(),
+            "v{ver} total={total} mtu={mtu}: fragment count differs"
+        );
+
+        for (i, (frag_v, (off, tot, chunk))) in frags.iter().zip(ours.iter()).enumerate() {
+            // The C set FRAG on the connection, so every fragment carries it.
+            let id = Id::decode(version, &frag_v.out).unwrap();
+            assert!(
+                id.has_flag(flags::FRAG),
+                "v{ver} total={total} mtu={mtu} frag {i}: FRAG not set"
+            );
+
+            let mut body = [0u8; 600];
+            let n = sfp::Fragment::encode(*off, *tot, chunk, &mut body).unwrap();
+            assert_eq!(
+                &body[..n],
+                &frag_v.out[hdr_len..],
+                "v{ver} total={total} mtu={mtu} frag {i}: body mismatch"
+            );
+
+            // and it parses back to what we put in
+            let parsed = sfp::Fragment::parse(true, &frag_v.out[hdr_len..]).unwrap();
+            assert_eq!(parsed.offset, *off);
+            assert_eq!(parsed.total, *tot);
+            assert_eq!(parsed.payload, *chunk);
+            frames += 1;
+        }
+
+        // reassembling the C's own frames must reproduce the message
+        let mut r = sfp::Reassembler::new();
+        let mut out = vec![0u8; *total as usize];
+        let mut done = false;
+        for frag_v in frags {
+            let parsed = sfp::Fragment::parse(true, &frag_v.out[hdr_len..]).unwrap();
+            done = r.push(&parsed, &mut out).unwrap();
+        }
+        assert!(done, "v{ver} total={total} mtu={mtu}: never completed");
+        assert_eq!(out, message, "v{ver} total={total} mtu={mtu}: wrong bytes");
+        transfers += 1;
+    }
+    assert!(transfers >= 30, "only checked {transfers} transfers");
+    println!("checked {transfers} sfp transfers, {frames} fragments");
+}
+
+#[test]
+fn sfp_max_mtu_matches_the_c() {
+    let vectors = load();
+    let mut checked = 0;
+    for v in vectors.iter().filter(|v| v.kind == "sfp_max_mtu") {
+        let o = v.num("opts").unwrap() as u32;
+        assert_eq!(
+            csp_core::sfp::max_mtu(256, o) as u32,
+            v.out_u32(),
+            "{}: max_mtu disagrees",
+            v.desc
+        );
+        checked += 1;
+    }
+    assert!(checked >= 6, "only checked {checked}");
+}
