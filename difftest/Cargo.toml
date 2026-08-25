@@ -1,0 +1,12 @@
+[package]
+name = "difftest"
+description = "Differential tests: run csp-core and the C libcsp on the same inputs and compare. Dev-only — links C, and is never part of a shipped crate."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+csp-core = { path = "../csp-core" }
+
+[build-dependencies]
+cc = "1"

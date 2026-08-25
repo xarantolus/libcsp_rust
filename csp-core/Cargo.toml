@@ -1,0 +1,21 @@
+[package]
+name = "csp-core"
+description = "Cubesat Space Protocol — pure wire-format codecs and protocol state machines. no_std, no alloc, no unsafe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss"]
+
+rdp = []
+sfp = []
+cmp = []
+hmac = ["sha1"]
+sha1 = []
+rtable = []
+if-can = []
+if-kiss = []
+
+[dependencies]

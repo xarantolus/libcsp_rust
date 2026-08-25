@@ -1,0 +1,21 @@
+[package]
+name = "csp"
+description = "Cubesat Space Protocol node — buffer pool, connections, routing and the router loop. no_std, no alloc, no global state."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss"]
+
+rdp = ["csp-core/rdp"]
+sfp = ["csp-core/sfp"]
+cmp = ["csp-core/cmp"]
+hmac = ["csp-core/hmac"]
+rtable = ["csp-core/rtable"]
+if-can = ["csp-core/if-can"]
+if-kiss = ["csp-core/if-kiss"]
+
+[dependencies]
+csp-core = { path = "../csp-core", default-features = false }

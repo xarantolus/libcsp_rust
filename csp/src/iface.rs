@@ -1,0 +1,274 @@
+//! Interfaces: how a node gets packets onto a link.
+//!
+//! The C models an interface as a struct with a `nexthop` function pointer plus two
+//! `void *`s (`interface_data`, `driver_data`) that every implementation casts back to its
+//! own type. That is the pattern `c2rust-analyze` gave up on — 76 of its 190 unsupported
+//! casts were these — because the type information was thrown away by design.
+//!
+//! Here an interface is a trait object or a generic, so the types survive.
+//!
+//! # The ownership contract, stated
+//!
+//! In the C, `csp_send_direct_iface` calls `nexthop` and frees the packet **only if it
+//! returns an error**. So the nexthop owns the packet on success and must not free it on
+//! failure — an undocumented, uncheckable rule every driver has to get right. Getting it
+//! backwards double-frees; getting it wrong the other way leaks.
+//!
+//! [`Transmit::transmit`] takes the packet **by reference** and never takes ownership, so
+//! the rule cannot be got wrong: the caller frees, always.
+
+use crate::pool::Packet;
+use csp_core::Result;
+
+/// Statistics every interface keeps.
+///
+/// Plain counters. The C's equivalents are `uint8_t` globals written from ISR and task
+/// context with no synchronisation, which it documents as deliberate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct Stats {
+    pub tx: u32,
+    pub rx: u32,
+    pub tx_error: u32,
+    pub rx_error: u32,
+    pub drop: u32,
+    pub autherr: u32,
+    pub frame: u32,
+    pub txbytes: u32,
+    pub rxbytes: u32,
+    pub irq: u32,
+}
+
+/// The driver half of an interface: put a framed packet on the wire.
+pub trait Transmit<'p, const N: usize, const SZ: usize> {
+    /// Send `packet` to `via`.
+    ///
+    /// The packet is **borrowed**: the caller owns it and will release it, whatever
+    /// happens here. `packet` has already had its header prepended, so
+    /// [`Packet::with_frame`] yields the bytes to put on the link.
+    fn transmit(&mut self, via: u16, packet: &Packet<'p, N, SZ>) -> Result<()>;
+}
+
+/// A registered interface: a name, an address, a netmask and its counters.
+#[derive(Debug)]
+pub struct Interface<T> {
+    /// Name, as used by CMP `IF_STATS` and the route table text format.
+    pub name: &'static str,
+    /// This interface's own address on its subnet.
+    pub addr: u16,
+    /// Subnet prefix length.
+    ///
+    /// Careful: when this equals the version's `host_bits`, the node's *own* address
+    /// reads as broadcast. The flight code carries a 15-line comment about this before
+    /// assigning `csp_if_lo.addr`.
+    pub netmask: u16,
+    /// Whether this is a default route target.
+    pub is_default: bool,
+    /// Counters.
+    pub stats: Stats,
+    /// The driver.
+    pub driver: T,
+}
+
+impl<T> Interface<T> {
+    /// Register a driver as an interface.
+    pub const fn new(name: &'static str, addr: u16, netmask: u16, driver: T) -> Self {
+        Interface {
+            name,
+            addr,
+            netmask,
+            is_default: false,
+            stats: Stats {
+                tx: 0,
+                rx: 0,
+                tx_error: 0,
+                rx_error: 0,
+                drop: 0,
+                autherr: 0,
+                frame: 0,
+                txbytes: 0,
+                rxbytes: 0,
+                irq: 0,
+            },
+            driver,
+        }
+    }
+
+    /// Mark this interface as a default route target.
+    pub const fn default_route(mut self) -> Self {
+        self.is_default = true;
+        self
+    }
+
+    /// Frame and send a packet, updating the counters.
+    ///
+    /// Prepending the header is done here rather than left to the driver. In the C it is
+    /// the interface's job and it is easy to forget — a `nexthop` that reads
+    /// `frame_begin`/`frame_length` without calling `csp_id_prepend` first sees a
+    /// zero-length frame and cheerfully transmits nothing.
+    pub fn send<'p, const N: usize, const SZ: usize>(
+        &mut self,
+        version: csp_core::Version,
+        via: u16,
+        packet: &mut Packet<'p, N, SZ>,
+    ) -> Result<()>
+    where
+        T: Transmit<'p, N, SZ>,
+    {
+        packet.prepend_header(version)?;
+        let len = packet.with_frame(|f| f.len());
+        match self.driver.transmit(via, packet) {
+            Ok(()) => {
+                self.stats.tx += 1;
+                self.stats.txbytes += len as u32;
+                Ok(())
+            }
+            Err(e) => {
+                self.stats.tx_error += 1;
+                Err(e)
+            }
+        }
+    }
+
+    /// Record a received packet.
+    pub fn note_rx(&mut self, bytes: usize) {
+        self.stats.rx += 1;
+        self.stats.rxbytes += bytes as u32;
+    }
+
+    /// Record a malformed frame.
+    pub fn note_frame_error(&mut self) {
+        self.stats.frame += 1;
+    }
+
+    /// Record a dropped packet.
+    pub fn note_drop(&mut self) {
+        self.stats.drop += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::Pool;
+    use csp_core::{Id, Version};
+
+    type P = Pool<4, 264>;
+
+    /// Records what it was asked to send.
+    struct Recorder {
+        frames: [[u8; 64]; 4],
+        lens: [usize; 4],
+        n: usize,
+        fail: bool,
+    }
+
+    impl Recorder {
+        fn new() -> Self {
+            Recorder {
+                frames: [[0; 64]; 4],
+                lens: [0; 4],
+                n: 0,
+                fail: false,
+            }
+        }
+    }
+
+    impl<'p> Transmit<'p, 4, 264> for Recorder {
+        fn transmit(&mut self, _via: u16, packet: &Packet<'p, 4, 264>) -> Result<()> {
+            if self.fail {
+                return Err(csp_core::Error::Truncated);
+            }
+            packet.with_frame(|f| {
+                self.frames[self.n][..f.len()].copy_from_slice(f);
+                self.lens[self.n] = f.len();
+            });
+            self.n += 1;
+            Ok(())
+        }
+    }
+
+    fn packet<'p>(pool: &'p P) -> Packet<'p, 4, 264> {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 });
+        p.set_payload(b"payload").unwrap();
+        p
+    }
+
+    #[test]
+    fn send_frames_the_packet_before_handing_it_to_the_driver() {
+        // The C leaves this to the driver, and a driver that forgets transmits nothing.
+        let pool = P::new();
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+        let mut p = packet(&pool);
+        iface.send(Version::V1, 8, &mut p).unwrap();
+
+        assert_eq!(iface.driver.n, 1);
+        let len = iface.driver.lens[0];
+        assert_eq!(len, 4 + 7, "header + payload, not just payload");
+        assert_eq!(
+            Id::decode(Version::V1, &iface.driver.frames[0][..len]).unwrap().dst,
+            8
+        );
+    }
+
+    #[test]
+    fn counters_follow_success_and_failure() {
+        let pool = P::new();
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+
+        let mut p = packet(&pool);
+        iface.send(Version::V1, 8, &mut p).unwrap();
+        assert_eq!(iface.stats.tx, 1);
+        assert_eq!(iface.stats.txbytes, 11);
+        assert_eq!(iface.stats.tx_error, 0);
+
+        iface.driver.fail = true;
+        let mut p2 = packet(&pool);
+        assert!(iface.send(Version::V1, 8, &mut p2).is_err());
+        assert_eq!(iface.stats.tx, 1, "a failed send is not a transmit");
+        assert_eq!(iface.stats.tx_error, 1);
+    }
+
+    #[test]
+    fn a_failed_transmit_does_not_take_the_packet() {
+        // In the C the ownership rule is "nexthop owns it on success, must not free on
+        // failure" -- undocumented and uncheckable. Here transmit borrows, so the caller
+        // still holds the packet either way and the pool accounting proves it.
+        let pool = P::new();
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+        iface.driver.fail = true;
+        let before = pool.available();
+        {
+            let mut p = packet(&pool);
+            assert_eq!(pool.available(), before - 1);
+            let _ = iface.send(Version::V1, 8, &mut p);
+            assert_eq!(pool.available(), before - 1, "still ours after a failed send");
+        }
+        assert_eq!(pool.available(), before, "and released exactly once");
+    }
+
+    #[test]
+    fn both_wire_versions_produce_the_right_frame_length() {
+        let pool = P::new();
+        for (version, hdr) in [(Version::V1, 4usize), (Version::V2, 6)] {
+            let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+            let mut p = packet(&pool);
+            iface.send(version, 8, &mut p).unwrap();
+            assert_eq!(iface.driver.lens[0], hdr + 7, "{version:?}");
+        }
+    }
+
+    #[test]
+    fn rx_and_error_counters_are_separate() {
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+        iface.note_rx(42);
+        iface.note_frame_error();
+        iface.note_drop();
+        assert_eq!(iface.stats.rx, 1);
+        assert_eq!(iface.stats.rxbytes, 42);
+        assert_eq!(iface.stats.frame, 1);
+        assert_eq!(iface.stats.drop, 1);
+        assert_eq!(iface.stats.rx_error, 0);
+    }
+}
