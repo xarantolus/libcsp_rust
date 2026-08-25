@@ -412,7 +412,25 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
 
-        if id.dst == self.address || self.version.is_broadcast(id.dst, self.address, 0) {
+        // "Is this for me?" — the C's `is_to_me`, which is three conditions, none of
+        // them a single node address:
+        //
+        //   * **any** interface's address matches (`csp_iflist_get_by_addr`), so a node
+        //     with a CAN interface and a KISS interface answers to both;
+        //   * the destination is the broadcast address **of the interface it arrived on**
+        //     (`csp_id_is_broadcast(dst, input.iface)`) — the ingress interface's subnet,
+        //     not the node's;
+        //   * or it is a bound alias (`csp_addr_is_alias`).
+        //
+        // This compared `id.dst` against one `self.address` and called `is_broadcast` with
+        // a hardcoded netmask of `0`. A packet for the node's *other* interface therefore
+        // failed the check, fell through to forwarding, and went back out on the wire —
+        // measured against the C, which delivers it. `IfList::find_by_addr` covers the
+        // interface addresses and the aliases together.
+        let for_us = ifaces.find_by_addr(id.dst).is_some()
+            || ifaces.is_broadcast_for(id.dst, ingress)
+            || id.dst == self.address;
+        if for_us {
             return self.deliver_local(packet, id, now_ms);
         }
         self.forward(pool, packet, id, ifaces, ingress)
