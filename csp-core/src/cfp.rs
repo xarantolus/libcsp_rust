@@ -340,14 +340,20 @@ impl V1Reassembler {
         } else {
             // A continuation with no transfer in progress is a lost BEGIN, not a packet.
             let Some(ident) = self.ident else {
-                return Err(Error::Malformed);
+                return Err(Error::NoTransferInProgress);
             };
             if ident != f.ident {
-                return Err(Error::Malformed);
+                return Err(Error::IdentMismatch {
+                    expected: ident,
+                    got: f.ident,
+                });
             }
             let n = data.len();
             if self.received + n > self.expected {
-                return Err(Error::Malformed);
+                return Err(Error::OffsetBeyondTotal {
+                    offset: (self.received + n) as u32,
+                    total: self.expected as u32,
+                });
             }
             out[self.received..self.received + n].copy_from_slice(&data[..n]);
             self.received += n;
@@ -507,7 +513,10 @@ mod tests {
         let mut r = V1Reassembler::new();
         let mut out = [0u8; 64];
         let id = v1_id(1, 8, TYPE_MORE, 0, 5);
-        assert_eq!(r.push(id, &[1, 2, 3, 4], &mut out), Err(Error::Malformed));
+        assert_eq!(
+            r.push(id, &[1, 2, 3, 4], &mut out),
+            Err(Error::NoTransferInProgress)
+        );
     }
 
     #[test]

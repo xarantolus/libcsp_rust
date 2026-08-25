@@ -16,7 +16,7 @@
 //! `char rtable_copy[str_len + 1]` VLA means a longer route string is silently cut, very
 //! likely mid-entry. [`parse`] has no length limit and no VLA.
 
-use crate::{Error, Result, Version};
+use crate::{Error, Result, RouteError, Version};
 
 /// The `via` value meaning "deliver directly, no next hop".
 pub const NO_VIA: u16 = 0xFFFF;
@@ -177,23 +177,30 @@ where
             continue;
         }
 
+        let bad = |reason| Error::InvalidRoute { reason };
+
         let mut fields = entry.split_whitespace();
-        let addr_field = fields.next().ok_or(Error::Malformed)?;
-        let iface = fields.next().ok_or(Error::Malformed)?;
+        let addr_field = fields.next().ok_or(bad(RouteError::BadAddress))?;
+        let iface = fields.next().ok_or(bad(RouteError::MissingInterface))?;
         let via = match fields.next() {
-            Some(v) => Some(v.parse::<u16>().map_err(|_| Error::Malformed)?),
+            Some(v) => Some(v.parse::<u16>().map_err(|_| bad(RouteError::BadVia))?),
             None => None,
         };
         if fields.next().is_some() {
-            return Err(Error::Malformed);
+            return Err(bad(RouteError::TrailingGarbage));
         }
 
         let (address, netmask) = match addr_field.split_once('/') {
             Some((a, m)) => (
-                a.parse::<u16>().map_err(|_| Error::Malformed)?,
-                Some(m.parse::<u16>().map_err(|_| Error::Malformed)?),
+                a.parse::<u16>().map_err(|_| bad(RouteError::BadAddress))?,
+                Some(m.parse::<u16>().map_err(|_| bad(RouteError::BadNetmask))?),
             ),
-            None => (addr_field.parse::<u16>().map_err(|_| Error::Malformed)?, None),
+            None => (
+                addr_field
+                    .parse::<u16>()
+                    .map_err(|_| bad(RouteError::BadAddress))?,
+                None,
+            ),
         };
 
         each(ParsedRoute {
@@ -366,10 +373,20 @@ mod tests {
 
     #[test]
     fn malformed_entries_are_refused_not_guessed() {
-        for bad in ["notanumber CAN", "8/notamask CAN", "88", "8 CAN 1 extra", "8/5/6 CAN"] {
-            assert!(
-                parse(bad, |_| Ok(())).is_err(),
-                "{bad:?} should not parse"
+        // Each failure names the field that was wrong, so a ground operator sees which
+        // part of the route string to fix rather than a bare "invalid".
+        for (text, reason) in [
+            ("notanumber CAN", RouteError::BadAddress),
+            ("8/notamask CAN", RouteError::BadNetmask),
+            ("88", RouteError::MissingInterface),
+            ("8 CAN notanumber", RouteError::BadVia),
+            ("8 CAN 1 extra", RouteError::TrailingGarbage),
+            ("8/5/6 CAN", RouteError::BadNetmask),
+        ] {
+            assert_eq!(
+                parse(text, |_| Ok(())),
+                Err(Error::InvalidRoute { reason }),
+                "{text:?}"
             );
         }
     }

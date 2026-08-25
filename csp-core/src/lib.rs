@@ -44,12 +44,26 @@ pub mod cfp;
 #[cfg(feature = "rtable")]
 pub mod rtable;
 
+#[cfg(feature = "cmp")]
+pub mod cmp;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
 ///
-/// Deliberately small and non-exhaustive-free: every variant is something a caller can
-/// act on, and there is no catch-all "other".
+/// **Every variant carries enough to act on.** libcsp returns `CSP_ERR_INVAL` (-2) or
+/// `CSP_ERR_SFP` (-103) for a dozen unrelated causes, which is why the flight code has
+/// comments guessing at what a return code meant. A caller here can always tell three
+/// things apart:
+///
+/// - *the peer sent nonsense* — [`Error::Truncated`], [`Error::BadChecksum`],
+///   [`Error::UnexpectedOffset`], [`Error::InconsistentTotal`], …
+/// - *I called this wrong* — [`Error::FieldOutOfRange`], [`Error::ZeroMtu`],
+///   [`Error::TableFull`]
+/// - *nothing is wrong, retry differently* — [`Error::BufferTooSmall`] carries the size,
+///   [`Error::NotAFragment`] means "deliver this as a datagram instead"
+///
+/// There is no catch-all variant, on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// The output buffer was too small for the encoded form.
@@ -71,10 +85,8 @@ pub enum Error {
         /// Which field.
         field: Field,
     },
-    /// A checksum did not match.
+    /// A checksum or authentication tag did not match.
     BadChecksum,
-    /// The frame is structurally invalid (bad framing, impossible length, bad offset).
-    Malformed,
     /// The routing table is full.
     ///
     /// The C overwrites its last entry and returns success, so a node that installs one
@@ -82,10 +94,71 @@ pub enum Error {
     TableFull,
     /// The packet is a plain datagram, not an SFP fragment.
     ///
-    /// Distinct from [`Error::Malformed`] on purpose: nothing is wrong, the caller just
-    /// asked the wrong question. Its bytes are untouched and can be delivered as a
-    /// datagram. The C frees the packet in this case and reports a generic SFP error.
+    /// Not a failure: the caller asked the wrong question. The bytes are untouched and
+    /// can be delivered as a datagram. The C frees the packet here and reports a generic
+    /// SFP error, destroying data that was perfectly valid.
     NotAFragment,
+
+    // --- reassembly: a fragment that does not fit the transfer in progress ---
+    /// A fragment arrived at an offset other than the next expected one.
+    ///
+    /// SFP and CFP both run over ordered transports, so a gap is loss, not reordering.
+    UnexpectedOffset {
+        /// Offset the reassembler was waiting for.
+        expected: u32,
+        /// Offset the fragment claimed.
+        got: u32,
+    },
+    /// Two fragments of the same transfer disagreed about its total size.
+    InconsistentTotal {
+        /// Size the first fragment declared.
+        expected: u32,
+        /// Size this fragment declared.
+        got: u32,
+    },
+    /// A fragment's offset lies past the declared total size.
+    OffsetBeyondTotal {
+        /// The fragment's offset.
+        offset: u32,
+        /// The declared total.
+        total: u32,
+    },
+    /// A fragment carried no payload, so reassembly could never progress.
+    EmptyFragment,
+    /// A transfer declared a total size of zero, which carries no data but would look
+    /// complete on arrival.
+    ZeroTotal,
+    /// A continuation frame arrived with no transfer in progress — the opening frame was
+    /// lost. Reassembling anyway would produce a short packet with a garbage header.
+    NoTransferInProgress,
+    /// A continuation frame belongs to a different transfer than the one in progress.
+    IdentMismatch {
+        /// Identifier of the transfer in progress.
+        expected: u16,
+        /// Identifier the frame carried.
+        got: u16,
+    },
+
+    // --- caller mistakes ---
+    /// An MTU of zero was supplied, which would fragment forever.
+    ZeroMtu,
+    /// An empty authentication key was supplied.
+    ///
+    /// The C returns `CSP_ERR_INVAL` here *without touching the output buffer*, so a
+    /// caller that ignores the return value authenticates over uninitialised stack.
+    EmptyKey,
+    /// A declared or supplied length exceeds what the wire format allows.
+    LengthExceedsMaximum {
+        /// The length asked for.
+        got: usize,
+        /// The largest the format permits.
+        max: usize,
+    },
+    /// A route entry could not be parsed.
+    InvalidRoute {
+        /// Which part of the entry was wrong.
+        reason: RouteError,
+    },
 }
 
 /// Identifies the field in [`Error::FieldOutOfRange`].
@@ -98,6 +171,21 @@ pub enum Field {
     SourcePort,
     DestinationPort,
     Flags,
+}
+
+/// Why a route entry failed to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteError {
+    /// The address was not a number.
+    BadAddress,
+    /// The netmask was not a number.
+    BadNetmask,
+    /// The via address was not a number.
+    BadVia,
+    /// No interface name followed the address.
+    MissingInterface,
+    /// More fields followed the via address than the format allows.
+    TrailingGarbage,
 }
 
 /// Result alias for this crate.

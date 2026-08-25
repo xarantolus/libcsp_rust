@@ -99,7 +99,7 @@ impl<'a> Fragment<'a> {
         // The C checks this too -- an offset past the end is how a malformed stream
         // would otherwise walk off the reassembly buffer.
         if offset > total {
-            return Err(Error::Malformed);
+            return Err(Error::OffsetBeyondTotal { offset, total });
         }
         Ok(Fragment {
             offset,
@@ -138,7 +138,7 @@ impl<'a> Fragmenter<'a> {
     /// [`max_mtu`].
     pub fn new(data: &'a [u8], mtu: usize) -> Result<Self> {
         if mtu == 0 {
-            return Err(Error::Malformed);
+            return Err(Error::ZeroMtu);
         }
         Ok(Fragmenter {
             data,
@@ -225,22 +225,33 @@ impl Reassembler {
                 if frag.total == 0 {
                     // The C rejects this too: a zero-length transfer carries no data but
                     // would otherwise look complete on arrival.
-                    return Err(Error::Malformed);
+                    return Err(Error::ZeroTotal);
                 }
                 self.total = Some(frag.total);
             }
-            Some(t) if t != frag.total => return Err(Error::Malformed),
+            Some(t) if t != frag.total => {
+                return Err(Error::InconsistentTotal {
+                    expected: t,
+                    got: frag.total,
+                })
+            }
             Some(_) => {}
         }
         if frag.offset != self.expected {
-            return Err(Error::Malformed);
+            return Err(Error::UnexpectedOffset {
+                expected: self.expected,
+                got: frag.offset,
+            });
         }
         if frag.payload.is_empty() {
-            return Err(Error::Malformed);
+            return Err(Error::EmptyFragment);
         }
         let end = frag.offset as usize + frag.payload.len();
         if end > frag.total as usize {
-            return Err(Error::Malformed);
+            return Err(Error::OffsetBeyondTotal {
+                offset: frag.offset,
+                total: frag.total,
+            });
         }
         if end > out.len() {
             return Err(Error::BufferTooSmall { needed: end });
@@ -311,7 +322,10 @@ mod tests {
     fn offset_past_total_is_refused() {
         let mut out = [0u8; 32];
         let n = Fragment::encode(200, 100, &[1, 2, 3], &mut out).unwrap();
-        assert_eq!(Fragment::parse(true, &out[..n]), Err(Error::Malformed));
+        assert_eq!(
+            Fragment::parse(true, &out[..n]),
+            Err(Error::OffsetBeyondTotal { offset: 200, total: 100 })
+        );
     }
 
     #[test]
@@ -369,7 +383,11 @@ mod tests {
             payload: &[0u8; 8],
         };
         // Second fragment first: SFP runs over an ordered transport, so this is loss.
-        assert_eq!(r.push(&f2, &mut out), Err(Error::Malformed));
+        // The error says exactly which byte was expected, so a caller can log the gap.
+        assert_eq!(
+            r.push(&f2, &mut out),
+            Err(Error::UnexpectedOffset { expected: 0, got: 8 })
+        );
     }
 
     #[test]
@@ -387,7 +405,10 @@ mod tests {
             payload: &[0u8; 8],
         };
         assert!(!r.push(&a, &mut out).unwrap());
-        assert_eq!(r.push(&b, &mut out), Err(Error::Malformed));
+        assert_eq!(
+            r.push(&b, &mut out),
+            Err(Error::InconsistentTotal { expected: 16, got: 99 })
+        );
     }
 
     #[test]
@@ -399,7 +420,7 @@ mod tests {
             total: 0,
             payload: &[1],
         };
-        assert_eq!(r.push(&f, &mut out), Err(Error::Malformed));
+        assert_eq!(r.push(&f, &mut out), Err(Error::ZeroTotal));
     }
 
     #[test]

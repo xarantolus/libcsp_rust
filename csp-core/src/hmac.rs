@@ -33,12 +33,12 @@ const OPAD: u8 = 0x5c;
 
 /// Full HMAC-SHA1 of `data` under `key`.
 ///
-/// Returns [`Error::Malformed`] for an empty key, matching the C, which rejects
+/// Returns [`Error::EmptyKey`] for an empty key, matching the C, which rejects
 /// `keylen < 1` — and, unlike the C, without leaving the output buffer untouched for the
 /// caller to misread as a result.
 pub fn mac_full(key: &[u8], data: &[u8]) -> Result<[u8; DIGEST_LEN]> {
     if key.is_empty() {
-        return Err(Error::Malformed);
+        return Err(Error::EmptyKey);
     }
 
     // Keys longer than the block are hashed first; shorter keys are zero-padded.
@@ -128,8 +128,8 @@ mod tests {
 
     #[test]
     fn empty_key_is_refused_not_silently_accepted() {
-        assert_eq!(mac(b"", b"anything"), Err(Error::Malformed));
-        assert_eq!(mac_full(b"", b""), Err(Error::Malformed));
+        assert_eq!(mac(b"", b"anything"), Err(Error::EmptyKey));
+        assert_eq!(mac_full(b"", b""), Err(Error::EmptyKey));
     }
 
     #[test]
