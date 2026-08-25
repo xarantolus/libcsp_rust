@@ -101,6 +101,7 @@ global and becomes a `loopback_to_self()` call.
 | `src/arch/{posix,freertos,zephyr}/` | Replaced by `trait Platform`. The whole point: 16 C shim functions become associated types (`Mutex`, `Queue`, `Sem`) plus a clock |
 | `src/drivers/` (socketcan, zephyr CAN, usart linux/zephyr, eth_linux) | Platform drivers, not protocol. The *interface logic* they feed is in scope; the syscalls are not |
 | `csp_if_zmqhub.c` | Needs libzmq. No flight relevance, and it drags `calloc` + pthread mutex into the core |
+| `csp_id_{prepend,extract,strip}_fixup_cspv1` | The little-endian CSP v1 header variants. Verified by grep that their only callers are `csp_if_zmqhub.c:88,137`, so they leave with ZMQ |
 | `src/bindings/python/pycsp.c` | Out of scope by definition |
 | `examples/`, `samples/` | Rewritten as Rust examples where useful |
 
@@ -219,7 +220,39 @@ whoever maintains the fork can see what was found and decide for themselves.
     opposing interface with `if (input.iface == bif_a) destif = bif_b; else destif = bif_a;`
     — no third branch. A frame arriving on an interface that is neither side of the bridge
     is injected into side A as though it had come from side B. The port refuses it.
-13. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+13. **`csp_hmac_verify` compares the tag with `memcmp`.** Not constant time. With a
+    32-bit tag, stopping at the first wrong byte reduces a 2^32 forgery to roughly
+    4 × 2^8 attempts, and a spacecraft link has no rate limit an attacker must respect.
+    The port compares in constant time.
+14. **`csp_hmac_verify`'s length check guards the wrong field.** It tests
+    `packet->length < CSP_HMAC_LENGTH` and then, in the `include_header` branch, computes
+    `packet->frame_length - CSP_HMAC_LENGTH`. A packet with `length >= 4` but
+    `frame_length < 4` underflows that subtraction to about four billion and hashes far
+    past the buffer.
+15. **The SFP fragment flag is sticky on the connection.** `csp_sfp.c:131` does
+    `conn->idout.flags |= CSP_FFRAG` inside the send loop, and **nothing in the library
+    ever clears it** — grep across `src/` finds exactly one write and no reset. So after a
+    single SFP transfer, every later plain datagram on that connection is marked as a
+    fragment. Combined with deviation 3, the receiver then parses it as one, fails, and
+    frees it: the sender creates the condition and the receiver destroys the packet. The
+    flight code runs SFP on the config and log-dump ports, so any connection reused for a
+    plain reply hits this. In the port the flag lives on the packet, not the connection.
+16. **A CMP peek reply pads itself with unrelated buffer contents.**
+    `csp_cmp_peek_handler` writes `len` bytes at `cmp->data` — packed offset **7** — and
+    then sets `packet->length = CMP_PEEK_SIZE(cmp->len)`, which is
+    `sizeof(struct) + tail + len` = **10 + len**. The last three bytes are never written,
+    so they are whatever the previous user of that pooled buffer left there. On a service
+    whose entire job is reading memory, padding the reply with unrelated memory is the
+    wrong direction to be wrong in. The port emits the same wire length, so a C peer sees
+    the size it expects, but **zeroes** the tail.
+17. **`csp_ping` never checks the reply length.** It verifies the *content* correctly —
+    filling the request with `i % 256` and checking every byte — but its loop runs to the
+    **requested** size and indexes `packet->data[i]` without consulting
+    `packet->length`. A short reply is compared against stale bytes left in the pooled
+    buffer. Usually those fail the pattern, so the ping reports failure for the wrong
+    reason rather than passing wrongly; the comparison is still reading data that is not
+    part of the reply.
+18. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the
@@ -227,3 +260,79 @@ whoever maintains the fork can see what was found and decide for themselves.
    empty and every call returns `CSP_ERR_NOMEM` — with no error reported at the point of
    misuse. Nothing in the API says the field is init-only. In the port the version is an
    immutable field of the `Csp` value, so this is unrepresentable.
+19. **CMP `PEEK`/`POKE` are arbitrary memory read and write, on by default.** The handler
+    checks only `len <= 200`, then calls `csp_cmp_memcpy` with an address taken straight
+    off the wire. The default `csp_cmp_memcpy` (`csp_cmp_mem.c:15`) is a bare `memcpy`
+    with no validation of any kind. So a node built with CMP — the default — will read any
+    32-bit address a peer names and send the contents back, and write to any address a
+    peer names. The 64-bit variants `csp_cmp_memread64`/`csp_cmp_memwrite64` default to
+    `CSP_ERR_DRIVER`, i.e. refusing, which is what makes the 32-bit pair look like an
+    oversight rather than a decision. Compounding it, `csp_cmp_set_memcpy` — the function
+    an integrator would call to install a validating replacement — has an **empty body**:
+    it takes the pointer, discards it, returns. It carries `CSP_DEPRECATED`, so a compiler
+    warning is the only signal, and embedded builds routinely suppress those. In the port
+    the equivalent is `Hooks::mem_read`/`mem_write`, whose **defaults refuse**; a node that
+    wants the service implements them for the one region it is willing to expose.
+20. **Re-registering an interface silently unlinks every interface after it.**
+    `csp_iflist_add` sets `ifc->next = NULL` *before* walking the list to check whether
+    `ifc` is already in it. When it is, the duplicate check returns — but `next` has
+    already been cleared, so every interface registered after this one is now unreachable
+    from the head. The function returns `void`, so nothing is reported. Add LOOP, add CAN,
+    call `csp_iflist_add(&csp_if_lo)` a second time, and CAN has left the node. The port
+    returns `Error::DuplicateName` and touches nothing.
+21. **`iface->irq` is declared, printed and telemetered, and never incremented.** Grep
+    across `src/` and `include/` finds no write to it anywhere in the library. It is
+    printed by `csp_iflist_print` and reported over CMP `IF_STATS`
+    (`csp_cmp_if_stats.c:27`), so ground software receives a field that is structurally
+    always zero. Kept in the port because a driver may legitimately fill it in, with
+    `Interface::note_irq` as the way to do that.
+22. **`txbytes`/`rxbytes` exclude the header they just added.** Both count
+    `packet->length` — the payload — not the framed length (`csp_io.c:282`,
+    `csp_route.c:230`). For the 8-byte telemetry packets this fleet sends, a field
+    documented as "Transmitted bytes" under-reports the link by a third. The port counts
+    the frame, consistently on both sides.
+23. **A UDP interface can never report a transmit error.** `csp_if_udp_tx` ignores
+    `sendto`'s return value entirely, and returns `CSP_ERR_NONE` even when it took the
+    early exit for a missing socket. `csp_send_direct_iface` therefore increments `tx` and
+    `txbytes` for every packet, and `tx_error` on a UDP interface is structurally zero. A
+    node whose UDP peer is unreachable reports a perfectly healthy link.
+24. **`csp_listen`'s backlog parameter is ignored.** `(void)backlog;` — the RX queue is
+    always `CSP_CONN_RXQUEUE_LEN`, a compile-time constant. An application asking for a
+    backlog of 1 to bound its memory, or 100 to absorb a burst, gets neither and is told
+    nothing. The port has no separate listen step: `bind` is the whole operation, and the
+    backlog is a const generic on the node, so the number is where the storage is.
+25. **`csp_socket_close` unbinds only the first port that names the socket.** It `break`s
+    out of the scan (`csp_port.c:145`), but `csp_bind` never checks whether the socket is
+    already bound elsewhere — it only checks that the *port* is free. So one socket bound
+    to ports 10 and 11, then closed, leaves port 11 pointing at a socket whose receive
+    queue has just been drained and whose storage the caller is about to reuse. In the
+    port a port is unbound by number, so the situation cannot arise.
+26. **RDP options are process-wide.** `csp_rdp_set_opt` writes six file-scope statics that
+    every subsequent connection copies from (`csp_rdp.c:801-804`, `920-921`). They are read
+    at connection setup, not per packet, so already-open connections keep their negotiated
+    values — but any component calling it changes the defaults for every other component
+    in the node. In the port they are per-connection `SynOptions`; a test pins the default
+    values to the C's compiled-in ones, because a Rust node and a C node that disagree here
+    negotiate different windows.
+27. **A one-character route-table entry ends the C's parse and it reports success.**
+    `while (str && (strlen(str) > 1))` (`csp_rtable_stdio.c:25`) is the loop condition, so
+    the first short token terminates parsing. Every entry after it is dropped and
+    `csp_rtable_load` returns the count it managed before stopping — a non-negative number,
+    which every caller reads as success. `"1 CAN,2,3 KISS"` installs one route and reports
+    it worked. Confirmed by a differential test; the port skips the short entry and parses
+    the rest.
+28. **The route table is truncated at 100 characters, and what that costs depends on where
+    the cut lands.** `strnlen(rtable, 100)` into a VLA (`csp_rtable_stdio.c:17-20`). If the
+    cut falls mid-entry, the fragment fails to parse and the *whole* load is rejected — a
+    completely valid table refused for being long. If it falls on a separator, every
+    surviving entry parses, a positive count comes back, and the dropped tail is never
+    mentioned: the caller sees success and a routing table missing routes. Both cases are
+    pinned by differential tests. The port parses the whole string.
+29. **A KISS frame without a CRC32 is dropped silently by any stock C peer.**
+    `CSP_ENABLE_KISS_CRC` defaults to `ON` (`CMakeLists.txt:50`) and `csp_kiss_rx` runs
+    `csp_crc32_verify` on every completed frame; a frame that fails is dropped with
+    `iface->frame++` and nothing else — no log line, no error to any caller, nothing on the
+    wire. A node whose frames all vanish this way is indistinguishable from one with a dead
+    UART. Not a defect in the framing, but a deployment default sharp enough that
+    `kiss::encode`'s documentation now states it, backed by a differential test against the
+    real `csp_kiss_rx`.

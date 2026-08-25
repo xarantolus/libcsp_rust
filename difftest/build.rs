@@ -37,6 +37,20 @@ fn main() {
         "src/crypto/csp_hmac.c",
         "src/csp_init.c",
         "src/csp_debug.c",
+        // The route table and the interface list it names. csp_rtable_stdio.c is the
+        // parser under test; the CIDR table is what it loads into.
+        "src/csp_rtable_cidr.c",
+        "src/csp_rtable_stdio.c",
+        "src/csp_iflist.c",
+        // KISS framing. csp_kiss_rx pushes into the qfifo, which the shim overrides to
+        // capture the frame, so only the buffer pool comes with it.
+        "src/interfaces/csp_if_kiss.c",
+        "src/csp_buffer.c",
+        // csp_buffer.c uses the OS queue shim.
+        "src/arch/posix/csp_queue.c",
+        "src/arch/posix/pthread_queue.c",
+        "src/arch/posix/csp_semaphore.c",
+        "src/arch/posix/csp_time.c",
     ] {
         b.file(libcsp.join(f));
     }

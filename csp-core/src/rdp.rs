@@ -162,7 +162,12 @@ impl SynOptions {
             return Err(Error::Truncated);
         }
         let w = |i: usize| {
-            u32::from_be_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]])
+            u32::from_be_bytes([
+                data[i * 4],
+                data[i * 4 + 1],
+                data[i * 4 + 2],
+                data[i * 4 + 3],
+            ])
         };
         let window_size = clamp(w(0), 1, max_window);
         let conn_timeout = clamp(w(1), MIN_CONN_TIMEOUT, MAX_CONN_TIMEOUT);
@@ -448,6 +453,111 @@ impl<const N: usize> TxQueue<N> {
     }
 }
 
+/// One out-of-order packet, held until the gap before it fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RxEntry {
+    seq_nr: u16,
+    token: u16,
+}
+
+/// Packets that arrived out of order, held until they can be delivered in sequence.
+///
+/// Without this, a packet arriving after a gap is **discarded** and the peer has to
+/// retransmit it — so a single lost packet costs a retransmission of everything sent
+/// after it, which on a link with any real latency is most of the window.
+///
+/// The C's version scans linearly and restarts from the front after every delivery (the
+/// backward `goto front` at `csp_rdp.c:256`). Here that is a `while let` loop in the
+/// caller, which is the same algorithm without the label.
+#[derive(Debug)]
+pub struct RxQueue<const N: usize> {
+    entries: [Option<RxEntry>; N],
+}
+
+impl<const N: usize> Default for RxQueue<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> RxQueue<N> {
+    /// Compile-time invariant: with no slots, every out-of-order packet is dropped and
+    /// the connection silently degrades to stop-and-wait.
+    const SANITY: () = assert!(N > 0, "the RDP receive queue needs at least one slot");
+
+    /// An empty queue.
+    pub const fn new() -> Self {
+        let () = Self::SANITY;
+        RxQueue { entries: [None; N] }
+    }
+
+    /// Packets held.
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    /// True if nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Is this sequence number already buffered?
+    pub fn contains(&self, seq_nr: u16) -> bool {
+        self.entries.iter().flatten().any(|e| e.seq_nr == seq_nr)
+    }
+
+    /// Hold an out-of-order packet.
+    ///
+    /// [`Error::DuplicateSequence`] means the peer retransmitted something already held —
+    /// expected, not a fault, and the caller should release its copy.
+    /// [`Error::TableFull`] means the window is exhausted.
+    pub fn insert(&mut self, seq_nr: u16, token: u16) -> Result<()> {
+        if self.contains(seq_nr) {
+            return Err(Error::DuplicateSequence { seq: seq_nr });
+        }
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(RxEntry { seq_nr, token });
+                return Ok(());
+            }
+        }
+        Err(Error::TableFull)
+    }
+
+    /// Take the packet with sequence number `seq_nr`, if it is held.
+    ///
+    /// Drive it in a loop to drain everything the newly-arrived packet unblocked:
+    ///
+    /// ```ignore
+    /// while let Some(token) = rx.take(conn.rcv_cur.wrapping_add(1)) {
+    ///     deliver(token);
+    ///     conn.rcv_cur = conn.rcv_cur.wrapping_add(1);
+    /// }
+    /// ```
+    pub fn take(&mut self, seq_nr: u16) -> Option<u16> {
+        for slot in self.entries.iter_mut() {
+            if matches!(slot, Some(e) if e.seq_nr == seq_nr) {
+                return slot.take().map(|e| e.token);
+            }
+        }
+        None
+    }
+
+    /// Abandon everything, returning the tokens so the caller can release them.
+    pub fn flush(&mut self, out: &mut [u16]) -> usize {
+        let mut n = 0;
+        for slot in self.entries.iter_mut() {
+            if let Some(e) = slot.take() {
+                if n < out.len() {
+                    out[n] = e.token;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+}
+
 /// Is `a` strictly before `b` in wrapping 16-bit sequence space?
 pub const fn seq_before(a: u16, b: u16) -> bool {
     // Half the space is "before"; this is the standard wrapping comparison.
@@ -479,6 +589,8 @@ pub struct Connection {
     pub rcv_lsa: u16,
     /// When the connection last saw traffic, ms.
     pub last_activity: u32,
+    /// When an acknowledgement was last sent, ms.
+    pub ack_timestamp: u32,
     /// Retransmission counter.
     pub retransmits: u32,
 }
@@ -499,8 +611,53 @@ impl Connection {
             rcv_irs: 0,
             rcv_lsa: 0,
             last_activity: 0,
+            ack_timestamp: 0,
             retransmits: 0,
         }
+    }
+
+    /// Is an acknowledgement due?
+    ///
+    /// Mirrors `csp_rdp_should_ack`, which has three conditions and is checked separately
+    /// from packet handling — `csp_rdp_check_ack` is called by the router, not by the
+    /// receive path.
+    ///
+    /// Delaying acks is a bandwidth optimisation: one ack can cover several packets. But
+    /// *never* acking is not, and that is what this port did before the audit — in-order
+    /// data was delivered and never acknowledged, so the sender only learned of it when
+    /// its own retransmission timer fired. Every packet cost a full `packet_timeout` of
+    /// latency and a duplicate on the link.
+    pub fn should_ack(&self, now_ms: u32) -> bool {
+        // Nothing to acknowledge.
+        if self.rcv_cur == self.rcv_lsa {
+            return false;
+        }
+        if !self.opts.delayed_acks {
+            return true;
+        }
+        // Wrapping subtraction, so the 49-day clock wrap does not suppress every ack.
+        if now_ms.wrapping_sub(self.ack_timestamp) > self.opts.ack_timeout {
+            return true;
+        }
+        // Enough packets have gone unacknowledged.
+        let outstanding = self.rcv_cur.wrapping_sub(self.rcv_lsa);
+        outstanding as u32 >= self.opts.ack_delay_count
+    }
+
+    /// Take the acknowledgement that is due, if any.
+    ///
+    /// Records that it was sent, so the delay counters restart.
+    pub fn poll_ack(&mut self, now_ms: u32) -> Option<Header> {
+        if self.state != State::Open || !self.should_ack(now_ms) {
+            return None;
+        }
+        self.rcv_lsa = self.rcv_cur;
+        self.ack_timestamp = now_ms;
+        Some(Header {
+            flags: ACK,
+            seq_nr: self.snd_nxt,
+            ack_nr: self.rcv_cur,
+        })
     }
 
     /// Step the machine. Returns what the caller should do.
@@ -592,6 +749,7 @@ impl Connection {
                     self.rcv_lsa = h.seq_nr.wrapping_sub(1);
                     self.snd_una = h.ack_nr.wrapping_add(1);
                     self.retransmits = 0;
+                    self.ack_timestamp = now_ms;
                     self.state = State::Open;
                     return Action::Opened;
                 }
@@ -601,6 +759,7 @@ impl Connection {
             State::SynRcvd => {
                 if h.has(ACK) && h.ack_nr == self.snd_iss {
                     self.snd_una = h.ack_nr.wrapping_add(1);
+                    self.ack_timestamp = now_ms;
                     self.state = State::Open;
                     return Action::Opened;
                 }
@@ -717,8 +876,14 @@ mod tests {
         );
         assert_eq!(o.packet_timeout, MAX_PACKET_TIMEOUT);
         assert!(o.delayed_acks);
-        assert_eq!(o.ack_timeout, o.conn_timeout, "bounded by the clamped conn_timeout");
-        assert_eq!(o.ack_delay_count, o.window_size, "bounded by the clamped window");
+        assert_eq!(
+            o.ack_timeout, o.conn_timeout,
+            "bounded by the clamped conn_timeout"
+        );
+        assert_eq!(
+            o.ack_delay_count, o.window_size,
+            "bounded by the clamped window"
+        );
     }
 
     #[test]
@@ -765,7 +930,11 @@ mod tests {
         // peer replies SYN|ACK
         let a = c.step(
             Event::Packet(
-                Header { flags: SYN | ACK, seq_nr: 500, ack_nr: 100 },
+                Header {
+                    flags: SYN | ACK,
+                    seq_nr: 500,
+                    ack_nr: 100,
+                },
                 &[],
             ),
             10,
@@ -781,7 +950,14 @@ mod tests {
         let mut c = Connection::new(900, SynOptions::default());
         let opts = SynOptions::default();
         let a = c.step(
-            Event::Packet(Header { flags: SYN, seq_nr: 42, ack_nr: 0 }, &syn_payload(&opts)),
+            Event::Packet(
+                Header {
+                    flags: SYN,
+                    seq_nr: 42,
+                    ack_nr: 0,
+                },
+                &syn_payload(&opts),
+            ),
             0,
             MAX_WINDOW,
         );
@@ -792,7 +968,14 @@ mod tests {
         assert_eq!(c.state, State::SynRcvd);
 
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 43, ack_nr: 900 }, &[]),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 43,
+                    ack_nr: 900,
+                },
+                &[],
+            ),
             5,
             MAX_WINDOW,
         );
@@ -805,7 +988,14 @@ mod tests {
         // Using defaults here would let a truncated SYN silently pick this node's timers.
         let mut c = Connection::new(1, SynOptions::default());
         let a = c.step(
-            Event::Packet(Header { flags: SYN, seq_nr: 7, ack_nr: 0 }, &[0u8; 8]),
+            Event::Packet(
+                Header {
+                    flags: SYN,
+                    seq_nr: 7,
+                    ack_nr: 0,
+                },
+                &[0u8; 8],
+            ),
             0,
             MAX_WINDOW,
         );
@@ -819,7 +1009,14 @@ mod tests {
             let mut c = Connection::new(1, SynOptions::default());
             c.state = setup;
             let a = c.step(
-                Event::Packet(Header { flags: RST, seq_nr: 0, ack_nr: 0 }, &[]),
+                Event::Packet(
+                    Header {
+                        flags: RST,
+                        seq_nr: 0,
+                        ack_nr: 0,
+                    },
+                    &[],
+                ),
                 0,
                 MAX_WINDOW,
             );
@@ -834,7 +1031,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 11, ack_nr: 0 }, b"payload"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 11,
+                    ack_nr: 0,
+                },
+                b"payload",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -850,7 +1054,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 10, ack_nr: 0 }, b"again"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 10,
+                    ack_nr: 0,
+                },
+                b"again",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -864,7 +1075,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 99, ack_nr: 0 }, b"jump"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 99,
+                    ack_nr: 0,
+                },
+                b"jump",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -920,7 +1138,10 @@ mod tests {
     #[test]
     fn connecting_twice_does_nothing_the_second_time() {
         let mut c = Connection::new(1, SynOptions::default());
-        assert!(matches!(c.step(Event::Connect, 0, MAX_WINDOW), Action::SendSyn(..)));
+        assert!(matches!(
+            c.step(Event::Connect, 0, MAX_WINDOW),
+            Action::SendSyn(..)
+        ));
         assert_eq!(c.step(Event::Connect, 0, MAX_WINDOW), Action::Nothing);
     }
 
@@ -928,12 +1149,253 @@ mod tests {
     fn two_connections_can_use_different_options() {
         // The C keeps its six RDP tunables in file statics shared by every connection, so
         // this is not expressible there at all.
-        let fast = SynOptions { packet_timeout: 100, ..SynOptions::default() };
-        let slow = SynOptions { packet_timeout: 5_000, ..SynOptions::default() };
+        let fast = SynOptions {
+            packet_timeout: 100,
+            ..SynOptions::default()
+        };
+        let slow = SynOptions {
+            packet_timeout: 5_000,
+            ..SynOptions::default()
+        };
         let a = Connection::new(1, fast);
         let b = Connection::new(2, slow);
         assert_eq!(a.opts.packet_timeout, 100);
         assert_eq!(b.opts.packet_timeout, 5_000);
+    }
+
+    // --- acknowledgement ---
+
+    fn open_conn() -> Connection {
+        let mut c = Connection::new(100, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        c.rcv_lsa = 10;
+        c.ack_timestamp = 0;
+        c
+    }
+
+    #[test]
+    fn received_data_is_eventually_acknowledged() {
+        // Before this audit, in-order data was delivered and NEVER acknowledged, so the
+        // sender only learned of it when its own retransmit timer fired -- a full
+        // packet_timeout of latency and a duplicate on the link, per packet.
+        let mut c = open_conn();
+        assert_eq!(
+            c.step(
+                Event::Packet(
+                    Header {
+                        flags: ACK,
+                        seq_nr: 11,
+                        ack_nr: 0
+                    },
+                    b"data"
+                ),
+                10,
+                MAX_WINDOW
+            ),
+            Action::Deliver
+        );
+        // Past the ack timeout, an acknowledgement is due.
+        let ack = c
+            .poll_ack(10_000)
+            .expect("an ack must eventually be produced");
+        assert_eq!(ack.flags, ACK);
+        assert_eq!(ack.ack_nr, 11, "must acknowledge what was received");
+    }
+
+    #[test]
+    fn nothing_received_means_nothing_to_acknowledge() {
+        let mut c = open_conn();
+        assert!(!c.should_ack(999_999));
+        assert_eq!(c.poll_ack(999_999), None);
+    }
+
+    #[test]
+    fn with_delayed_acks_off_every_packet_is_acknowledged_at_once() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = false;
+        c.rcv_cur = 11;
+        assert!(c.should_ack(0), "no delay means acknowledge immediately");
+    }
+
+    #[test]
+    fn a_delayed_ack_fires_on_the_timeout() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = true;
+        c.opts.ack_timeout = 250;
+        c.opts.ack_delay_count = 100; // so only the timeout can trigger it
+        c.rcv_cur = 11;
+        assert!(!c.should_ack(100), "still inside the ack timeout");
+        assert!(c.should_ack(500), "past the ack timeout");
+    }
+
+    #[test]
+    fn a_delayed_ack_fires_on_the_packet_count() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = true;
+        c.opts.ack_timeout = 100_000; // so only the count can trigger it
+        c.opts.ack_delay_count = 2;
+        c.rcv_cur = 11;
+        assert!(
+            !c.should_ack(0),
+            "one packet outstanding, delay count is two"
+        );
+        c.rcv_cur = 12;
+        assert!(c.should_ack(0), "two outstanding reaches the delay count");
+    }
+
+    #[test]
+    fn taking_an_ack_restarts_both_delay_counters() {
+        let mut c = open_conn();
+        c.opts.ack_delay_count = 1;
+        c.rcv_cur = 11;
+        assert!(c.poll_ack(500).is_some());
+        assert!(!c.should_ack(500), "nothing outstanding right after acking");
+        assert_eq!(c.rcv_lsa, 11);
+        assert_eq!(c.ack_timestamp, 500);
+    }
+
+    #[test]
+    fn acking_survives_the_clock_wrap() {
+        // `now > ack_timestamp + timeout` would suppress every ack at the wrap.
+        let mut c = open_conn();
+        c.opts.ack_timeout = 250;
+        c.opts.ack_delay_count = 100;
+        c.rcv_cur = 11;
+        c.ack_timestamp = u32::MAX - 100;
+        assert!(
+            !c.should_ack(u32::MAX.wrapping_add(50)),
+            "50 ms later is still inside the timeout, wrap or not"
+        );
+        assert!(
+            c.should_ack(u32::MAX.wrapping_add(500)),
+            "500 ms later is past it"
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_produces_no_acks() {
+        let mut c = open_conn();
+        c.rcv_cur = 11;
+        c.state = State::Closed;
+        assert_eq!(c.poll_ack(999_999), None);
+    }
+
+    // --- receive reorder queue ---
+
+    #[test]
+    fn an_out_of_order_packet_is_held_not_discarded() {
+        // Discarding it costs a retransmission of everything after the gap.
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(12, 112).unwrap();
+        assert_eq!(q.len(), 1);
+        assert!(q.contains(12));
+        // The gap has not filled, so 12 is not deliverable yet.
+        assert_eq!(q.take(11), None);
+    }
+
+    #[test]
+    fn filling_a_gap_releases_everything_it_unblocked() {
+        // The C restarts its scan from the front after each delivery (goto front); here
+        // that is a while-let in the caller.
+        let mut q: RxQueue<8> = RxQueue::new();
+        // 12, 13, 14 arrived; 11 was lost and has just been retransmitted.
+        for (seq, tok) in [(12u16, 112u16), (13, 113), (14, 114)] {
+            q.insert(seq, tok).unwrap();
+        }
+        let mut rcv_cur = 10u16;
+        let mut delivered = heapless::Vec8::new();
+        // 11 arrives in order and is delivered directly.
+        rcv_cur = rcv_cur.wrapping_add(1);
+        delivered.push(111);
+        // Now drain what it unblocked.
+        while let Some(tok) = q.take(rcv_cur.wrapping_add(1)) {
+            delivered.push(tok);
+            rcv_cur = rcv_cur.wrapping_add(1);
+        }
+        assert_eq!(delivered.as_slice(), &[111, 112, 113, 114]);
+        assert!(q.is_empty());
+        assert_eq!(rcv_cur, 14);
+    }
+
+    #[test]
+    fn a_gap_that_does_not_fill_holds_the_rest_back() {
+        let mut q: RxQueue<8> = RxQueue::new();
+        // 13 and 14 arrived, but 12 is still missing.
+        q.insert(13, 113).unwrap();
+        q.insert(14, 114).unwrap();
+        let rcv_cur = 11u16;
+        assert_eq!(q.take(rcv_cur.wrapping_add(1)), None, "12 is still missing");
+        assert_eq!(q.len(), 2, "and the rest stay held");
+    }
+
+    #[test]
+    fn a_retransmitted_duplicate_is_reported_as_such() {
+        // Retransmission is how RDP recovers, so this is expected rather than a fault --
+        // and the caller must release its copy rather than leak it.
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(12, 112).unwrap();
+        assert_eq!(q.insert(12, 999), Err(Error::DuplicateSequence { seq: 12 }));
+        assert_eq!(q.len(), 1, "the original is kept, not replaced");
+        assert_eq!(q.take(12), Some(112), "and it is the original token");
+    }
+
+    #[test]
+    fn a_full_receive_window_is_reported() {
+        let mut q: RxQueue<2> = RxQueue::new();
+        q.insert(1, 1).unwrap();
+        q.insert(2, 2).unwrap();
+        assert_eq!(q.insert(3, 3), Err(Error::TableFull));
+    }
+
+    #[test]
+    fn the_reorder_queue_works_across_the_sequence_wrap() {
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(0, 200).unwrap();
+        q.insert(1, 201).unwrap();
+        let mut rcv_cur = 0xFFFEu16;
+        let mut got = heapless::Vec8::new();
+        rcv_cur = rcv_cur.wrapping_add(1); // 0xFFFF delivered in order
+        while let Some(t) = q.take(rcv_cur.wrapping_add(1)) {
+            got.push(t);
+            rcv_cur = rcv_cur.wrapping_add(1);
+        }
+        assert_eq!(got.as_slice(), &[200, 201], "must not stall at the wrap");
+        assert_eq!(rcv_cur, 1);
+    }
+
+    #[test]
+    fn rx_flush_returns_every_token_so_nothing_leaks() {
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(1, 101).unwrap();
+        q.insert(2, 102).unwrap();
+        let mut out = [0u16; 8];
+        let n = q.flush(&mut out);
+        assert_eq!(n, 2);
+        assert!(out[..n].contains(&101) && out[..n].contains(&102));
+        assert!(q.is_empty());
+    }
+
+    mod heapless {
+        pub struct Vec8 {
+            items: [u16; 8],
+            len: usize,
+        }
+        impl Vec8 {
+            pub fn new() -> Self {
+                Vec8 {
+                    items: [0; 8],
+                    len: 0,
+                }
+            }
+            pub fn push(&mut self, v: u16) {
+                self.items[self.len] = v;
+                self.len += 1;
+            }
+            pub fn as_slice(&self) -> &[u16] {
+                &self.items[..self.len]
+            }
+        }
     }
 
     // --- retransmission queue ---
@@ -969,7 +1431,13 @@ mod tests {
         q.push(10, 100, 0).unwrap();
         let (out, n) = drain(&mut q, 1_500, 1_000, 10);
         assert_eq!(n, 1);
-        assert_eq!(out[0], TxAction::Retransmit { token: 100, seq_nr: 10 });
+        assert_eq!(
+            out[0],
+            TxAction::Retransmit {
+                token: 100,
+                seq_nr: 10
+            }
+        );
         assert_eq!(q.len(), 1, "still queued until acknowledged");
     }
 
@@ -1122,5 +1590,21 @@ mod tests {
                 let _ = c.step(Event::Tick, x.wrapping_add(1), MAX_WINDOW);
             }
         }
+    }
+
+    #[test]
+    fn the_defaults_are_the_cs_compiled_in_values() {
+        // libcsp keeps these in six file-scope statics (csp_rdp.c:37-42) that
+        // csp_rdp_set_opt overwrites process-wide -- so one library changing the window
+        // size changes it for every connection in the node, including ones already open.
+        // Here they are per-connection defaults, and these numbers must still match or a
+        // Rust node and a C node negotiate differently.
+        let d = SynOptions::default();
+        assert_eq!(d.window_size, 4);
+        assert_eq!(d.conn_timeout, 10_000);
+        assert_eq!(d.packet_timeout, 1_000);
+        assert!(d.delayed_acks);
+        assert_eq!(d.ack_timeout, 250, "csp_rdp_ack_timeout = 1000 / 4");
+        assert_eq!(d.ack_delay_count, 2, "csp_rdp_ack_delay_count = 4 / 2");
     }
 }

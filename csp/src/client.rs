@@ -35,8 +35,16 @@ pub fn ping(payload: &[u8]) -> Request<'_> {
 
 /// Verify a ping reply against what was sent.
 ///
-/// The C's `csp_ping` compares only the *length*, so a path that corrupts every byte but
-/// preserves the length passes.
+/// The C's `csp_ping` gets this half right and half wrong. It **does** verify the content
+/// — it fills the request with `i % 256` and checks every byte of the reply against that
+/// pattern. What it never checks is the reply's **length**: the loop runs to `size`, the
+/// size that was *requested*, and indexes `packet->data[i]` regardless of
+/// `packet->length`. A short reply is therefore compared against stale bytes left in the
+/// pooled buffer by whatever used it last. Usually those fail the pattern and the ping
+/// correctly reports failure, but the comparison is reading data that is not part of the
+/// reply.
+///
+/// This checks the length first, then the content.
 pub fn check_ping(sent: &[u8], reply: &[u8]) -> Result<()> {
     if reply.len() != sent.len() {
         return Err(Error::LengthExceedsMaximum {
@@ -48,6 +56,25 @@ pub fn check_ping(sent: &[u8], reply: &[u8]) -> Result<()> {
         return Err(Error::BadChecksum);
     }
     Ok(())
+}
+
+/// The single byte `csp_ping_noreply` sends.
+pub const PING_NOREPLY_PAYLOAD: [u8; 1] = [0x55];
+
+/// Build a fire-and-forget ping.
+///
+/// `csp_ping_noreply`: one 0x55 byte to the ping port, with no reply expected and no
+/// connection kept open. Used to poke a node whose reply path may not work — after a
+/// radio reconfiguration, say — where the useful signal is whether the *node* reacts, not
+/// whether the packet comes back.
+///
+/// The C opens the connection with `CSP_O_CRC32` while `csp_ping` takes its options from
+/// the caller, so the no-reply variant is the more strongly protected of the two.
+pub const fn ping_noreply() -> Request<'static> {
+    Request {
+        port: ports::PING,
+        payload: &PING_NOREPLY_PAYLOAD,
+    }
 }
 
 /// Build a request for free memory.
@@ -166,7 +193,10 @@ mod tests {
     #[test]
     fn reboot_and_shutdown_differ_only_in_the_magic() {
         assert_ne!(reboot().payload, shutdown().payload);
-        assert_eq!(reboot().payload, &crate::service::REBOOT_MAGIC.to_be_bytes());
+        assert_eq!(
+            reboot().payload,
+            &crate::service::REBOOT_MAGIC.to_be_bytes()
+        );
         assert_eq!(
             shutdown().payload,
             &crate::service::SHUTDOWN_MAGIC.to_be_bytes()
@@ -191,15 +221,58 @@ mod tests {
 
     #[test]
     fn a_ping_reply_must_match_byte_for_byte() {
-        // csp_ping compares only the LENGTH, so a path that corrupts every byte while
-        // preserving the length passes.
+        // The C verifies content but never checks the reply's length -- its loop runs to
+        // the REQUESTED size and reads past packet->length into stale buffer bytes.
         let sent = b"abcdefgh";
         assert!(check_ping(sent, b"abcdefgh").is_ok());
         assert_eq!(check_ping(sent, b"abcdefgX"), Err(Error::BadChecksum));
         assert!(
-            matches!(check_ping(sent, b"abc"), Err(Error::LengthExceedsMaximum { .. })),
+            matches!(
+                check_ping(sent, b"abc"),
+                Err(Error::LengthExceedsMaximum { .. })
+            ),
             "a short reply is a different failure from a corrupted one"
         );
+    }
+
+    #[test]
+    fn a_short_reply_is_refused_rather_than_compared_against_stale_bytes() {
+        // This is the C's actual defect: its loop runs to the requested size and indexes
+        // packet->data[i] without consulting packet->length, so a truncated reply is
+        // compared against whatever the previous user of that pooled buffer left behind.
+        let sent = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        // A truncated but otherwise correct prefix must still be refused.
+        assert!(matches!(
+            check_ping(&sent, &sent[..4]),
+            Err(Error::LengthExceedsMaximum { got: 4, max: 8 })
+        ));
+        // And a longer-than-expected reply is refused too.
+        let long = [0u8, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(check_ping(&sent, &long).is_err());
+    }
+
+    #[test]
+    fn a_no_reply_ping_is_one_byte_to_the_ping_port() {
+        // csp_ping_noreply: poke the node, do not wait. Useful when the reply path may
+        // not work -- after a radio reconfiguration -- and the signal is whether the node
+        // reacts at all.
+        let r = ping_noreply();
+        assert_eq!(r.port, ports::PING);
+        assert_eq!(r.payload, &[0x55]);
+    }
+
+    #[test]
+    fn a_no_reply_ping_is_still_a_ping_the_server_answers() {
+        // It expects no reply, but it is not a different message: a node that does answer
+        // must produce a valid echo, or the two halves have drifted apart.
+        use crate::service::{respond, NodeStatus, Request as SvcRequest};
+        let r = ping_noreply();
+        let svc = SvcRequest::decode(r.port, r.payload).unwrap();
+        let mut out = [0u8; 8];
+        let n = respond(svc, r.payload, &NodeStatus::default(), &mut out)
+            .unwrap()
+            .unwrap();
+        assert!(check_ping(r.payload, &out[..n]).is_ok());
     }
 
     #[test]
@@ -228,11 +301,7 @@ mod tests {
             buf_free: 12,
             uptime_s: 3600,
         };
-        for (req, expected) in [
-            (uptime(), 3600u32),
-            (memfree(), 4096),
-            (buf_free(), 12),
-        ] {
+        for (req, expected) in [(uptime(), 3600u32), (memfree(), 4096), (buf_free(), 12)] {
             let svc = SvcRequest::decode(req.port, req.payload).unwrap();
             let mut out = [0u8; 16];
             let n = respond(svc, req.payload, &status, &mut out)
@@ -298,6 +367,9 @@ mod tests {
     #[cfg(feature = "cmp")]
     #[test]
     fn a_truncated_cmp_reply_is_refused() {
-        assert_eq!(check_cmp_reply(cmp::code::IDENT, &[0xff]), Err(Error::Truncated));
+        assert_eq!(
+            check_cmp_reply(cmp::code::IDENT, &[0xff]),
+            Err(Error::Truncated)
+        );
     }
 }

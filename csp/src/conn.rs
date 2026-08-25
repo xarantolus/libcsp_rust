@@ -17,6 +17,18 @@ use csp_core::{Error, Id, Result};
 #[cfg(feature = "rdp")]
 use csp_core::rdp;
 
+/// Which end opened the connection.
+///
+/// This changes how an incoming packet is matched to it, and the difference is not
+/// cosmetic — see [`Table::find`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// We opened it with `connect`. Our source port is ephemeral and therefore unique.
+    Client,
+    /// A peer opened it by sending to a bound port.
+    Server,
+}
+
 /// Connection lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -49,6 +61,7 @@ impl Handle {
 #[derive(Debug)]
 struct Entry<const RXQ: usize> {
     state: State,
+    kind: Kind,
     generation: u16,
     /// Header of packets arriving on this connection.
     idin: Id,
@@ -71,6 +84,7 @@ impl<const RXQ: usize> Entry<RXQ> {
     fn new() -> Self {
         Entry {
             state: State::Closed,
+            kind: Kind::Server,
             generation: 0,
             idin: Id::default(),
             idout: Id::default(),
@@ -141,6 +155,11 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// Returns [`Error::TableFull`] when every slot is in use — an error carrying that
     /// meaning, rather than a null the caller may or may not check.
     pub fn alloc(&mut self, idout: Id, opts: u32, now_ms: u32) -> Result<Handle> {
+        self.alloc_kind(idout, opts, now_ms, Kind::Server)
+    }
+
+    /// Open a connection, saying which end initiated it.
+    pub fn alloc_kind(&mut self, idout: Id, opts: u32, now_ms: u32, kind: Kind) -> Result<Handle> {
         for step in 0..N {
             let i = (self.cursor + step + 1) % N;
             if self.conns[i].state == State::Closed {
@@ -149,6 +168,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
                 let c = &mut self.conns[i];
                 c.generation = gen;
                 c.state = State::Open;
+                c.kind = kind;
                 c.idout = idout;
                 c.opts = opts;
                 c.last_activity = now_ms;
@@ -260,13 +280,16 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// Draining is not optional: the queue holds indices, so anything left behind leaks.
     pub fn close(&mut self, h: Handle, drained: &mut [u16]) -> Result<usize> {
         let c = self.entry_mut(h)?;
+        // Checked before anything is taken out of the queue. A slot removed but not
+        // reported is a slot nobody releases, and the pool never gets it back.
+        if drained.len() < c.rx_len {
+            return Err(Error::BufferTooSmall { needed: c.rx_len });
+        }
         let mut n = 0;
         while c.rx_len > 0 {
             if let Some(idx) = c.rx[c.rx_head].take() {
-                if n < drained.len() {
-                    drained[n] = idx;
-                    n += 1;
-                }
+                drained[n] = idx;
+                n += 1;
             }
             c.rx_head = (c.rx_head + 1) % RXQ;
             c.rx_len -= 1;
@@ -275,26 +298,28 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         Ok(n)
     }
 
-    /// Close every connection idle for longer than `timeout_ms`, returning how many.
+    /// Close every server connection bound to `port`, draining their queues.
     ///
-    /// Connection slots are the scarcest resource on the node; without this a peer that
-    /// opens connections and walks away exhausts the table permanently.
-    pub fn expire_idle(&mut self, now_ms: u32, timeout_ms: u32, drained: &mut [u16]) -> (usize, usize) {
+    /// `csp_socket_close` does this, and it must: without it a connection created before
+    /// the port was unbound stays acceptable, so `accept` keeps handing out connections
+    /// for a port the application has stopped serving.
+    ///
+    /// Stops as soon as `drained` cannot hold another connection's queue, returning how
+    /// many were closed and how many slots need releasing. Call again to continue.
+    pub fn close_port(&mut self, port: u8, drained: &mut [u16]) -> (usize, usize) {
         let mut closed = 0;
         let mut n = 0;
         for c in self.conns.iter_mut() {
-            if c.state != State::Open {
+            if c.state != State::Open || c.kind != Kind::Server || c.idin.dport != port {
                 continue;
             }
-            if now_ms.wrapping_sub(c.last_activity) <= timeout_ms {
-                continue;
+            if drained.len() - n < c.rx_len {
+                break;
             }
             while c.rx_len > 0 {
                 if let Some(idx) = c.rx[c.rx_head].take() {
-                    if n < drained.len() {
-                        drained[n] = idx;
-                        n += 1;
-                    }
+                    drained[n] = idx;
+                    n += 1;
                 }
                 c.rx_head = (c.rx_head + 1) % RXQ;
                 c.rx_len -= 1;
@@ -305,14 +330,75 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         (closed, n)
     }
 
-    /// Find the open connection matching an incoming header, if any.
+    /// Close every connection idle for longer than `timeout_ms`, returning how many.
+    ///
+    /// Connection slots are the scarcest resource on the node; without this a peer that
+    /// opens connections and walks away exhausts the table permanently.
+    pub fn expire_idle(
+        &mut self,
+        now_ms: u32,
+        timeout_ms: u32,
+        drained: &mut [u16],
+    ) -> (usize, usize) {
+        let mut closed = 0;
+        let mut n = 0;
+        for c in self.conns.iter_mut() {
+            if c.state != State::Open {
+                continue;
+            }
+            if now_ms.wrapping_sub(c.last_activity) <= timeout_ms {
+                continue;
+            }
+            // Same rule as `close`: never take a slot we cannot report. Leaving the
+            // connection open for the next sweep costs one slot for one tick; dropping
+            // the index costs it permanently.
+            if drained.len() - n < c.rx_len {
+                break;
+            }
+            while c.rx_len > 0 {
+                if let Some(idx) = c.rx[c.rx_head].take() {
+                    drained[n] = idx;
+                    n += 1;
+                }
+                c.rx_head = (c.rx_head + 1) % RXQ;
+                c.rx_len -= 1;
+            }
+            c.reset();
+            closed += 1;
+        }
+        (closed, n)
+    }
+
+    /// The kind of a connection.
+    pub fn kind(&self, h: Handle) -> Result<Kind> {
+        Ok(self.entry(h)?.kind)
+    }
+
+    /// Find the open connection an incoming header belongs to.
+    ///
+    /// The matching rule **differs by kind**, and the difference matters:
+    ///
+    /// - A [`Kind::Client`] connection matches on **destination port alone**. Our source
+    ///   port was ephemeral and is therefore unique, so the reply's destination port
+    ///   identifies the connection by itself. The C spells out why this is deliberate:
+    ///   *"responses to broadcast addresses are accepted as long as the incoming port
+    ///   matches the unique source port of the connection"*. Matching on source address
+    ///   too would send every broadcast reply to a new connection instead of the one
+    ///   waiting for it.
+    /// - A [`Kind::Server`] connection matches on destination port, source port **and**
+    ///   source address, because several peers can talk to one bound port at once.
     pub fn find(&self, id: &Id) -> Option<Handle> {
         for (i, c) in self.conns.iter().enumerate() {
-            if c.state == State::Open
-                && c.idin.src == id.src
-                && c.idin.sport == id.sport
-                && c.idin.dport == id.dport
-            {
+            if c.state != State::Open {
+                continue;
+            }
+            let matches = match c.kind {
+                Kind::Client => c.idin.dport == id.dport,
+                Kind::Server => {
+                    c.idin.dport == id.dport && c.idin.sport == id.sport && c.idin.src == id.src
+                }
+            };
+            if matches {
                 return Some(Handle {
                     idx: i as u16,
                     generation: c.generation,
@@ -407,7 +493,10 @@ mod tests {
         // reopen; the new handle works, the old one still does not
         let h2 = t.alloc(id(11), 0, 0).unwrap();
         assert!(t.is_live(h2));
-        assert!(!t.is_live(h), "the recycled slot must not answer the old handle");
+        assert!(
+            !t.is_live(h),
+            "the recycled slot must not answer the old handle"
+        );
     }
 
     #[test]
@@ -489,6 +578,110 @@ mod tests {
     }
 
     #[test]
+    fn a_client_connection_accepts_a_reply_from_any_source() {
+        // The C matches a client connection on dport alone, and says why: "responses to
+        // broadcast addresses are accepted as long as the incoming port matches the
+        // unique source port of the connection". Matching on source too would hand every
+        // broadcast reply to a NEW connection instead of the one waiting for it.
+        let mut t = T::new();
+        let out = Id {
+            pri: 2,
+            flags: 0,
+            src: 11,
+            dst: 31,
+            dport: 20,
+            sport: 17,
+        };
+        let h = t.alloc_kind(out, 0, 0, Kind::Client).unwrap();
+        // We expect replies addressed to our ephemeral source port 17.
+        t.set_id_in(
+            h,
+            Id {
+                pri: 2,
+                flags: 0,
+                src: 31,
+                dst: 11,
+                dport: 17,
+                sport: 20,
+            },
+        )
+        .unwrap();
+
+        // A reply from node 8 rather than the broadcast address still belongs to us.
+        let reply = Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: 11,
+            dport: 17,
+            sport: 20,
+        };
+        assert_eq!(
+            t.find(&reply),
+            Some(h),
+            "a broadcast reply must find its connection"
+        );
+
+        // But a reply to a different port does not.
+        let other = Id { dport: 18, ..reply };
+        assert_eq!(t.find(&other), None);
+    }
+
+    #[test]
+    fn a_server_connection_distinguishes_its_peers() {
+        // Several peers can talk to one bound port at once, so a server connection must
+        // match on source address and source port as well.
+        let mut t = T::new();
+        let a = t.alloc_kind(id(10), 0, 0, Kind::Server).unwrap();
+        t.set_id_in(
+            a,
+            Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: 11,
+                dport: 20,
+                sport: 30,
+            },
+        )
+        .unwrap();
+
+        let from_a = Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: 11,
+            dport: 20,
+            sport: 30,
+        };
+        assert_eq!(t.find(&from_a), Some(a));
+
+        // Same port, different peer: not this connection.
+        let from_b = Id { src: 9, ..from_a };
+        assert_eq!(
+            t.find(&from_b),
+            None,
+            "a different peer is a different connection"
+        );
+
+        // Same peer, different source port: also not.
+        let from_a2 = Id {
+            sport: 31,
+            ..from_a
+        };
+        assert_eq!(t.find(&from_a2), None);
+    }
+
+    #[test]
+    fn the_kind_is_recorded() {
+        let mut t = T::new();
+        let c = t.alloc_kind(id(1), 0, 0, Kind::Client).unwrap();
+        let s = t.alloc_kind(id(2), 0, 0, Kind::Server).unwrap();
+        assert_eq!(t.kind(c).unwrap(), Kind::Client);
+        assert_eq!(t.kind(s).unwrap(), Kind::Server);
+    }
+
+    #[test]
     fn slots_are_handed_out_round_robin() {
         // Reusing the just-freed slot immediately maximises the chance a stale handle
         // lands on a live connection.
@@ -527,5 +720,100 @@ mod tests {
         t.rdp_mut(b).unwrap().opts.packet_timeout = 5_000;
         assert_eq!(t.rdp(a).unwrap().opts.packet_timeout, 100);
         assert_eq!(t.rdp(b).unwrap().opts.packet_timeout, 5_000);
+    }
+
+    /// A server connection listening on `dport`.
+    fn server(t: &mut Table<4, 4>, dport: u8, sport: u8) -> Handle {
+        let h = t.alloc(id(sport), 0, 0).unwrap();
+        let mut idin = id(sport);
+        idin.dport = dport;
+        t.set_id_in(h, idin).unwrap();
+        h
+    }
+
+    #[test]
+    fn closing_with_too_small_a_report_buffer_refuses_rather_than_losing_slots() {
+        // A slot taken out of the queue but not reported is a slot nobody releases: the
+        // pool never gets it back. Refuse up front, before anything is taken.
+        let mut t: Table<4, 4> = Table::new();
+        let h = t.alloc(id(10), 0, 0).unwrap();
+        for i in 0..3u16 {
+            t.enqueue_rx(h, i).unwrap();
+        }
+
+        let mut small = [0u16; 2];
+        assert_eq!(
+            t.close(h, &mut small),
+            Err(Error::BufferTooSmall { needed: 3 }),
+            "three queued, room for two"
+        );
+        // Nothing was consumed, so a correctly sized call still gets all three.
+        let mut ok = [0u16; 4];
+        assert_eq!(t.close(h, &mut ok).unwrap(), 3);
+        assert_eq!(&ok[..3], &[0, 1, 2]);
+    }
+
+    #[test]
+    fn expiring_idle_connections_skips_one_it_cannot_report_rather_than_dropping_it() {
+        // Leaving the connection open for the next sweep costs one slot for one tick.
+        // Dropping the index costs it permanently.
+        let mut t: Table<4, 4> = Table::new();
+        let a = t.alloc(id(10), 0, 0).unwrap();
+        let b = t.alloc(id(11), 0, 0).unwrap();
+        for i in 0..3u16 {
+            t.enqueue_rx(a, i).unwrap();
+        }
+        for i in 3..6u16 {
+            t.enqueue_rx(b, i).unwrap();
+        }
+
+        let mut room_for_one = [0u16; 3];
+        let (closed, n) = t.expire_idle(100_000, 1_000, &mut room_for_one);
+        assert_eq!(closed, 1, "only the one whose queue fits");
+        assert_eq!(n, 3);
+
+        // The other is still open and still holds its slots, so a second sweep gets them.
+        let mut rest = [0u16; 4];
+        let (closed2, n2) = t.expire_idle(100_000, 1_000, &mut rest);
+        assert_eq!((closed2, n2), (1, 3));
+        let mut all = [0u16; 6];
+        all[..3].copy_from_slice(&room_for_one);
+        all[3..].copy_from_slice(&rest[..3]);
+        all.sort_unstable();
+        assert_eq!(all, [0, 1, 2, 3, 4, 5], "every slot accounted for");
+    }
+
+    #[test]
+    fn closing_a_port_takes_its_server_connections_and_leaves_the_others() {
+        // csp_socket_close drains the socket's queue. Without it, a connection created
+        // before the unbind stays acceptable and accept keeps handing out connections
+        // for a port nothing serves any more.
+        let mut t: Table<4, 4> = Table::new();
+        let on_20 = server(&mut t, 20, 10);
+        let on_21 = server(&mut t, 21, 11);
+        t.enqueue_rx(on_20, 0).unwrap();
+        t.enqueue_rx(on_21, 1).unwrap();
+
+        let mut drained = [0u16; 4];
+        let (closed, n) = t.close_port(20, &mut drained);
+        assert_eq!((closed, n), (1, 1));
+        assert_eq!(drained[0], 0, "the packet queued on port 20 comes back");
+        assert!(t.entry(on_20).is_err(), "the port 20 connection is gone");
+        assert!(t.entry(on_21).is_ok(), "port 21 is untouched");
+    }
+
+    #[test]
+    fn closing_a_port_leaves_client_connections_alone() {
+        // A client connection whose incoming dport happens to match is our own outbound
+        // conversation, not something that port was serving.
+        let mut t: Table<4, 4> = Table::new();
+        let client = t.alloc_kind(id(10), 0, 0, Kind::Client).unwrap();
+        let mut idin = id(10);
+        idin.dport = 20;
+        t.set_id_in(client, idin).unwrap();
+
+        let mut drained = [0u16; 4];
+        assert_eq!(t.close_port(20, &mut drained), (0, 0));
+        assert!(t.entry(client).is_ok());
     }
 }

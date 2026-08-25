@@ -46,8 +46,20 @@ pub const fn max_encoded_len(body_len: usize) -> usize {
 
 /// KISS-encode `body` into `out`, returning the number of bytes written.
 ///
-/// `body` is the complete CSP frame — encoded header followed by payload (and the CRC, if
-/// one is in use).
+/// `body` is the complete CSP frame — encoded header, payload, and the CRC32.
+///
+/// # The CRC is not optional against a stock C peer
+///
+/// `CSP_ENABLE_KISS_CRC` defaults to **ON** (`libcsp/CMakeLists.txt:50`), and
+/// `csp_kiss_rx` runs `csp_crc32_verify` on every completed frame. A frame without a
+/// trailing CRC32 is dropped, and the only trace is `iface->frame++` — no log line, no
+/// error to a caller, nothing on the wire. A node whose frames all vanish this way looks
+/// exactly like a node with a dead UART.
+///
+/// The receiver tries the checksum over header+payload first and falls back to
+/// payload-only, so
+/// [`crc32::Coverage::PayloadOnly`](crate::crc32::Coverage::PayloadOnly) interoperates
+/// with both. A differential test drives the real `csp_kiss_rx` to keep this true.
 pub fn encode(body: &[u8], out: &mut [u8]) -> Result<usize> {
     let mut n = 0usize;
     let put = |b: u8, out: &mut [u8], n: &mut usize| -> Result<()> {
@@ -181,13 +193,22 @@ impl<const N: usize> Decoder<N> {
                 None
             }
             Mode::Escaped => {
+                // The C appends ONLY for TFESC and TFEND:
+                //
+                //     if (inputbyte == TFESC) ...frame_begin[rx_length++] = FESC;
+                //     if (inputbyte == TFEND) ...frame_begin[rx_length++] = FEND;
+                //
+                // Any other byte after FESC is silently dropped, not passed through. That
+                // is a real interop detail rather than a nicety: passing it through would
+                // build a frame one byte longer than the peer built, so the two sides
+                // would disagree about the payload (and, with the KISS CRC enabled,
+                // disagree about the checksum too).
+                self.mode = Mode::InFrame;
                 let decoded = match b {
                     TFEND => FEND,
                     TFESC => FESC,
-                    // The C does not validate this; an unknown escape passes through.
-                    other => other,
+                    _ => return None,
                 };
-                self.mode = Mode::InFrame;
                 if self.expect_command {
                     self.expect_command = false;
                     return None;
@@ -266,10 +287,7 @@ mod tests {
     fn delimiters_in_the_body_are_escaped() {
         let mut out = [0u8; 32];
         let n = encode(&[FEND, FESC], &mut out).unwrap();
-        assert_eq!(
-            &out[..n],
-            &[FEND, TNC_DATA, FESC, TFEND, FESC, TFESC, FEND]
-        );
+        assert_eq!(&out[..n], &[FEND, TNC_DATA, FESC, TFEND, FESC, TFESC, FEND]);
         // and no raw FEND appears inside the body
         assert!(!out[2..n - 1].contains(&FEND));
     }
@@ -331,6 +349,28 @@ mod tests {
         for _ in 0..5 {
             assert!(d.push(FEND).is_none());
         }
+    }
+
+    #[test]
+    fn an_invalid_escape_drops_the_byte_as_the_c_does() {
+        // The C appends only for TFESC and TFEND. Passing an unknown escape through would
+        // build a frame one byte longer than the peer built.
+        let mut d = Decoder::<64>::new();
+        let stream = [FEND, TNC_DATA, 0x41, FESC, 0x99, 0x42, FEND];
+        let mut out = [0u8; 8];
+        let mut len = None;
+        for &b in &stream {
+            if let Some(f) = d.push(b) {
+                out[..f.len()].copy_from_slice(f);
+                len = Some(f.len());
+            }
+        }
+        let n = len.expect("a frame should have been delivered");
+        assert_eq!(
+            &out[..n],
+            &[0x41u8, 0x42],
+            "the invalid escape byte must vanish, not appear as 0x99"
+        );
     }
 
     #[test]

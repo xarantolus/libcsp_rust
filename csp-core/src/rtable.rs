@@ -95,7 +95,11 @@ impl<const N: usize> Table<N> {
     /// Returns [`Error::TableFull`](crate::Error) rather than overwriting silently.
     pub fn set(&mut self, address: u16, netmask: u16, iface: u8, via: u16) -> Result<()> {
         let host_bits = self.version.host_bits() as u16;
-        let netmask = if netmask > host_bits { host_bits } else { netmask };
+        let netmask = if netmask > host_bits {
+            host_bits
+        } else {
+            netmask
+        };
 
         if address > self.version.max_node_id() {
             return Err(Error::FieldOutOfRange {
@@ -172,6 +176,32 @@ impl<const N: usize> Table<N> {
         Ok(n)
     }
 
+    /// Every route tied for the longest prefix match.
+    ///
+    /// `csp_send_direct` does not stop at the first match: it walks *backwards* through
+    /// the table with `csp_rtable_search_backward`, collecting every entry with the same
+    /// address and netmask, and **sends a clone to each** — the last one gets the
+    /// original. That is how a redundant link is configured. A port that returns only one
+    /// route silently uses a single path and the redundancy is decorative.
+    ///
+    /// Writes matching routes into `out` and returns how many. Excess matches are not
+    /// silently dropped: the return value is the number written, so a caller can compare
+    /// it against `out.len()`.
+    pub fn find_all<'r>(&'r self, addr: u16, out: &mut [&'r Route]) -> usize {
+        let Some(best) = self.find(addr) else {
+            return 0;
+        };
+        let (addr_m, mask_m) = (best.address, best.netmask);
+        let mut n = 0;
+        for e in self.entries[..self.len].iter() {
+            if e.address == addr_m && e.netmask == mask_m && n < out.len() {
+                out[n] = e;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Longest-prefix-match lookup.
     ///
     /// On an equal-length tie the later entry wins, matching the C's `>=`.
@@ -226,7 +256,10 @@ where
     let mut count = 0usize;
     for entry in text.split(',') {
         let entry = entry.trim();
-        // The C skips tokens of length <= 1, which is how it tolerates trailing commas.
+        // `while (str && (strlen(str) > 1))` is the C's loop *condition*, not a skip: the
+        // first entry of one character or fewer ends the parse, every entry after it is
+        // dropped, and it still returns a non-negative count that reads as success. We
+        // skip and carry on.
         if entry.len() <= 1 {
             continue;
         }
@@ -290,8 +323,16 @@ mod tests {
         let mut tb = t();
         tb.set(0, 0, 1, NO_VIA).unwrap();
         tb.set(8, 5, 2, NO_VIA).unwrap();
-        assert_eq!(tb.find(8).unwrap().iface, 2, "specific route must beat default");
-        assert_eq!(tb.find(9).unwrap().iface, 1, "everything else takes the default");
+        assert_eq!(
+            tb.find(8).unwrap().iface,
+            2,
+            "specific route must beat default"
+        );
+        assert_eq!(
+            tb.find(9).unwrap().iface,
+            1,
+            "everything else takes the default"
+        );
     }
 
     #[test]
@@ -336,9 +377,66 @@ mod tests {
     #[test]
     fn address_outside_the_wire_version_is_refused() {
         let mut tb = t();
-        assert!(tb.set(1000, 5, 1, NO_VIA).is_err(), "1000 does not fit 5 bits");
+        assert!(
+            tb.set(1000, 5, 1, NO_VIA).is_err(),
+            "1000 does not fit 5 bits"
+        );
         let mut tb2: Table<4> = Table::new(Version::V2);
         assert!(tb2.set(1000, 14, 1, NO_VIA).is_ok());
+    }
+
+    #[test]
+    fn every_route_tied_for_the_longest_prefix_is_returned() {
+        // csp_send_direct walks backwards collecting every entry with the same
+        // address/netmask and clones to each -- that is how a redundant link is set up.
+        // Returning only one silently uses a single path.
+        let mut tb = t();
+        tb.set(8, 5, 1, NO_VIA).unwrap();
+        tb.set(8, 5, 2, NO_VIA).unwrap();
+        tb.set(0, 0, 3, NO_VIA).unwrap();
+
+        let mut out = [&Route {
+            address: 0,
+            netmask: 0,
+            iface: 0,
+            via: NO_VIA,
+        }; 4];
+        let n = tb.find_all(8, &mut out);
+        assert_eq!(n, 2, "both redundant paths must come back");
+        let ifaces: [u8; 2] = [out[0].iface, out[1].iface];
+        assert!(ifaces.contains(&1) && ifaces.contains(&2));
+
+        // A less specific address falls to the default, which has only one route.
+        let n = tb.find_all(20, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0].iface, 3);
+    }
+
+    #[test]
+    fn find_all_on_an_empty_table_returns_nothing() {
+        let tb = t();
+        let mut out = [&Route {
+            address: 0,
+            netmask: 0,
+            iface: 0,
+            via: NO_VIA,
+        }; 4];
+        assert_eq!(tb.find_all(8, &mut out), 0);
+    }
+
+    #[test]
+    fn find_all_reports_what_it_wrote_rather_than_overflowing() {
+        let mut tb = t();
+        for i in 0..3u8 {
+            tb.set(8, 5, i, NO_VIA).unwrap();
+        }
+        let mut tiny = [&Route {
+            address: 0,
+            netmask: 0,
+            iface: 0,
+            via: NO_VIA,
+        }; 2];
+        assert_eq!(tb.find_all(8, &mut tiny), 2, "writes what fits and says so");
     }
 
     #[test]
@@ -375,19 +473,39 @@ mod tests {
         assert_eq!(n, 4);
         assert_eq!(
             r[0].unwrap(),
-            ParsedRoute { address: 0, netmask: Some(0), iface: "CAN", via: None }
+            ParsedRoute {
+                address: 0,
+                netmask: Some(0),
+                iface: "CAN",
+                via: None
+            }
         );
         assert_eq!(
             r[1].unwrap(),
-            ParsedRoute { address: 8, netmask: Some(5), iface: "KISS", via: Some(12) }
+            ParsedRoute {
+                address: 8,
+                netmask: Some(5),
+                iface: "KISS",
+                via: Some(12)
+            }
         );
         assert_eq!(
             r[2].unwrap(),
-            ParsedRoute { address: 9, netmask: None, iface: "CAN", via: None }
+            ParsedRoute {
+                address: 9,
+                netmask: None,
+                iface: "CAN",
+                via: None
+            }
         );
         assert_eq!(
             r[3].unwrap(),
-            ParsedRoute { address: 10, netmask: None, iface: "KISS", via: Some(3) }
+            ParsedRoute {
+                address: 10,
+                netmask: None,
+                iface: "KISS",
+                via: Some(3)
+            }
         );
     }
 
@@ -455,11 +573,21 @@ mod tests {
     #[test]
     fn a_route_renders_in_the_format_the_parser_accepts() {
         let mut out = [0u8; 64];
-        let r = Route { address: 8, netmask: 5, iface: 0, via: NO_VIA };
+        let r = Route {
+            address: 8,
+            netmask: 5,
+            iface: 0,
+            via: NO_VIA,
+        };
         let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
         assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "8/5 CAN");
 
-        let r2 = Route { address: 0, netmask: 0, iface: 0, via: 12 };
+        let r2 = Route {
+            address: 0,
+            netmask: 0,
+            iface: 0,
+            via: 12,
+        };
         let n = Table::<4>::format_route(&r2, "KISS", &mut out).unwrap();
         assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "0/0 KISS 12");
     }
@@ -469,9 +597,24 @@ mod tests {
         // csp_rtable_save prints through snprintf into a fixed buffer and silently
         // truncates, so a large table saves as a valid but SHORTER one.
         for r in [
-            Route { address: 0, netmask: 0, iface: 0, via: NO_VIA },
-            Route { address: 31, netmask: 5, iface: 0, via: 7 },
-            Route { address: 8, netmask: 3, iface: 0, via: NO_VIA },
+            Route {
+                address: 0,
+                netmask: 0,
+                iface: 0,
+                via: NO_VIA,
+            },
+            Route {
+                address: 31,
+                netmask: 5,
+                iface: 0,
+                via: 7,
+            },
+            Route {
+                address: 8,
+                netmask: 3,
+                iface: 0,
+                via: NO_VIA,
+            },
         ] {
             let mut out = [0u8; 64];
             let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
@@ -486,14 +629,23 @@ mod tests {
             assert_eq!(p.address, r.address, "{text}");
             assert_eq!(p.netmask, Some(r.netmask), "{text}");
             assert_eq!(p.iface, "CAN");
-            assert_eq!(p.via, if r.via == NO_VIA { None } else { Some(r.via) }, "{text}");
+            assert_eq!(
+                p.via,
+                if r.via == NO_VIA { None } else { Some(r.via) },
+                "{text}"
+            );
         }
     }
 
     #[test]
     fn formatting_into_a_short_buffer_reports_rather_than_truncating() {
         let mut tiny = [0u8; 3];
-        let r = Route { address: 1000, netmask: 14, iface: 0, via: NO_VIA };
+        let r = Route {
+            address: 1000,
+            netmask: 14,
+            iface: 0,
+            via: NO_VIA,
+        };
         assert!(matches!(
             Table::<4>::format_route(&r, "CAN", &mut tiny),
             Err(Error::BufferTooSmall { .. })

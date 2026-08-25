@@ -19,6 +19,7 @@
 //! `uint8_t[CSP_HMAC_LENGTH]` — the obvious reading — overflows the caller's buffer by
 //! 16 bytes. Here [`mac`] returns an array, so the size cannot be got wrong.
 
+use crate::crc32::Coverage;
 use crate::sha1::{self, Sha1, BLOCK_LEN, DIGEST_LEN};
 use crate::{Error, Result};
 
@@ -84,17 +85,86 @@ pub fn derive_key(material: &[u8]) -> [u8; KEY_LEN] {
     k
 }
 
+/// Compute the wire MAC over the bytes `coverage` selects.
+///
+/// `csp_hmac_append` and `csp_hmac_verify` take an `include_header` flag, exactly like the
+/// CRC32 pair, so the same [`Coverage`] applies. Getting it wrong on one side means every
+/// packet fails authentication with no indication why.
+pub fn mac_over(
+    key: &[u8],
+    header: &[u8],
+    payload: &[u8],
+    coverage: Coverage,
+) -> Result<[u8; MAC_LEN]> {
+    if key.is_empty() {
+        return Err(Error::EmptyKey);
+    }
+    let mut k = [0u8; BLOCK_LEN];
+    if key.len() > BLOCK_LEN {
+        k[..DIGEST_LEN].copy_from_slice(&sha1::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut inner_pad = [0u8; BLOCK_LEN];
+    let mut outer_pad = [0u8; BLOCK_LEN];
+    for i in 0..BLOCK_LEN {
+        inner_pad[i] = k[i] ^ IPAD;
+        outer_pad[i] = k[i] ^ OPAD;
+    }
+    let mut inner = Sha1::new();
+    inner.update(&inner_pad);
+    if coverage == Coverage::HeaderAndPayload {
+        inner.update(header);
+    }
+    inner.update(payload);
+    let inner_digest = inner.finalize();
+
+    let mut outer = Sha1::new();
+    outer.update(&outer_pad);
+    outer.update(&inner_digest);
+    let full = outer.finalize();
+
+    let mut out = [0u8; MAC_LEN];
+    out.copy_from_slice(&full[..MAC_LEN]);
+    Ok(out)
+}
+
+/// Append a MAC, returning the total length written to `out`.
+pub fn append(
+    key: &[u8],
+    header: &[u8],
+    payload: &[u8],
+    coverage: Coverage,
+    out: &mut [u8],
+) -> Result<usize> {
+    let needed = payload.len() + MAC_LEN;
+    if out.len() < needed {
+        return Err(Error::BufferTooSmall { needed });
+    }
+    let tag = mac_over(key, header, payload, coverage)?;
+    out[..payload.len()].copy_from_slice(payload);
+    out[payload.len()..needed].copy_from_slice(&tag);
+    Ok(needed)
+}
+
 /// Verify a trailing MAC in constant time and return the payload without it.
-pub fn verify<'a>(key: &[u8], payload_with_mac: &'a [u8]) -> Result<&'a [u8]> {
+///
+/// The C uses `memcmp`. With a 32-bit tag, a comparison that stops at the first wrong
+/// byte turns a 2^32 forgery into roughly 4 x 2^8 attempts — and a spacecraft link has no
+/// rate limit an attacker must respect.
+pub fn verify_over<'a>(
+    key: &[u8],
+    header: &[u8],
+    payload_with_mac: &'a [u8],
+    coverage: Coverage,
+) -> Result<&'a [u8]> {
     if payload_with_mac.len() < MAC_LEN {
         return Err(Error::Truncated);
     }
     let split = payload_with_mac.len() - MAC_LEN;
     let (payload, tail) = payload_with_mac.split_at(split);
-    let expected = mac(key, payload)?;
+    let expected = mac_over(key, header, payload, coverage)?;
 
-    // Constant time: a byte-by-byte early return leaks how much of the tag was right,
-    // which turns a 2^32 forgery into 4 x 2^8.
     let mut diff = 0u8;
     for i in 0..MAC_LEN {
         diff |= tail[i] ^ expected[i];
@@ -103,6 +173,11 @@ pub fn verify<'a>(key: &[u8], payload_with_mac: &'a [u8]) -> Result<&'a [u8]> {
         return Err(Error::BadChecksum);
     }
     Ok(payload)
+}
+
+/// Verify a trailing MAC over the payload only.
+pub fn verify<'a>(key: &[u8], payload_with_mac: &'a [u8]) -> Result<&'a [u8]> {
+    verify_over(key, &[], payload_with_mac, Coverage::PayloadOnly)
 }
 
 #[cfg(test)]
@@ -173,6 +248,84 @@ mod tests {
         }
         // and a different key must not validate
         assert_eq!(verify(b"wrong key", &buf[..n]), Err(Error::BadChecksum));
+    }
+
+    #[test]
+    fn the_two_coverages_are_not_interchangeable() {
+        // csp_hmac_append/verify take an include_header flag. Mismatching it makes every
+        // packet fail authentication with no indication why.
+        let key = b"0123456789abcdef";
+        let header = [0xde, 0xad, 0xbe, 0xef];
+        let payload = b"telemetry";
+        let mut buf = [0u8; 32];
+        let n = append(key, &header, payload, Coverage::HeaderAndPayload, &mut buf).unwrap();
+
+        assert_eq!(
+            verify_over(key, &header, &buf[..n], Coverage::HeaderAndPayload).unwrap(),
+            payload
+        );
+        assert_eq!(
+            verify_over(key, &header, &buf[..n], Coverage::PayloadOnly),
+            Err(Error::BadChecksum),
+            "the wrong coverage must fail, not silently pass"
+        );
+    }
+
+    #[test]
+    fn header_coverage_actually_covers_the_header() {
+        // Otherwise the flag is decorative and a tampered header authenticates.
+        let key = b"k";
+        let payload = b"data";
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        let na = append(
+            key,
+            &[1, 2, 3, 4],
+            payload,
+            Coverage::HeaderAndPayload,
+            &mut a,
+        )
+        .unwrap();
+        let nb = append(
+            key,
+            &[1, 2, 3, 5],
+            payload,
+            Coverage::HeaderAndPayload,
+            &mut b,
+        )
+        .unwrap();
+        assert_eq!(na, nb);
+        assert_ne!(
+            &a[..na],
+            &b[..nb],
+            "a different header must give a different tag"
+        );
+
+        // and a tampered header is rejected
+        assert_eq!(
+            verify_over(key, &[1, 2, 3, 5], &a[..na], Coverage::HeaderAndPayload),
+            Err(Error::BadChecksum)
+        );
+    }
+
+    #[test]
+    fn payload_only_ignores_the_header() {
+        let key = b"k";
+        let payload = b"data";
+        let mut a = [0u8; 32];
+        let mut b = [0u8; 32];
+        let na = append(key, &[1, 2, 3, 4], payload, Coverage::PayloadOnly, &mut a).unwrap();
+        let nb = append(key, &[9, 9, 9, 9], payload, Coverage::PayloadOnly, &mut b).unwrap();
+        assert_eq!(&a[..na], &b[..nb]);
+    }
+
+    #[test]
+    fn appending_into_a_short_buffer_reports_the_size() {
+        let mut tiny = [0u8; 4];
+        assert_eq!(
+            append(b"k", &[], b"payload", Coverage::PayloadOnly, &mut tiny),
+            Err(Error::BufferTooSmall { needed: 11 })
+        );
     }
 
     #[test]
