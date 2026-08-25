@@ -41,6 +41,7 @@ pub mod dedup;
 pub mod node;
 #[cfg(feature = "sfp")]
 pub mod delivery;
+pub mod hooks;
 pub mod iface;
 pub mod iflist;
 pub mod pool;
@@ -54,6 +55,7 @@ use csp_core::Version;
 pub use delivery::{Delivery, Handler, PortTable};
 pub use conn::Table as ConnTable;
 pub use node::{Node, Outbound};
+pub use hooks::{Hooks, NoHooks, PowerAction, Timestamp};
 pub use iface::{Interface, Transmit};
 pub use iflist::IfList;
 pub use qfifo::Qfifo;
