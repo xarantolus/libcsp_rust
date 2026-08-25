@@ -405,3 +405,43 @@ was rejected by the port's own field validation — v2 flags are six bits. The t
 wrong and the code was right, which is the validation from `SCOPE.md` 7 doing its job.
 
 **Tests:** 18 in `pool`, up from 15.
+
+---
+
+## `csp::conn` + `csp::qfifo` — connections and the router queue
+
+Against `src/csp_conn.c` (17 functions) and `src/csp_qfifo.c`.
+
+**One real gap found: client and server connections match differently, and the port
+matched everything the server way.**
+
+`csp_conn_find_existing` distinguishes the two, and the C's own comment says why a client
+connection matches on **destination port alone**:
+
+> *"Outgoing connections are uniquely defined by the source port, so only the incoming
+> destination port must match. This means that responses to broadcast addresses are
+> accepted as long as the incoming port matches the unique source port of the connection."*
+
+Our source port is ephemeral and therefore unique, so the reply's destination port
+identifies the connection by itself. Matching on source address as well — which is what the
+port did — means **a reply to a broadcast request lands on a new connection instead of the
+one waiting for it**, and the caller waits out its timeout while the answer sits somewhere
+else. A server connection does need all three, because several peers can talk to one bound
+port at once.
+
+Added `Kind::{Client, Server}`, set by `Node::connect` and by the router respectively, with
+tests for both rules.
+
+**Faithful:** yes, now. Also checked and matching: round-robin allocation, close draining
+the receive queue, and the timeout sweep.
+
+**Rusty:** yes, and better in one respect that has no C equivalent — handles are
+generation-tagged, so a handle to a closed connection is *detected* rather than silently
+addressing whoever recycled the slot. That use-after-free is trivially available with a raw
+`csp_conn_t *`.
+
+**`qfifo`:** clean. Drop-and-count when full matches `csp_qfifo_write`; the C frees the
+packet on a full queue too, and the difference is that `Qfifo::dropped` is a real counter
+rather than a `uint8_t` written from two contexts without synchronisation.
+
+**Tests:** 166 in `csp`, up from 160.

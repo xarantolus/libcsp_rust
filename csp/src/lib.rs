@@ -53,7 +53,7 @@ use csp_core::Version;
 
 #[cfg(feature = "sfp")]
 pub use delivery::{Delivery, Handler, PortTable};
-pub use conn::Table as ConnTable;
+pub use conn::{Kind as ConnKind, Table as ConnTable};
 pub use node::{Node, Outbound, Unroutable};
 pub use hooks::{Hooks, NoHooks, PowerAction, Timestamp};
 pub use iface::{Interface, Sent, Transmit};

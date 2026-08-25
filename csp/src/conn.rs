@@ -17,6 +17,18 @@ use csp_core::{Error, Id, Result};
 #[cfg(feature = "rdp")]
 use csp_core::rdp;
 
+/// Which end opened the connection.
+///
+/// This changes how an incoming packet is matched to it, and the difference is not
+/// cosmetic — see [`Table::find`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// We opened it with `connect`. Our source port is ephemeral and therefore unique.
+    Client,
+    /// A peer opened it by sending to a bound port.
+    Server,
+}
+
 /// Connection lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -49,6 +61,7 @@ impl Handle {
 #[derive(Debug)]
 struct Entry<const RXQ: usize> {
     state: State,
+    kind: Kind,
     generation: u16,
     /// Header of packets arriving on this connection.
     idin: Id,
@@ -71,6 +84,7 @@ impl<const RXQ: usize> Entry<RXQ> {
     fn new() -> Self {
         Entry {
             state: State::Closed,
+            kind: Kind::Server,
             generation: 0,
             idin: Id::default(),
             idout: Id::default(),
@@ -141,6 +155,17 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// Returns [`Error::TableFull`] when every slot is in use — an error carrying that
     /// meaning, rather than a null the caller may or may not check.
     pub fn alloc(&mut self, idout: Id, opts: u32, now_ms: u32) -> Result<Handle> {
+        self.alloc_kind(idout, opts, now_ms, Kind::Server)
+    }
+
+    /// Open a connection, saying which end initiated it.
+    pub fn alloc_kind(
+        &mut self,
+        idout: Id,
+        opts: u32,
+        now_ms: u32,
+        kind: Kind,
+    ) -> Result<Handle> {
         for step in 0..N {
             let i = (self.cursor + step + 1) % N;
             if self.conns[i].state == State::Closed {
@@ -149,6 +174,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
                 let c = &mut self.conns[i];
                 c.generation = gen;
                 c.state = State::Open;
+                c.kind = kind;
                 c.idout = idout;
                 c.opts = opts;
                 c.last_activity = now_ms;
@@ -305,14 +331,38 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         (closed, n)
     }
 
-    /// Find the open connection matching an incoming header, if any.
+    /// The kind of a connection.
+    pub fn kind(&self, h: Handle) -> Result<Kind> {
+        Ok(self.entry(h)?.kind)
+    }
+
+    /// Find the open connection an incoming header belongs to.
+    ///
+    /// The matching rule **differs by kind**, and the difference matters:
+    ///
+    /// - A [`Kind::Client`] connection matches on **destination port alone**. Our source
+    ///   port was ephemeral and is therefore unique, so the reply's destination port
+    ///   identifies the connection by itself. The C spells out why this is deliberate:
+    ///   *"responses to broadcast addresses are accepted as long as the incoming port
+    ///   matches the unique source port of the connection"*. Matching on source address
+    ///   too would send every broadcast reply to a new connection instead of the one
+    ///   waiting for it.
+    /// - A [`Kind::Server`] connection matches on destination port, source port **and**
+    ///   source address, because several peers can talk to one bound port at once.
     pub fn find(&self, id: &Id) -> Option<Handle> {
         for (i, c) in self.conns.iter().enumerate() {
-            if c.state == State::Open
-                && c.idin.src == id.src
-                && c.idin.sport == id.sport
-                && c.idin.dport == id.dport
-            {
+            if c.state != State::Open {
+                continue;
+            }
+            let matches = match c.kind {
+                Kind::Client => c.idin.dport == id.dport,
+                Kind::Server => {
+                    c.idin.dport == id.dport
+                        && c.idin.sport == id.sport
+                        && c.idin.src == id.src
+                }
+            };
+            if matches {
                 return Some(Handle {
                     idx: i as u16,
                     generation: c.generation,
@@ -486,6 +536,58 @@ mod tests {
         t.set_id_in(h, id(10)).unwrap();
         assert_eq!(t.find(&id(10)), Some(h));
         assert_eq!(t.find(&id(11)), None);
+    }
+
+    #[test]
+    fn a_client_connection_accepts_a_reply_from_any_source() {
+        // The C matches a client connection on dport alone, and says why: "responses to
+        // broadcast addresses are accepted as long as the incoming port matches the
+        // unique source port of the connection". Matching on source too would hand every
+        // broadcast reply to a NEW connection instead of the one waiting for it.
+        let mut t = T::new();
+        let out = Id { pri: 2, flags: 0, src: 11, dst: 31, dport: 20, sport: 17 };
+        let h = t.alloc_kind(out, 0, 0, Kind::Client).unwrap();
+        // We expect replies addressed to our ephemeral source port 17.
+        t.set_id_in(h, Id { pri: 2, flags: 0, src: 31, dst: 11, dport: 17, sport: 20 })
+            .unwrap();
+
+        // A reply from node 8 rather than the broadcast address still belongs to us.
+        let reply = Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 17, sport: 20 };
+        assert_eq!(t.find(&reply), Some(h), "a broadcast reply must find its connection");
+
+        // But a reply to a different port does not.
+        let other = Id { dport: 18, ..reply };
+        assert_eq!(t.find(&other), None);
+    }
+
+    #[test]
+    fn a_server_connection_distinguishes_its_peers() {
+        // Several peers can talk to one bound port at once, so a server connection must
+        // match on source address and source port as well.
+        let mut t = T::new();
+        let a = t.alloc_kind(id(10), 0, 0, Kind::Server).unwrap();
+        t.set_id_in(a, Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 20, sport: 30 })
+            .unwrap();
+
+        let from_a = Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 20, sport: 30 };
+        assert_eq!(t.find(&from_a), Some(a));
+
+        // Same port, different peer: not this connection.
+        let from_b = Id { src: 9, ..from_a };
+        assert_eq!(t.find(&from_b), None, "a different peer is a different connection");
+
+        // Same peer, different source port: also not.
+        let from_a2 = Id { sport: 31, ..from_a };
+        assert_eq!(t.find(&from_a2), None);
+    }
+
+    #[test]
+    fn the_kind_is_recorded() {
+        let mut t = T::new();
+        let c = t.alloc_kind(id(1), 0, 0, Kind::Client).unwrap();
+        let s = t.alloc_kind(id(2), 0, 0, Kind::Server).unwrap();
+        assert_eq!(t.kind(c).unwrap(), Kind::Client);
+        assert_eq!(t.kind(s).unwrap(), Kind::Server);
     }
 
     #[test]

@@ -272,7 +272,12 @@ impl<
         // Validate before consuming a connection slot, so a bad address does not cost one
         // of the node's scarcest resources.
         idout.validate(self.version)?;
-        let h = self.router.conns.alloc(idout, opts, now_ms)?;
+        // A connection we opened is a Client: its reply is matched on destination port
+        // alone, so a reply from a broadcast address still finds it.
+        let h = self
+            .router
+            .conns
+            .alloc_kind(idout, opts, now_ms, crate::conn::Kind::Client)?;
         // The reply we expect: their source is our destination and vice versa.
         let idin = Id {
             pri,
