@@ -371,6 +371,21 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
             tv_nsec: 0,
         }
         .encode(h, &mut out),
+        // Both route forms answer only for an interface the node has, and the C looks the
+        // name up before touching the table — so an unknown name changes nothing *and*
+        // says nothing. "INGRESS" and "ROUTED" are the two the oracle registers.
+        cmp::Query::RouteSet(r) => {
+            if r.interface != "INGRESS" && r.interface != "ROUTED" {
+                return none;
+            }
+            r.encode(h, &mut out)
+        }
+        cmp::Query::RouteSetV1(r) => {
+            if r.interface != "INGRESS" && r.interface != "ROUTED" {
+                return none;
+            }
+            r.encode(h, &mut out)
+        }
         cmp::Query::Peek { addr, len, wide } => {
             let Some(src) = peek_window(addr, len as usize, wide) else {
                 return none;
@@ -392,9 +407,10 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
                 data,
             }
             .encode(h, &mut out)
-        }
-        // Not exercised by the corpus yet; a panic here is better than a silent 0.
-        other => panic!("no reply encoder for {other:?}"),
+        } // No catch-all: every `Query` variant now has an encoder, so exhaustiveness does
+          // what the old `panic!` did and does it at compile time. Adding a variant to
+          // `Query` without teaching this replay about it becomes a build error rather than
+          // a record that silently scores zero.
     };
 
     match n {
