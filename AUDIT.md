@@ -279,3 +279,42 @@ with over-long frames counted rather than truncated into something that would st
 specifies; the port follows the code, since that is what is on the wire. Its unpacker is
 also asymmetric with its packer and shifts a promoted `int` into the sign bit
 (`SCOPE.md` 11).
+
+---
+
+## `csp-core::cmp` — management protocol
+
+Against `include/csp/csp_cmp.h` and the seven `src/cmp/*.c` handlers.
+
+All nine message types are present and offset-checked against the packed structs:
+`ident` (93), `route_set_v1` (15), `route_set_v2` (19), `if_stats` (53), `peek`/`poke`
+(7 + data), `peek_v2`/`poke_v2` (11 + data), `clock` (10). Sizes verified by compiling a C
+program against the real headers and comparing `sizeof` — not by counting fields.
+
+**Two findings.**
+
+**1. `ROUTE_SET_V1` was missing from the port.** It is a distinct message with single-byte
+addresses (not the `u16`s of v2) and its own handler, `csp_cmp_route_set_v1_handler`. A
+node speaking CSP v1 sends this form. Added, with a test that the two dispatch separately.
+
+**2. A peek reply pads itself with unrelated buffer contents — a C defect.**
+`csp_cmp_peek_handler` writes `len` bytes at `cmp->data`, which the packed struct places at
+offset **7**, then sets `packet->length = CMP_PEEK_SIZE(cmp->len)` = `7 + 3 + len` = **10 +
+len**. The three tail bytes are never written, so they carry whatever the previous user of
+that pooled buffer left. The header comment is explicit that the tail is deliberate —
+*"Legacy variable CMP messages include the tail padding from the original fixed-size
+member"* — so the length is intentional and only the **filling** is not.
+
+On a service whose entire purpose is reading memory, padding the reply with unrelated
+memory is the wrong direction to be wrong in. The port emits the same wire length so a C
+peer sees the size it expects, and zeroes the tail. Recorded as `SCOPE.md` 16, with a test
+that pre-dirties the output buffer and asserts the tail comes back zero.
+
+**Faithful:** yes, now — including the 3-byte tail, which a naive port would omit and then
+be three bytes short of what a C peer expects.
+
+**Rusty:** yes, and this module is a capability gain rather than a port: the C has request
+builders and server handlers but **no decoder**, which is why the packet sniffer in the
+flight repository reimplements the entire wire format by hand.
+
+**Tests:** 25 in `cmp`, up from 18.

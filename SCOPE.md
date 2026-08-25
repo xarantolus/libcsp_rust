@@ -237,7 +237,15 @@ whoever maintains the fork can see what was found and decide for themselves.
     frees it: the sender creates the condition and the receiver destroys the packet. The
     flight code runs SFP on the config and log-dump ports, so any connection reused for a
     plain reply hits this. In the port the flag lives on the packet, not the connection.
-16. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+16. **A CMP peek reply pads itself with unrelated buffer contents.**
+    `csp_cmp_peek_handler` writes `len` bytes at `cmp->data` — packed offset **7** — and
+    then sets `packet->length = CMP_PEEK_SIZE(cmp->len)`, which is
+    `sizeof(struct) + tail + len` = **10 + len**. The last three bytes are never written,
+    so they are whatever the previous user of that pooled buffer left there. On a service
+    whose entire job is reading memory, padding the reply with unrelated memory is the
+    wrong direction to be wrong in. The port emits the same wire length, so a C peer sees
+    the size it expects, but **zeroes** the tail.
+17. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the
