@@ -479,6 +479,8 @@ pub struct Connection {
     pub rcv_lsa: u16,
     /// When the connection last saw traffic, ms.
     pub last_activity: u32,
+    /// When an acknowledgement was last sent, ms.
+    pub ack_timestamp: u32,
     /// Retransmission counter.
     pub retransmits: u32,
 }
@@ -499,8 +501,53 @@ impl Connection {
             rcv_irs: 0,
             rcv_lsa: 0,
             last_activity: 0,
+            ack_timestamp: 0,
             retransmits: 0,
         }
+    }
+
+    /// Is an acknowledgement due?
+    ///
+    /// Mirrors `csp_rdp_should_ack`, which has three conditions and is checked separately
+    /// from packet handling — `csp_rdp_check_ack` is called by the router, not by the
+    /// receive path.
+    ///
+    /// Delaying acks is a bandwidth optimisation: one ack can cover several packets. But
+    /// *never* acking is not, and that is what this port did before the audit — in-order
+    /// data was delivered and never acknowledged, so the sender only learned of it when
+    /// its own retransmission timer fired. Every packet cost a full `packet_timeout` of
+    /// latency and a duplicate on the link.
+    pub fn should_ack(&self, now_ms: u32) -> bool {
+        // Nothing to acknowledge.
+        if self.rcv_cur == self.rcv_lsa {
+            return false;
+        }
+        if !self.opts.delayed_acks {
+            return true;
+        }
+        // Wrapping subtraction, so the 49-day clock wrap does not suppress every ack.
+        if now_ms.wrapping_sub(self.ack_timestamp) > self.opts.ack_timeout {
+            return true;
+        }
+        // Enough packets have gone unacknowledged.
+        let outstanding = self.rcv_cur.wrapping_sub(self.rcv_lsa);
+        outstanding as u32 >= self.opts.ack_delay_count
+    }
+
+    /// Take the acknowledgement that is due, if any.
+    ///
+    /// Records that it was sent, so the delay counters restart.
+    pub fn poll_ack(&mut self, now_ms: u32) -> Option<Header> {
+        if self.state != State::Open || !self.should_ack(now_ms) {
+            return None;
+        }
+        self.rcv_lsa = self.rcv_cur;
+        self.ack_timestamp = now_ms;
+        Some(Header {
+            flags: ACK,
+            seq_nr: self.snd_nxt,
+            ack_nr: self.rcv_cur,
+        })
     }
 
     /// Step the machine. Returns what the caller should do.
@@ -592,6 +639,7 @@ impl Connection {
                     self.rcv_lsa = h.seq_nr.wrapping_sub(1);
                     self.snd_una = h.ack_nr.wrapping_add(1);
                     self.retransmits = 0;
+                    self.ack_timestamp = now_ms;
                     self.state = State::Open;
                     return Action::Opened;
                 }
@@ -601,6 +649,7 @@ impl Connection {
             State::SynRcvd => {
                 if h.has(ACK) && h.ack_nr == self.snd_iss {
                     self.snd_una = h.ack_nr.wrapping_add(1);
+                    self.ack_timestamp = now_ms;
                     self.state = State::Open;
                     return Action::Opened;
                 }
@@ -934,6 +983,109 @@ mod tests {
         let b = Connection::new(2, slow);
         assert_eq!(a.opts.packet_timeout, 100);
         assert_eq!(b.opts.packet_timeout, 5_000);
+    }
+
+    // --- acknowledgement ---
+
+    fn open_conn() -> Connection {
+        let mut c = Connection::new(100, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        c.rcv_lsa = 10;
+        c.ack_timestamp = 0;
+        c
+    }
+
+    #[test]
+    fn received_data_is_eventually_acknowledged() {
+        // Before this audit, in-order data was delivered and NEVER acknowledged, so the
+        // sender only learned of it when its own retransmit timer fired -- a full
+        // packet_timeout of latency and a duplicate on the link, per packet.
+        let mut c = open_conn();
+        assert_eq!(
+            c.step(
+                Event::Packet(Header { flags: ACK, seq_nr: 11, ack_nr: 0 }, b"data"),
+                10,
+                MAX_WINDOW
+            ),
+            Action::Deliver
+        );
+        // Past the ack timeout, an acknowledgement is due.
+        let ack = c.poll_ack(10_000).expect("an ack must eventually be produced");
+        assert_eq!(ack.flags, ACK);
+        assert_eq!(ack.ack_nr, 11, "must acknowledge what was received");
+    }
+
+    #[test]
+    fn nothing_received_means_nothing_to_acknowledge() {
+        let mut c = open_conn();
+        assert!(!c.should_ack(999_999));
+        assert_eq!(c.poll_ack(999_999), None);
+    }
+
+    #[test]
+    fn with_delayed_acks_off_every_packet_is_acknowledged_at_once() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = false;
+        c.rcv_cur = 11;
+        assert!(c.should_ack(0), "no delay means acknowledge immediately");
+    }
+
+    #[test]
+    fn a_delayed_ack_fires_on_the_timeout() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = true;
+        c.opts.ack_timeout = 250;
+        c.opts.ack_delay_count = 100; // so only the timeout can trigger it
+        c.rcv_cur = 11;
+        assert!(!c.should_ack(100), "still inside the ack timeout");
+        assert!(c.should_ack(500), "past the ack timeout");
+    }
+
+    #[test]
+    fn a_delayed_ack_fires_on_the_packet_count() {
+        let mut c = open_conn();
+        c.opts.delayed_acks = true;
+        c.opts.ack_timeout = 100_000; // so only the count can trigger it
+        c.opts.ack_delay_count = 2;
+        c.rcv_cur = 11;
+        assert!(!c.should_ack(0), "one packet outstanding, delay count is two");
+        c.rcv_cur = 12;
+        assert!(c.should_ack(0), "two outstanding reaches the delay count");
+    }
+
+    #[test]
+    fn taking_an_ack_restarts_both_delay_counters() {
+        let mut c = open_conn();
+        c.opts.ack_delay_count = 1;
+        c.rcv_cur = 11;
+        assert!(c.poll_ack(500).is_some());
+        assert!(!c.should_ack(500), "nothing outstanding right after acking");
+        assert_eq!(c.rcv_lsa, 11);
+        assert_eq!(c.ack_timestamp, 500);
+    }
+
+    #[test]
+    fn acking_survives_the_clock_wrap() {
+        // `now > ack_timestamp + timeout` would suppress every ack at the wrap.
+        let mut c = open_conn();
+        c.opts.ack_timeout = 250;
+        c.opts.ack_delay_count = 100;
+        c.rcv_cur = 11;
+        c.ack_timestamp = u32::MAX - 100;
+        assert!(
+            !c.should_ack(u32::MAX.wrapping_add(50)),
+            "50 ms later is still inside the timeout, wrap or not"
+        );
+        assert!(c.should_ack(u32::MAX.wrapping_add(500)), "500 ms later is past it");
+    }
+
+    #[test]
+    fn a_closed_connection_produces_no_acks() {
+        let mut c = open_conn();
+        c.rcv_cur = 11;
+        c.state = State::Closed;
+        assert_eq!(c.poll_ack(999_999), None);
     }
 
     // --- retransmission queue ---
