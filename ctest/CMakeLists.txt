@@ -50,6 +50,7 @@ target_sources(ctest PRIVATE
   suite_promisc.c
   suite_dedup.c
   suite_security.c
+  suite_cmp.c
 )
 
 target_sources(ctest PRIVATE

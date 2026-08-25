@@ -143,15 +143,31 @@ pub const fn shutdown() -> Request<'static> {
 /// Build a CMP request into `out`, returning its length.
 ///
 /// The reply is decoded with the matching type in [`csp_core::cmp`].
+///
+/// **The request is padded to [`cmp::request_len`] for the code**, which is usually the
+/// size of the whole *reply*, because the node writes its answer back into the buffer the
+/// request arrived in and refuses to start if that buffer is too small. A request shorter
+/// than that is discarded by a real node **with no reply and no error** — the caller just
+/// waits out its timeout.
+///
+/// This used to emit `2 + body.len()`, so `cmp_request(code::IDENT, &[], …)` produced two
+/// bytes that no libcsp node would ever answer. The padding is zeroed, matching what the
+/// C's own clients send: `csp_cmp_ident` passes `sizeof(struct csp_cmp_ident_msg)`.
 #[cfg(feature = "cmp")]
 pub fn cmp_request(code: u8, body: &[u8], out: &mut [u8]) -> Result<usize> {
-    let needed = cmp::Header::LEN + body.len();
+    let supplied = cmp::Header::LEN + body.len();
+    let needed = if supplied > cmp::request_len(code) {
+        supplied
+    } else {
+        cmp::request_len(code)
+    };
     if out.len() < needed {
         return Err(Error::BufferTooSmall { needed });
     }
     out[0] = cmp::REQUEST;
     out[1] = code;
-    out[cmp::Header::LEN..needed].copy_from_slice(body);
+    out[cmp::Header::LEN..supplied].copy_from_slice(body);
+    out[supplied..needed].fill(0);
     Ok(needed)
 }
 
@@ -327,13 +343,55 @@ mod tests {
     #[cfg(feature = "cmp")]
     #[test]
     fn a_cmp_request_carries_the_request_marker() {
-        let mut out = [0u8; 32];
+        let mut out = [0u8; 128];
         let n = cmp_request(cmp::code::IDENT, &[], &mut out).unwrap();
-        assert_eq!(n, 2);
         let h = cmp::Header::decode(&out[..n]).unwrap();
         assert_eq!(h.kind, cmp::REQUEST);
         assert!(!h.is_reply());
         assert_eq!(h.code, cmp::code::IDENT);
+    }
+
+    /// A request has to be big enough to hold the reply the node will write back into it,
+    /// or a real node discards it without answering. This test previously asserted
+    /// `n == 2` for an `IDENT` request — the length libcsp is guaranteed *not* to answer.
+    /// Measured in `ctest/suite_cmp.c`.
+    #[cfg(feature = "cmp")]
+    #[test]
+    fn a_cmp_request_is_padded_to_what_the_node_will_answer() {
+        let mut out = [0u8; 128];
+
+        let n = cmp_request(cmp::code::IDENT, &[], &mut out).unwrap();
+        assert_eq!(n, cmp::Ident::LEN, "IDENT needs room for the whole reply");
+        assert!(out[2..n].iter().all(|&b| b == 0), "padding must be zeroed");
+
+        let n = cmp_request(cmp::code::CLOCK, &[], &mut out).unwrap();
+        assert_eq!(n, cmp::Timestamp::LEN);
+
+        // IF_STATS is the one code whose handler stops checking at the interface name.
+        let n = cmp_request(cmp::code::IF_STATS, &[], &mut out).unwrap();
+        assert_eq!(n, cmp::IfStatsMsg::REQUEST_LEN);
+
+        // A body longer than the minimum is not truncated to it.
+        let n = cmp_request(cmp::code::POKE, &[0xAA; 40], &mut out).unwrap();
+        assert_eq!(n, cmp::Header::LEN + 40);
+
+        // An unknown code has no handler, so there is nothing to pad for.
+        let n = cmp_request(200, &[], &mut out).unwrap();
+        assert_eq!(n, cmp::Header::LEN);
+    }
+
+    /// The buffer-too-small error has to report the padded size, or a caller that retries
+    /// with exactly `needed` fails again.
+    #[cfg(feature = "cmp")]
+    #[test]
+    fn a_short_buffer_reports_the_padded_size() {
+        let mut out = [0u8; 8];
+        assert_eq!(
+            cmp_request(cmp::code::IDENT, &[], &mut out),
+            Err(Error::BufferTooSmall {
+                needed: cmp::Ident::LEN
+            })
+        );
     }
 
     #[cfg(feature = "cmp")]

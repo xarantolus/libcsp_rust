@@ -177,6 +177,49 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
+### CMP: the request has to be as big as the reply, on both sides
+
+Found on 2026-08-25 by `ctest/suite_cmp.c`, the third oracle suite. It measures the
+smallest request a real node will answer, per code, by sweeping the length rather than
+reading it off the struct definitions.
+
+Every handler in `src/cmp/` opens with `csp_cmp_check_len`, and for most codes the bound is
+the size of the **whole reply** — the node writes its answer back into the buffer the
+request arrived in, so a request too small to hold the reply is refused before anything
+happens. `csp_cmp_handler` returns `CSP_ERR_INVAL` and `csp_service_handler` discards the
+packet **without answering**, so the caller waits out its timeout and learns nothing.
+
+| code | smallest answered request |
+|---|---|
+| `IDENT` | 93 — the entire reply |
+| `CLOCK` | 10 — the entire reply |
+| `IF_STATS` | 13 — header plus interface name only |
+
+Two port defects, one on each side of that:
+
+**1. `cmp_request` built requests no node would answer.** It emitted
+`Header::LEN + body.len()`, so `cmp_request(code::IDENT, &[], …)` produced two bytes — and
+the crate's own test asserted `n == 2`, presenting the unanswerable form as correct. Now
+padded to `cmp::request_len(code)`, zero-filled, matching what the C's own clients send
+(`csp_cmp_ident` passes `sizeof(struct csp_cmp_ident_msg)`).
+
+**2. `parse_request` had no length check for `IDENT` at all.** A node built on this port
+answered a two-byte request with 93 bytes, where a C node stays silent. Tempting to keep —
+the C's requirement is an artifact of writing the reply in place, which this port does not
+do — but it turns an unauthenticated port into a **46× amplifier**, and amplification on a
+link that costs power to transmit is not a good trade for accepting a malformed request.
+Now gated on `request_len` for every code, which is the same constant the request builder
+pads to.
+
+Removing the gate makes the corpus report both IDENT cases as `replies: 1, reply_len: 93`
+against the C's silence, so neither half is vacuous.
+
+*Also confirmed, and not a divergence:* libcsp does **not** serve CMP from the router. The
+application calls `csp_service_handler` from its own receive loop
+(`examples/csp_server.c:77`). The port's `service`/`cmp` modules are opt-in the same way —
+`Router` never calls them. Worth stating because the opposite would mean a node answering
+`CSP_REBOOT` that its author never opted into.
+
 ### The security policy verified the trailers in the wrong order
 
 Found on 2026-08-25, on the **first run** of the corpus replay (`csp/tests/corpus.rs`)
