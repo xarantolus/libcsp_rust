@@ -37,6 +37,8 @@ const EGRESS_ADDR: u16 = 20;
 const NETMASK: u16 = 12;
 /// In the egress subnet (`21 & 0x3FFC == 20`), and not an address either interface owns.
 const FORWARD_DST: u16 = 21;
+/// A third subnet, so a route can point somewhere local-subnet would not choose.
+const THIRD_ADDR: u16 = 40;
 
 type TestNode<'a> = Node<'a, 8, 24, 300, 64, 8, 8>;
 
@@ -58,6 +60,9 @@ fn rust_exchange(frame: &[u8], bind_ports: &[u8], routes: &[(u16, u16, u8, u16)]
     node.ifaces
         .add("EGRESS", EGRESS_ADDR, NETMASK, true)
         .unwrap();
+    node.ifaces
+        .add("ROUTED", THIRD_ADDR, NETMASK, false)
+        .unwrap();
     for &p in bind_ports {
         node.bind(p).unwrap();
     }
@@ -77,10 +82,16 @@ fn rust_exchange(frame: &[u8], bind_ports: &[u8], routes: &[(u16, u16, u8, u16)]
     for _ in 0..64 {
         match node.work(0) {
             Routed::Idle => break,
-            Routed::Forwarded { packet, .. } => {
+            Routed::Forwarded { iface, via, packet } => {
                 if let Some(mut fwd) = node.take_forwarded(packet) {
                     if fwd.prepend_header(VERSION).is_ok() {
                         out.tx.push(fwd.with_frame(|f| f.to_vec()));
+                        let name = node
+                            .ifaces
+                            .get(iface)
+                            .map(|e| e.name.to_string())
+                            .unwrap_or_else(|| format!("?{iface}"));
+                        out.tx_via.push((name, via));
                     }
                 }
             }
@@ -110,7 +121,7 @@ fn rust_exchange(frame: &[u8], bind_ports: &[u8], routes: &[(u16, u16, u8, u16)]
 fn setup() {
     c_set_version(VERSION);
     assert!(
-        c_node_init(VERSION, NODE_ADDR, NETMASK, EGRESS_ADDR),
+        c_node_init(VERSION, NODE_ADDR, NETMASK, EGRESS_ADDR, THIRD_ADDR),
         "C node came up at v2"
     );
     assert_eq!(c_node_bind(10), 0, "bind port 10");
@@ -225,6 +236,11 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
         "the forwarded frame must be byte-identical"
     );
     assert_eq!(c.tx[0], frame, "and unchanged from what arrived");
+    assert_eq!(
+        r.tx_via[0].0, c.tx_via[0].0,
+        "and must leave by the same interface -- the bytes are identical whichever link \
+         it goes out of, so comparing only the frame proves nothing about routing"
+    );
 }
 
 #[test]
@@ -262,4 +278,44 @@ fn no_path_through_the_node_leaks_a_buffer() {
         "the C node leaked {} buffers over 400 v2 exchanges",
         before - c_node_buf_free()
     );
+}
+
+/// The local-subnet-beats-routing-table precedence, on v2.
+///
+/// The v1 version of this is in `diff.rs`. Repeated here because the precedence depends on
+/// subnet arithmetic and subnet arithmetic depends on host bits, which is the one thing
+/// that differs between the versions — 5 bits against 14.
+#[test]
+fn a_local_subnet_beats_the_routing_table() {
+    let _g = LOCK.lock().unwrap();
+    setup();
+
+    // FORWARD_DST is in EGRESS's subnet; point the routing table at ROUTED instead.
+    assert_eq!(
+        c_node_route(FORWARD_DST, 14, 2, 0xFFFF),
+        0,
+        "route installed"
+    );
+
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 4000,
+        dst: FORWARD_DST,
+        dport: 10,
+        sport: 40,
+    };
+    let frame = framed(id, b"which interface?");
+
+    let c = c_node_exchange(&frame, &[10]);
+    assert_eq!(c.tx.len(), 1);
+    assert_eq!(
+        c.tx_via[0].0, "EGRESS",
+        "the C ignores the routing table when a local interface owns the subnet"
+    );
+
+    let r = rust_exchange(&frame, &[10], &[(FORWARD_DST, 14, 2, 0xFFFF)]);
+    assert_eq!(r.tx.len(), 1);
+    assert_eq!(c.tx[0], r.tx[0], "byte-identical");
+    assert_eq!(r.tx_via[0].0, c.tx_via[0].0, "and the same interface");
 }

@@ -96,7 +96,8 @@ unsafe extern "C" {
     fn shim_kiss_last_id(out: *mut u8) -> c_int;
     fn shim_kiss_drops() -> u32;
     fn shim_kiss_frame_errors() -> u32;
-    fn shim_node_init(version: c_int, address: u16, netmask: u16, egress: u16) -> c_int;
+    fn shim_node_init(version: c_int, address: u16, netmask: u16, egress: u16, third: u16)
+        -> c_int;
     fn shim_node_bind(port: u8) -> c_int;
     fn shim_node_inject(frame: *const u8, len: u32) -> c_int;
     fn shim_node_pump() -> c_int;
@@ -123,6 +124,14 @@ unsafe extern "C" {
         autherr: *mut u32,
     );
     fn shim_node_iface_registered() -> c_int;
+    fn shim_node_tx_iface(i: c_int, name: *mut u8, via: *mut u16) -> c_int;
+    fn shim_node_route(address: u16, netmask: c_int, iface: c_int, via: u16) -> c_int;
+}
+
+/// Install a routing-table entry on the C node. `iface`: 0=INGRESS, 1=EGRESS, 2=ROUTED.
+pub fn c_node_route(address: u16, netmask: i32, iface: i32, via: u16) -> i32 {
+    // SAFETY: the shim maps `iface` onto one of its three static interfaces.
+    unsafe { shim_node_route(address, netmask, iface, via) }
 }
 
 /// Capture-interface counters: (rx, tx, drop, rx_error, tx_error, autherr).
@@ -149,6 +158,10 @@ pub fn c_node_iface_registered() -> bool {
 pub struct NodeOutcome {
     /// Frames the node put on the wire, in order, as complete framed bytes.
     pub tx: Vec<Vec<u8>>,
+    /// For each frame, the interface name it left by and the next hop it was given.
+    /// Both are observable at the driver boundary — a real driver uses `via` to address
+    /// its link-layer peer.
+    pub tx_via: Vec<(String, u16)>,
     /// Messages the application received: (port, src, dst, dport, sport, payload).
     pub delivered: Vec<Delivered>,
 }
@@ -170,13 +183,19 @@ pub struct Delivered {
 /// Idempotent, and it has to be: `csp_conf.version` is init-only (SCOPE.md deviation 18),
 /// so one process gets one node at one wire version. Testing the other version means a
 /// second test binary, which is why `node_v2.rs` exists alongside `diff.rs`.
-pub fn c_node_init(version: csp_core::Version, address: u16, netmask: u16, egress: u16) -> bool {
+pub fn c_node_init(
+    version: csp_core::Version,
+    address: u16,
+    netmask: u16,
+    egress: u16,
+    third: u16,
+) -> bool {
     let v = match version {
         csp_core::Version::V1 => 1,
         csp_core::Version::V2 => 2,
     };
     // SAFETY: calls csp_init once behind an internal guard; callers hold `LOCK`.
-    unsafe { shim_node_init(v, address, netmask, egress) == 0 }
+    unsafe { shim_node_init(v, address, netmask, egress, third) == 0 }
 }
 
 /// Bind a port on the C node.
@@ -233,6 +252,12 @@ pub fn c_node_exchange(frame: &[u8], watch_ports: &[u8]) -> NodeOutcome {
             if len >= 0 {
                 buf.truncate(len as usize);
                 out.tx.push(buf);
+                let mut name = [0u8; 16];
+                let mut via = 0u16;
+                let nl = shim_node_tx_iface(i, name.as_mut_ptr(), &mut via);
+                let nl = if nl > 0 { nl as usize } else { 0 };
+                out.tx_via
+                    .push((String::from_utf8_lossy(&name[..nl]).into_owned(), via));
             }
         }
     }
