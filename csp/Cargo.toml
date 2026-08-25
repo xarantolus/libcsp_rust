@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss"]
+default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss", "if-eth", "if-i2c"]
 
 rdp = ["csp-core/rdp"]
 sfp = ["csp-core/sfp"]
@@ -16,6 +16,8 @@ hmac = ["csp-core/hmac"]
 rtable = ["csp-core/rtable"]
 if-can = ["csp-core/if-can"]
 if-kiss = ["csp-core/if-kiss"]
+if-eth = ["csp-core/if-eth"]
+if-i2c = ["csp-core/if-i2c"]
 
 [dependencies]
 csp-core = { path = "../csp-core", default-features = false }

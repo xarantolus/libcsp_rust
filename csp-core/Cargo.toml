@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss"]
+default = ["rdp", "sfp", "cmp", "hmac", "rtable", "if-can", "if-kiss", "if-eth", "if-i2c"]
 
 rdp = []
 sfp = []
@@ -17,5 +17,7 @@ sha1 = []
 rtable = []
 if-can = []
 if-kiss = []
+if-eth = []
+if-i2c = []
 
 [dependencies]

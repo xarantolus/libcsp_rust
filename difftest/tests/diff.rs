@@ -242,3 +242,43 @@ fn rust_refuses_an_empty_hmac_key_and_the_c_leaves_the_buffer_untouched() {
         "the C must be refusing this too"
     );
 }
+
+#[test]
+fn cfp1_identifier_packing_agrees() {
+    use csp_core::cfp;
+    let mut rng = Rng(0xCF71_0000_0000_000b);
+    for i in 0..ITERS {
+        // In-range values: the C's macros mask, so out-of-range inputs are silently
+        // truncated on both sides and would not prove anything.
+        let src = rng.below(32) as u16;
+        let dst = rng.below(32) as u16;
+        let kind = rng.below(2) as u32;
+        let remain = rng.below(256) as u32;
+        let ident = rng.below(1024) as u16;
+
+        let ours = cfp::v1_id(src, dst, kind, remain, ident);
+        let theirs = c_cfp1_make(src, dst, kind, remain, ident);
+        assert_eq!(
+            ours, theirs,
+            "iter {i}: make({src},{dst},{kind},{remain},{ident}) {ours:#x} != {theirs:#x}"
+        );
+        assert!(ours < (1 << 29), "iter {i}: id must fit an extended CAN identifier");
+    }
+}
+
+#[test]
+fn cfp1_identifier_parsing_agrees_for_arbitrary_identifiers() {
+    use csp_core::cfp;
+    let mut rng = Rng(0xCF72_0000_0000_000d);
+    for i in 0..ITERS {
+        // Any 29-bit pattern, including ones no sane sender would produce.
+        let id = (rng.next() as u32) & ((1 << 29) - 1);
+        let ours = cfp::v1_parse(id);
+        let (src, dst, kind, remain, ident) = c_cfp1_parse(id);
+        assert_eq!(
+            (ours.src, ours.dst, ours.kind, ours.remain, ours.ident),
+            (src, dst, kind, remain, ident),
+            "iter {i}: parse({id:#x})"
+        );
+    }
+}

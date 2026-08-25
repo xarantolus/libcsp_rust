@@ -130,7 +130,32 @@ behaviour:
    and the default `csp_panic` just returns). The port returns an error.
 8. **`csp_transaction` demands an exact reply length** unless given `-1`. All three
    existing consumers work around this identically; the port returns an owned reply.
-9. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+9. **The reboot service reads past the packet.** `csp_service_handler`'s `CSP_REBOOT`
+   case does `memcpy(&magic_word, packet->data, sizeof(magic_word))` with **no length
+   check**, so a one-byte packet sent to port 4 compares four bytes against a payload that
+   has one. Buffers are pooled and reused, so the extra bytes are whatever the previous
+   user left there. Not a remote reboot primitive — matching a 32-bit magic by accident is
+   unlikely — but an out-of-bounds read on the one port whose job is recovery, reachable
+   by anyone who can send a packet. The port requires the four bytes.
+10. **Deduplication stops working at the 49-day clock wrap.** `csp_dedup.c` compares
+    `time > csp_dedup_timestamp[i] + CSP_DEDUP_WINDOW_MS` on a free-running 32-bit
+    millisecond counter. After the wrap `time` is small, the comparison is false for every
+    entry, the scan breaks on the first one, and duplicates stop being suppressed. The
+    addition can also overflow near the wrap. The port uses wrapping subtraction, with a
+    test that fails on the naive form.
+11. **`csp_if_eth_unpack_header` is asymmetric with its packer and shifts into a sign
+    bit.** The packer writes `packet_id`/`src_addr` with `htobe16`; the unpacker does
+    `*packet_id = buf->packet_id << 16 | buf->src_addr` with no `be16toh` on either. The
+    recovered value is byte-swapped relative to what was sent (harmless only because both
+    ends make the same mistake and it is used as an opaque key), and `buf->packet_id` is a
+    `uint16_t` promoted to `int`, so `<< 16` with the top bit set is undefined behaviour.
+    Separately, the header the code implements is **not** the bit-packed EFP header its
+    own file comment specifies.
+12. **The bridge forwards a stranger's packet into side A.** `csp_bridge_work` picks the
+    opposing interface with `if (input.iface == bif_a) destif = bif_b; else destif = bif_a;`
+    — no third branch. A frame arriving on an interface that is neither side of the bridge
+    is injected into side A as though it had come from side B. The port refuses it.
+13. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the

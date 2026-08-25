@@ -180,6 +180,7 @@ exposes none.
 | `cmp` | Management protocol, **both directions** — the C has no decoder |
 | `rtable` | CIDR table plus a hand-written route parser (no `sscanf`, no VLA) |
 | `rdp` | Reliable delivery as `fn step(&mut self, event, now) -> Action` |
+| `eth` | Ethernet + EFP segmentation |
 
 `crc32::Coverage` is explicit because the C's verifier tries header-and-payload, then
 silently falls back to payload-only — so a receiver can accept a frame whose checksum
@@ -190,12 +191,62 @@ byte-for-byte under `Coverage::PayloadOnly`, which settles it empirically.)
 RDP options are **per connection**. The C keeps its six RDP tunables in file statics shared
 by every connection, so two connections with different timeouts are not expressible there.
 
+## The router
+
+```rust
+let mut router: Router<CONNS, RXQ, PORTS, QFIFO> = Router::new(address, version);
+router.bind(20)?;
+
+loop {
+    match router.work(&pool, now_ms()) {
+        Routed::Idle => { /* ordinary — csp_route_work returns an ERROR here */ }
+        Routed::Delivered { port, conn } => dispatch(port, conn),
+        Routed::Forwarded { iface, via } => send_on(iface, via),
+        Routed::Dropped(why) => log(why),
+    }
+    router.tick(&pool, now_ms(), conn_timeout);   // drives RDP timers and idle expiry
+}
+```
+
+`Routed::Dropped` always says *why*: `Duplicate`, `NoRoute`, `PortNotBound`,
+`ConnectionTableFull`, `ReceiveQueueFull`, `Malformed`. The C reports several of those
+through one `uint8_t` counter that wraps at 256 and is written from ISR and task context
+without synchronisation.
+
+`Router::tick` is not optional. The RDP state machine reads no clock on purpose, so
+nothing else advances its timers or reclaims idle connections — and connection slots are
+the scarcest resource on a node (8 by default, 16 in flight).
+
+`Router::bridge_work(pool, a, b, now)` is the transparent bridge. A frame arriving on an
+interface that is neither side is **refused**; the C's `if/else` has no third branch and
+injects it into side A.
+
+## Connections
+
+Handles are generation-tagged. Closing a connection and opening a new one recycles the
+index, so a caller holding the old handle would otherwise operate on someone else's
+connection — the use-after-free a raw `csp_conn_t *` invites. A stale handle returns
+`Error::NoTransferInProgress`.
+
+## Compile-time invariants
+
+Anything the code *relies* on is an assertion, not a comment:
+
+```rust
+let _: Pool<4, 4> = Pool::new();
+// error: buffer size must exceed the header padding; see pool::PADDING
+```
+
+`Pool` requires `SZ > PADDING` and `N > 0`; `Qfifo`, `conn::Table` and `rtable::Table`
+require non-zero capacity; `Router` requires `PORTS` in `1..=256`. Everything a caller can
+get wrong at *runtime* stays in the error enum.
+
 ## Testing
 
-- **178 tests** across both crates.
+- **254 tests** across the crates.
 - **922 golden vectors** captured from the running C library — real wire bytes, after
   `csp_id_prepend`, after SFP headers, after CFP fragmentation.
-- **10 differential tests** in `difftest/`, ~2.4M random inputs per run, linking the real C
+- **12 differential tests** in `difftest/`, ~3M random inputs per run, linking the real C
   and comparing. Dev-only: the shipped crates contain no C.
 
 Deliberate divergences are asserted **as divergences**, so a regression back toward C

@@ -88,3 +88,21 @@ int shim_hmac(const uint8_t *key, uint32_t keylen,
               const uint8_t *data, uint32_t datalen, uint8_t *out20) {
 	return csp_hmac_memory(key, keylen, data, datalen, out20);
 }
+
+/* --- CFP identifier packing, straight from the csp_if_can.h macros --- */
+#include <csp/interfaces/csp_if_can.h>
+
+uint32_t shim_cfp1_make(uint16_t src, uint16_t dst, uint32_t type,
+                        uint32_t remain, uint16_t ident) {
+	return (CFP_MAKE_SRC(src) | CFP_MAKE_DST(dst) | CFP_MAKE_TYPE(type) |
+	        CFP_MAKE_REMAIN(remain) | CFP_MAKE_ID(ident));
+}
+
+void shim_cfp1_parse(uint32_t id, uint16_t *src, uint16_t *dst, uint32_t *type,
+                     uint32_t *remain, uint16_t *ident) {
+	*src = (uint16_t)CFP_SRC(id);
+	*dst = (uint16_t)CFP_DST(id);
+	*type = CFP_TYPE(id);
+	*remain = CFP_REMAIN(id);
+	*ident = (uint16_t)CFP_ID(id);
+}

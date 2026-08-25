@@ -46,11 +46,17 @@ pub struct Table<const N: usize> {
 }
 
 impl<const N: usize> Table<N> {
+    /// Compile-time invariant: a zero-capacity table makes every `set` fail with
+    /// `TableFull` and every lookup return `None`, which looks like a routing bug rather
+    /// than a sizing mistake.
+    const SANITY: () = assert!(N > 0, "a routing table needs at least one entry");
+
     /// Create an empty table for the given wire version.
     ///
     /// The version fixes `host_bits`, which every mask computation depends on — hence it
     /// belongs to the table rather than to a global that can change underneath it.
     pub const fn new(version: Version) -> Self {
+        let () = Self::SANITY;
         Table {
             entries: [Route {
                 address: 0,

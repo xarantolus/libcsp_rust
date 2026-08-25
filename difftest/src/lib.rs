@@ -49,6 +49,15 @@ unsafe extern "C" {
     fn shim_is_broadcast(addr: u16, iface_addr: u16, iface_netmask: u16) -> c_int;
     fn shim_crc32(data: *const u8, len: u32) -> u32;
     fn shim_sha1(data: *const u8, len: u32, out20: *mut u8);
+    fn shim_cfp1_make(src: u16, dst: u16, kind: u32, remain: u32, ident: u16) -> u32;
+    fn shim_cfp1_parse(
+        id: u32,
+        src: *mut u16,
+        dst: *mut u16,
+        kind: *mut u32,
+        remain: *mut u32,
+        ident: *mut u16,
+    );
     fn shim_hmac(
         key: *const u8,
         keylen: u32,
@@ -188,6 +197,30 @@ pub fn c_hmac(key: &[u8], data: &[u8]) -> Option<[u8; 20]> {
     } else {
         None
     }
+}
+
+/// Build a CFP 1 CAN identifier with the C's macros.
+pub fn c_cfp1_make(src: u16, dst: u16, kind: u32, remain: u32, ident: u16) -> u32 {
+    // SAFETY: the shim only evaluates header macros on scalars.
+    unsafe { shim_cfp1_make(src, dst, kind, remain, ident) }
+}
+
+/// Take a CFP 1 identifier apart with the C's macros.
+pub fn c_cfp1_parse(id: u32) -> (u16, u16, u32, u32, u16) {
+    let (mut src, mut dst, mut ident) = (0u16, 0u16, 0u16);
+    let (mut kind, mut remain) = (0u32, 0u32);
+    // SAFETY: all out pointers are to live locals.
+    unsafe {
+        shim_cfp1_parse(
+            id,
+            &mut src,
+            &mut dst,
+            &mut kind,
+            &mut remain,
+            &mut ident,
+        )
+    }
+    (src, dst, kind, remain, ident)
 }
 
 /// Deterministic xorshift, so a failing run can be reproduced from its seed.

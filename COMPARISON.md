@@ -19,7 +19,7 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | raw pointers | **2 709** | 2 709 | 0 |
 | Rust LOC | 16 903 (**1.98× the C**) | 16 903 | **6 319** |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **178** |
+| Tests passing | 0 | 0 | **254** |
 | Two nodes in one process | no | no | **yes** |
 
 ## corrode — ruled out without running
