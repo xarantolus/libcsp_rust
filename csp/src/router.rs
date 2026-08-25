@@ -124,6 +124,13 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     promisc_missed: u32,
     /// Counters.
     pub counters: Counters,
+    /// Connections delivered to but not yet accepted by the application.
+    ///
+    /// One queue, not one per port: every consumer of the C binds `CSP_ANY` and dispatches
+    /// on the destination port itself, so per-port accept queues would be dead weight.
+    accept: [Option<Handle>; 8],
+    accept_len: usize,
+    accept_missed: u32,
     address: u16,
     version: Version,
 }
@@ -156,6 +163,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             promisc_enabled: false,
             promisc_missed: 0,
             counters: Counters::default(),
+            accept: [None; 8],
+            accept_len: 0,
+            accept_missed: 0,
             address,
             version,
         }
@@ -215,6 +225,46 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
         None
+    }
+
+    /// Take the next connection with data waiting, if any.
+    ///
+    /// Returns `None` rather than blocking; the caller owns the thread.
+    pub fn accept(&mut self) -> Option<Handle> {
+        if self.accept_len == 0 {
+            return None;
+        }
+        for slot in self.accept.iter_mut() {
+            if let Some(h) = slot.take() {
+                self.accept_len -= 1;
+                return Some(h);
+            }
+        }
+        None
+    }
+
+    /// Connections that could not be queued for accept because the backlog was full.
+    pub const fn accept_missed(&self) -> u32 {
+        self.accept_missed
+    }
+
+    fn queue_accept(&mut self, h: Handle) {
+        // Already waiting? A second packet on the same connection must not enqueue it
+        // twice, or accept() hands the same connection to two callers.
+        if self.accept.iter().flatten().any(|&e| e == h) {
+            return;
+        }
+        if self.accept_len >= self.accept.len() {
+            self.accept_missed += 1;
+            return;
+        }
+        for slot in self.accept.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(h);
+                self.accept_len += 1;
+                return;
+            }
+        }
     }
 
     /// Inject a received packet, as a driver does.
@@ -333,6 +383,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         match self.conns.enqueue_rx(handle, packet.into_index()) {
             Ok(true) => {
                 self.counters.delivered += 1;
+                self.queue_accept(handle);
                 Routed::Delivered {
                     port: id.dport,
                     conn: handle,
@@ -753,6 +804,52 @@ mod tests {
             r.bridge_work(&pool, 1, 2, 5),
             Bridged::Dropped(DropReason::Duplicate)
         );
+    }
+
+    #[test]
+    fn a_delivered_connection_becomes_acceptable() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        assert!(r.accept().is_none(), "nothing delivered yet");
+
+        r.receive(pkt(&pool, ME, 20, b"hello"), 0);
+        let conn = match r.work(&pool, 0) {
+            Routed::Delivered { conn, .. } => conn,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(r.accept(), Some(conn));
+        assert!(r.accept().is_none(), "accepted once only");
+    }
+
+    #[test]
+    fn a_second_packet_does_not_queue_the_same_connection_twice() {
+        // Otherwise accept() hands the same connection to two callers, and both read
+        // from the same queue.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        for _ in 0..3 {
+            r.receive(pkt(&pool, ME, 20, b"x"), 0);
+            r.work(&pool, 0);
+        }
+        assert!(r.accept().is_some());
+        assert!(r.accept().is_none(), "one connection, one accept");
+    }
+
+    #[test]
+    fn a_full_accept_backlog_is_counted_not_silent() {
+        let pool = P::new();
+        let mut r: Router<16, 4, 48, 32> = Router::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        for sport in 0..12u8 {
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport });
+            p.set_payload(b"x").unwrap();
+            r.receive(p, 0);
+            r.work(&pool, 0);
+        }
+        assert!(r.accept_missed() > 0, "backlog overflow must be counted");
     }
 
     #[test]
