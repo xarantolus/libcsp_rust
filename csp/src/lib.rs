@@ -41,6 +41,7 @@ pub mod node;
 #[cfg(feature = "sfp")]
 pub mod delivery;
 pub mod iface;
+pub mod iflist;
 pub mod pool;
 pub mod qfifo;
 pub mod router;
@@ -53,6 +54,7 @@ pub use delivery::{Delivery, Handler, PortTable};
 pub use conn::Table as ConnTable;
 pub use node::{Node, Outbound};
 pub use iface::{Interface, Transmit};
+pub use iflist::IfList;
 pub use qfifo::Qfifo;
 pub use router::{Bridged, DropReason, Routed, Router};
 pub use service::{NodeStatus, Request};
