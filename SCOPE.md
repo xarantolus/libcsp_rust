@@ -229,7 +229,15 @@ whoever maintains the fork can see what was found and decide for themselves.
     `packet->frame_length - CSP_HMAC_LENGTH`. A packet with `length >= 4` but
     `frame_length < 4` underflows that subtraction to about four billion and hashes far
     past the buffer.
-15. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+15. **The SFP fragment flag is sticky on the connection.** `csp_sfp.c:131` does
+    `conn->idout.flags |= CSP_FFRAG` inside the send loop, and **nothing in the library
+    ever clears it** — grep across `src/` finds exactly one write and no reset. So after a
+    single SFP transfer, every later plain datagram on that connection is marked as a
+    fragment. Combined with deviation 3, the receiver then parses it as one, fails, and
+    frees it: the sender creates the condition and the receiver destroys the packet. The
+    flight code runs SFP on the config and log-dump ports, so any connection reused for a
+    plain reply hits this. In the port the flag lives on the packet, not the connection.
+16. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the

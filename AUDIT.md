@@ -149,3 +149,41 @@ comparing `packet->conn`, so a busy connection crowds out a quiet one.
 give-up counter bounds retransmission.
 
 **Tests:** 48 in `rdp`, up from 33.
+
+---
+
+## `csp-core::sfp` + `csp::delivery` — fragmentation and the either-shape port
+
+Against `src/csp_sfp.c` (6 functions).
+
+| C | Rust | |
+|---|---|---|
+| `csp_sfp_header_add` / `remove` | `Fragment::encode` / `parse` | ✅ trailer placement verified against 184 golden fragments |
+| `csp_sfp_opts_max_mtu` | `sfp::max_mtu` | ✅ all six option combinations differentially checked |
+| `csp_sfp_conn_max_mtu` | `Node::conn_sfp_mtu` | ✅ one call, not the C's flags→opts dance |
+| `csp_sfp_send` | `Fragmenter` | ✅ |
+| `csp_sfp_recv_fp` incl. `first_packet` | `Reassembler`, `Delivery::classify` | ✅ |
+
+**Faithful:** yes. The golden vectors cover 36 transfers and 184 fragments across both wire
+versions, and reassembling the C's *own* frames reproduces the message exactly.
+
+**Rusty:** yes. `Delivery` is the part that is genuinely better rather than merely
+different — see `SCOPE.md` 3.
+
+**Found during the audit — a fifth C defect, and it compounds with one already recorded.**
+`csp_sfp.c:131` does `conn->idout.flags |= CSP_FFRAG` inside the send loop, and **nothing
+in the library ever clears it**: grep across `src/` finds exactly one write to that flag
+and no reset anywhere. So after a single SFP transfer, every later plain datagram on that
+connection is marked as a fragment.
+
+Combined with deviation 3 — a receiver that sees `FFRAG`, fails to parse an SFP trailer,
+and *frees the packet* — this means **the sender creates the condition and the receiver
+destroys the packet**, with the sender told only `-103 CSP_ERR_SFP`. The flight code runs
+SFP on the config and log-dump ports, so any connection reused for a plain reply afterwards
+hits it.
+
+In the port the flag lives on the packet, never on the connection. There is a test that
+sends a fragment-flagged packet and then a plain one on the same connection and asserts the
+second is not marked.
+
+**Deviations:** `SCOPE.md` 3 (non-destructive wrong-shape delivery), 15 (non-sticky flag).

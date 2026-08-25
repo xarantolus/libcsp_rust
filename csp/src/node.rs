@@ -757,6 +757,37 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "sfp")]
+    #[test]
+    fn the_fragment_flag_is_per_packet_not_sticky_on_the_connection() {
+        // csp_sfp.c:131 does `conn->idout.flags |= CSP_FFRAG` inside the send loop and
+        // NOTHING in the library ever clears it. So after one SFP transfer, every later
+        // plain datagram on that connection is marked as a fragment -- and the receiver,
+        // per SCOPE.md 3, parses it as one, fails, and FREES it. The sender causes the
+        // condition and the receiver destroys the packet.
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+
+        // Send something that looks like a fragment, by setting the flag on the packet.
+        let mut frag = n.packet().unwrap();
+        frag.set_payload(b"fragment").unwrap();
+        let out = n.send(c, frag, 0).unwrap();
+        let mut p = out.into_packet();
+        p.set_id(csp_core::Id { flags: csp_core::flags::FRAG, ..p.id() });
+        assert!(p.id().is_fragment());
+        drop(p);
+
+        // A later plain packet on the SAME connection must not inherit it.
+        let plain = n.packet().unwrap();
+        let out = n.send(c, plain, 0).unwrap();
+        assert!(
+            !out.into_packet().id().is_fragment(),
+            "the connection must not carry FRAG over to the next packet"
+        );
+    }
+
     #[test]
     fn two_nodes_run_independently_in_one_process() {
         let sa = S::new();
