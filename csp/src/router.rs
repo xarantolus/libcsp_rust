@@ -134,8 +134,8 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     pub conns: conn::Table<CONNS, RXQ>,
     /// Duplicate suppression.
     pub dedup: Dedup,
-    /// Whether duplicate suppression is on.
-    pub dedup_enabled: bool,
+    /// Which traffic duplicate suppression applies to. Off by default, as in the C.
+    pub dedup_mode: crate::dedup::DedupMode,
     /// Routing table.
     #[cfg(feature = "rtable")]
     pub routes: rtable::Table<16>,
@@ -188,7 +188,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             qfifo: Qfifo::new(),
             conns: conn::Table::new(),
             dedup: Dedup::new(),
-            dedup_enabled: false,
+            dedup_mode: crate::dedup::DedupMode::Off,
             #[cfg(feature = "rtable")]
             routes: rtable::Table::new(version),
             bound: [false; PORTS],
@@ -362,22 +362,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             return Routed::Idle;
         };
 
-        // Deduplicate on the framed bytes, matching the C, which prepends the header
-        // before checksumming.
-        if self.dedup_enabled {
-            let mut framed = packet;
-            if framed.prepend_header(self.version).is_err() {
-                self.counters.malformed += 1;
-                return Routed::Dropped(DropReason::Malformed);
-            }
-            let dup = framed.with_frame(|f| self.dedup.is_duplicate(f, now_ms));
-            if dup {
-                self.counters.duplicates += 1;
-                return Routed::Dropped(DropReason::Duplicate);
-            }
-            return self.route_one(pool, framed, ifaces, ingress, now_ms);
-        }
-
+        // Deduplication happens inside route_one, after "is this for me?" — the mode says
+        // *which* traffic to deduplicate, so the answer is needed first.
         self.route_one(pool, packet, ifaces, ingress, now_ms)
     }
 
@@ -391,6 +377,44 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         now_ms: u32,
     ) -> Routed {
         let id = packet.id();
+
+        // "Is this for me?" — the C's `is_to_me`, which is three conditions, none of
+        // them a single node address:
+        //
+        //   * **any** interface's address matches (`csp_iflist_get_by_addr`), so a node
+        //     with a CAN interface and a KISS interface answers to both;
+        //   * the destination is the broadcast address **of the interface it arrived on**
+        //     (`csp_id_is_broadcast(dst, input.iface)`) — the ingress interface's subnet,
+        //     not the node's;
+        //   * or it is a bound alias (`csp_addr_is_alias`).
+        //
+        // This compared `id.dst` against one `self.address` and called `is_broadcast` with
+        // a hardcoded netmask of `0`. A packet for the node's *other* interface therefore
+        // failed the check, fell through to forwarding, and went back out on the wire —
+        // measured against the C, which delivers it. `IfList::find_by_addr` covers the
+        // interface addresses and the aliases together.
+        let for_us = ifaces.find_by_addr(id.dst).is_some()
+            || ifaces.is_broadcast_for(id.dst, ingress)
+            || id.dst == self.address;
+
+        // Deduplication, gated on the mode *and* on `for_us`, exactly where
+        // csp_route.c:238 puts it: after the destination is known and before the tap, so a
+        // duplicate never reaches the tap. Checksummed over the framed bytes, because the
+        // C prepends the header first.
+        let packet = if self.dedup_mode.applies(for_us) {
+            let mut framed = packet;
+            if framed.prepend_header(self.version).is_err() {
+                self.counters.malformed += 1;
+                return Routed::Dropped(DropReason::Malformed);
+            }
+            if framed.with_frame(|f| self.dedup.is_duplicate(f, now_ms)) {
+                self.counters.duplicates += 1;
+                return Routed::Dropped(DropReason::Duplicate);
+            }
+            framed
+        } else {
+            packet
+        };
 
         // The promiscuous tap sees a *copy*, so it can never affect delivery. The C's tap
         // clones too, but drops silently when its queue is full.
@@ -412,24 +436,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
 
-        // "Is this for me?" — the C's `is_to_me`, which is three conditions, none of
-        // them a single node address:
-        //
-        //   * **any** interface's address matches (`csp_iflist_get_by_addr`), so a node
-        //     with a CAN interface and a KISS interface answers to both;
-        //   * the destination is the broadcast address **of the interface it arrived on**
-        //     (`csp_id_is_broadcast(dst, input.iface)`) — the ingress interface's subnet,
-        //     not the node's;
-        //   * or it is a bound alias (`csp_addr_is_alias`).
-        //
-        // This compared `id.dst` against one `self.address` and called `is_broadcast` with
-        // a hardcoded netmask of `0`. A packet for the node's *other* interface therefore
-        // failed the check, fell through to forwarding, and went back out on the wire —
-        // measured against the C, which delivers it. `IfList::find_by_addr` covers the
-        // interface addresses and the aliases together.
-        let for_us = ifaces.find_by_addr(id.dst).is_some()
-            || ifaces.is_broadcast_for(id.dst, ingress)
-            || id.dst == self.address;
         if for_us {
             return self.deliver_local(packet, id, now_ms);
         }
@@ -694,16 +700,18 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             return Bridged::Idle;
         };
 
-        if self.dedup_enabled {
-            if packet.prepend_header(self.version).is_err() {
-                self.counters.malformed += 1;
-                return Bridged::Dropped(DropReason::Malformed);
-            }
-            let dup = packet.with_frame(|f| self.dedup.is_duplicate(f, now_ms));
-            if dup {
-                self.counters.duplicates += 1;
-                return Bridged::Dropped(DropReason::Duplicate);
-            }
+        // Unconditional, and deliberately not gated on `dedup_mode`: `csp_bridge.c:45`
+        // deduplicates every frame without consulting `csp_conf.dedup`. A bridge is
+        // forwarding by definition, and one that does not deduplicate loops a frame
+        // between its two interfaces forever. This was gated on the flag, so a bridge with
+        // deduplication off — the default — looped where the C does not.
+        if packet.prepend_header(self.version).is_err() {
+            self.counters.malformed += 1;
+            return Bridged::Dropped(DropReason::Malformed);
+        }
+        if packet.with_frame(|f| self.dedup.is_duplicate(f, now_ms)) {
+            self.counters.duplicates += 1;
+            return Bridged::Dropped(DropReason::Duplicate);
         }
 
         if self.promisc_enabled && self.promisc_len < self.promisc.len() {
@@ -847,12 +855,68 @@ mod tests {
         assert_eq!(r.counters.forwarded, 1);
     }
 
+    /// The four modes, against the C.
+    ///
+    /// The numbers are what `ctest/suite_dedup.c` measured on the real libcsp, not what
+    /// this implementation happens to do: two identical packets addressed to the node and
+    /// two identical packets through it, per mode.
+    ///
+    /// | mode | delivered of 2 | forwarded of 2 |
+    /// |---|---|---|
+    /// | `Off` | 2 | 2 |
+    /// | `Forwarded` | 2 | 1 |
+    /// | `Incoming` | 1 | 2 |
+    /// | `All` | 1 | 1 |
+    ///
+    /// This was a `bool`, which can express only the first and last rows. The two middle
+    /// modes point in opposite directions and `Forwarded` — suppress loops, leave commands
+    /// alone — is the one a mesh actually wants, so collapsing them was not a simplification.
+    #[cfg(feature = "rtable")]
+    #[test]
+    fn every_dedup_mode_matches_the_c() {
+        use crate::dedup::DedupMode;
+
+        // Two of each, byte-identical within a pair, all inside the 100 ms window.
+        fn measure(mode: DedupMode) -> (u32, u32) {
+            let pool = P::new();
+            let mut r = R::new(ME, Version::V1);
+            r.bind(20).unwrap();
+            r.routes.set(0, 0, 3, rtable::NO_VIA).unwrap();
+            r.dedup_mode = mode;
+
+            let mut delivered = 0;
+            for _ in 0..2 {
+                r.receive(pkt(&pool, ME, 20, b"identical"), 0);
+                if let Routed::Delivered { .. } = r.work(&pool, &test_ifaces(), 10) {
+                    delivered += 1;
+                }
+            }
+
+            let mut forwarded = 0;
+            for _ in 0..2 {
+                r.receive(pkt(&pool, 25, 20, b"identical"), 0);
+                if let Routed::Forwarded { packet, .. } = r.work(&pool, &test_ifaces(), 10) {
+                    forwarded += 1;
+                    // Claim the slot the router handed over, or the pool drains and the
+                    // second pair fails for a reason that has nothing to do with dedup.
+                    drop(pool.from_index(packet));
+                }
+            }
+            (delivered, forwarded)
+        }
+
+        assert_eq!(measure(DedupMode::Off), (2, 2), "CSP_DEDUP_OFF");
+        assert_eq!(measure(DedupMode::Forwarded), (2, 1), "CSP_DEDUP_FWD");
+        assert_eq!(measure(DedupMode::Incoming), (1, 2), "CSP_DEDUP_INCOMING");
+        assert_eq!(measure(DedupMode::All), (1, 1), "CSP_DEDUP_ALL");
+    }
+
     #[test]
     fn duplicates_are_suppressed_when_enabled() {
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
         r.bind(20).unwrap();
-        r.dedup_enabled = true;
+        r.dedup_mode = crate::dedup::DedupMode::All;
 
         r.receive(pkt(&pool, ME, 20, b"same"), 0);
         assert!(matches!(
@@ -1082,7 +1146,6 @@ mod tests {
         // A bridge is exactly where a packet loops back on itself.
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
-        r.dedup_enabled = true;
         r.receive(pkt(&pool, 25, 20, b"looping"), 1);
         assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
         r.receive(pkt(&pool, 25, 20, b"looping"), 1);
