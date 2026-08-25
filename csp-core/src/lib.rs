@@ -47,6 +47,9 @@ pub mod rtable;
 #[cfg(feature = "cmp")]
 pub mod cmp;
 
+#[cfg(feature = "rdp")]
+pub mod rdp;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.

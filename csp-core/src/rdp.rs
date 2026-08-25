@@ -1,0 +1,782 @@
+//! RDP — the Reliable Datagram Protocol, as a sans-io state machine.
+//!
+//! The C is 1 022 lines with 30 `goto`s, including a backward `goto front` that re-enters
+//! a loop, and it reads the wall clock and the buffer pool from inside the protocol logic.
+//! Here the protocol is a pure function of `(state, event, now)` returning [`Action`]s the
+//! caller performs. That is what makes it testable without a scheduler — the C's own RDP
+//! tests have to build a fake interface and drive the router to get at it.
+//!
+//! ## Wire format
+//!
+//! Every RDP packet carries a 5-byte trailer *after* the payload:
+//!
+//! ```text
+//! [ payload ][ flags:u8 ][ seq_nr:u16 ][ ack_nr:u16 ]    big-endian
+//! ```
+//!
+//! A `SYN` additionally carries a 24-byte option block *before* the trailer: six
+//! big-endian `u32`s — window size, connection timeout, packet timeout, delayed-ack flag,
+//! ack timeout, ack delay count.
+//!
+//! ## Option clamping is a security control, not tidiness
+//!
+//! A `SYN` arrives from an unauthenticated peer and dictates this node's timers and window
+//! for the life of the connection. Unclamped, a hostile or corrupted `SYN` sets a 0-length
+//! window (deadlock) or a multi-hour connection timeout (a connection slot never released
+//! — and there are only `CSP_CONN_MAX`, typically 8 or 16, on the whole spacecraft).
+//! [`SynOptions::decode_clamped`] bounds every field, and the tests pin each bound.
+
+use crate::{Error, Result};
+
+/// Size of the RDP trailer.
+pub const HEADER_LEN: usize = 5;
+/// Size of the option block a `SYN` carries.
+pub const SYN_OPTIONS_LEN: usize = 24;
+
+/// Synchronise: open a connection.
+pub const SYN: u8 = 0x08;
+/// Acknowledge.
+pub const ACK: u8 = 0x04;
+/// Extended acknowledge (selective). Parsed but not generated, as in the C.
+pub const EAK: u8 = 0x02;
+/// Reset: tear the connection down.
+pub const RST: u8 = 0x01;
+
+// Bounds from csp_rdp.h. Applied to option values from an unauthenticated peer.
+/// Smallest accepted connection timeout, ms.
+pub const MIN_CONN_TIMEOUT: u32 = 1_000;
+/// Largest accepted connection timeout, ms.
+pub const MAX_CONN_TIMEOUT: u32 = 60_000;
+/// Smallest accepted packet timeout, ms.
+pub const MIN_PACKET_TIMEOUT: u32 = 100;
+/// Largest accepted packet timeout, ms.
+pub const MAX_PACKET_TIMEOUT: u32 = 60_000;
+/// Smallest accepted delayed-ack timeout, ms.
+pub const MIN_ACK_TIMEOUT: u32 = 10;
+
+/// The RDP trailer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Header {
+    /// Any of [`SYN`], [`ACK`], [`EAK`], [`RST`].
+    pub flags: u8,
+    /// Sequence number of this packet.
+    pub seq_nr: u16,
+    /// Highest sequence number received in order.
+    pub ack_nr: u16,
+}
+
+impl Header {
+    /// Parse the trailer from the end of a packet payload.
+    pub fn decode(data: &[u8]) -> Result<Header> {
+        if data.len() < HEADER_LEN {
+            return Err(Error::Truncated);
+        }
+        let t = &data[data.len() - HEADER_LEN..];
+        Ok(Header {
+            flags: t[0],
+            seq_nr: u16::from_be_bytes([t[1], t[2]]),
+            ack_nr: u16::from_be_bytes([t[3], t[4]]),
+        })
+    }
+
+    /// Append the trailer to `payload`, writing into `out`.
+    pub fn encode(&self, payload: &[u8], out: &mut [u8]) -> Result<usize> {
+        let needed = payload.len() + HEADER_LEN;
+        if out.len() < needed {
+            return Err(Error::BufferTooSmall { needed });
+        }
+        out[..payload.len()].copy_from_slice(payload);
+        let t = &mut out[payload.len()..needed];
+        t[0] = self.flags;
+        t[1..3].copy_from_slice(&self.seq_nr.to_be_bytes());
+        t[3..5].copy_from_slice(&self.ack_nr.to_be_bytes());
+        Ok(needed)
+    }
+
+    /// The payload with the trailer removed.
+    pub fn strip(data: &[u8]) -> Result<&[u8]> {
+        if data.len() < HEADER_LEN {
+            return Err(Error::Truncated);
+        }
+        Ok(&data[..data.len() - HEADER_LEN])
+    }
+
+    /// True if any of `f` is set.
+    pub const fn has(&self, f: u8) -> bool {
+        (self.flags & f) != 0
+    }
+}
+
+/// Connection parameters negotiated by a `SYN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SynOptions {
+    /// Packets in flight.
+    pub window_size: u32,
+    /// Idle time before the connection is torn down, ms.
+    pub conn_timeout: u32,
+    /// Time before an unacknowledged packet is retransmitted, ms.
+    pub packet_timeout: u32,
+    /// Whether acknowledgements may be delayed.
+    pub delayed_acks: bool,
+    /// How long an acknowledgement may be delayed, ms.
+    pub ack_timeout: u32,
+    /// How many packets may go unacknowledged before an ack is forced.
+    pub ack_delay_count: u32,
+}
+
+impl Default for SynOptions {
+    /// The C's compiled-in defaults.
+    fn default() -> Self {
+        SynOptions {
+            window_size: 4,
+            conn_timeout: 10_000,
+            packet_timeout: 1_000,
+            delayed_acks: true,
+            ack_timeout: 250,
+            ack_delay_count: 2,
+        }
+    }
+}
+
+const fn clamp(v: u32, lo: u32, hi: u32) -> u32 {
+    if v < lo {
+        lo
+    } else if v > hi {
+        hi
+    } else {
+        v
+    }
+}
+
+impl SynOptions {
+    /// Decode the option block, clamping every field into a safe range.
+    ///
+    /// `max_window` is this node's compiled-in `CSP_RDP_MAX_WINDOW`; a peer cannot ask for
+    /// more in-flight packets than the local pool can hold.
+    ///
+    /// The order matters: `ack_timeout` is bounded by the *already clamped* `conn_timeout`
+    /// and `ack_delay_count` by the *already clamped* `window_size`, so a peer cannot use
+    /// one field to widen the bound on another.
+    pub fn decode_clamped(data: &[u8], max_window: u32) -> Result<SynOptions> {
+        if data.len() < SYN_OPTIONS_LEN {
+            return Err(Error::Truncated);
+        }
+        let w = |i: usize| {
+            u32::from_be_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]])
+        };
+        let window_size = clamp(w(0), 1, max_window);
+        let conn_timeout = clamp(w(1), MIN_CONN_TIMEOUT, MAX_CONN_TIMEOUT);
+        let packet_timeout = clamp(w(2), MIN_PACKET_TIMEOUT, MAX_PACKET_TIMEOUT);
+        Ok(SynOptions {
+            window_size,
+            conn_timeout,
+            packet_timeout,
+            delayed_acks: w(3) != 0,
+            ack_timeout: clamp(w(4), MIN_ACK_TIMEOUT, conn_timeout),
+            ack_delay_count: clamp(w(5), 1, window_size),
+        })
+    }
+
+    /// Encode the option block.
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize> {
+        if out.len() < SYN_OPTIONS_LEN {
+            return Err(Error::BufferTooSmall {
+                needed: SYN_OPTIONS_LEN,
+            });
+        }
+        for (i, v) in [
+            self.window_size,
+            self.conn_timeout,
+            self.packet_timeout,
+            self.delayed_acks as u32,
+            self.ack_timeout,
+            self.ack_delay_count,
+        ]
+        .iter()
+        .enumerate()
+        {
+            out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
+        }
+        Ok(SYN_OPTIONS_LEN)
+    }
+}
+
+/// Is `seq` within `[start, end]` in wrapping 16-bit sequence space?
+///
+/// Mirrors `csp_rdp_seq_between`. Written as unsigned wrapping subtraction so it stays
+/// correct across the 16-bit wrap, which a naive `start <= seq && seq <= end` does not.
+pub const fn seq_between(seq: u16, start: u16, end: u16) -> bool {
+    end.wrapping_sub(start) >= seq.wrapping_sub(start)
+}
+
+/// Connection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    /// No connection.
+    Closed,
+    /// We sent a `SYN` and are waiting for `SYN|ACK`.
+    SynSent,
+    /// We received a `SYN` and sent `SYN|ACK`.
+    SynRcvd,
+    /// Established.
+    Open,
+    /// Torn down, waiting out the linger period.
+    CloseWait,
+}
+
+/// Why a connection closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosedBy {
+    /// The local application closed it.
+    UserSpace,
+    /// The peer sent `RST`, or the protocol was violated.
+    Protocol,
+    /// Nothing was heard within `conn_timeout`.
+    Timeout,
+}
+
+/// What the caller should do as a result of an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Send a control packet with these header fields and no payload.
+    SendControl(Header),
+    /// Send a `SYN` carrying the option block.
+    SendSyn(Header, SynOptions),
+    /// Deliver the payload to the application.
+    Deliver,
+    /// The connection is now open.
+    Opened,
+    /// The connection has closed.
+    Closed(ClosedBy),
+    /// Nothing to do.
+    Nothing,
+}
+
+/// Events the machine reacts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event<'a> {
+    /// The application asked to connect.
+    Connect,
+    /// A packet arrived: its RDP header, and the payload with the trailer already removed.
+    Packet(Header, &'a [u8]),
+    /// The application asked to close.
+    Close,
+    /// Time passed; check the timers.
+    Tick,
+}
+
+/// One end of an RDP connection.
+///
+/// Holds no buffers and reads no clock: `now_ms` is passed in. Two of these can run in one
+/// process with different options, which the C cannot do — its RDP tunables are six file
+/// statics shared by every connection.
+#[derive(Debug, Clone, Copy)]
+pub struct Connection {
+    /// Current state.
+    pub state: State,
+    /// Negotiated options.
+    pub opts: SynOptions,
+    /// Next sequence number to send.
+    pub snd_nxt: u16,
+    /// Oldest unacknowledged sequence number.
+    pub snd_una: u16,
+    /// Our initial sequence number.
+    pub snd_iss: u16,
+    /// Highest sequence number received in order.
+    pub rcv_cur: u16,
+    /// Peer's initial sequence number.
+    pub rcv_irs: u16,
+    /// Last sequence number we acknowledged.
+    pub rcv_lsa: u16,
+    /// When the connection last saw traffic, ms.
+    pub last_activity: u32,
+    /// Retransmission counter.
+    pub retransmits: u32,
+}
+
+impl Connection {
+    /// A closed connection with the given initial sequence number.
+    ///
+    /// `iss` should be unpredictable in production: a guessable initial sequence number
+    /// lets an off-path attacker inject data into an established connection.
+    pub fn new(iss: u16, opts: SynOptions) -> Self {
+        Connection {
+            state: State::Closed,
+            opts,
+            snd_nxt: iss.wrapping_add(1),
+            snd_una: iss.wrapping_add(1),
+            snd_iss: iss,
+            rcv_cur: 0,
+            rcv_irs: 0,
+            rcv_lsa: 0,
+            last_activity: 0,
+            retransmits: 0,
+        }
+    }
+
+    /// Step the machine. Returns what the caller should do.
+    pub fn step(&mut self, ev: Event<'_>, now_ms: u32, max_window: u32) -> Action {
+        match ev {
+            Event::Connect => {
+                if self.state != State::Closed {
+                    return Action::Nothing;
+                }
+                self.state = State::SynSent;
+                self.last_activity = now_ms;
+                Action::SendSyn(
+                    Header {
+                        flags: SYN,
+                        seq_nr: self.snd_iss,
+                        ack_nr: 0,
+                    },
+                    self.opts,
+                )
+            }
+
+            Event::Close => {
+                if self.state == State::Closed {
+                    return Action::Nothing;
+                }
+                self.state = State::CloseWait;
+                self.last_activity = now_ms;
+                Action::SendControl(Header {
+                    flags: RST,
+                    seq_nr: self.snd_nxt,
+                    ack_nr: self.rcv_cur,
+                })
+            }
+
+            Event::Tick => {
+                if self.state == State::Closed {
+                    return Action::Nothing;
+                }
+                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout {
+                    self.state = State::Closed;
+                    return Action::Closed(ClosedBy::Timeout);
+                }
+                Action::Nothing
+            }
+
+            Event::Packet(h, payload) => self.on_packet(h, payload, now_ms, max_window),
+        }
+    }
+
+    fn on_packet(&mut self, h: Header, payload: &[u8], now_ms: u32, max_window: u32) -> Action {
+        self.last_activity = now_ms;
+
+        // A reset is honoured in every state but Closed.
+        if h.has(RST) && self.state != State::Closed {
+            self.state = State::Closed;
+            return Action::Closed(ClosedBy::Protocol);
+        }
+
+        match self.state {
+            State::Closed => {
+                if h.has(SYN) && !h.has(ACK) {
+                    // Incoming connection. A SYN must carry a complete option block; the
+                    // C sends RST and closes otherwise, rather than using defaults.
+                    let Ok(opts) = SynOptions::decode_clamped(payload, max_window) else {
+                        return Action::SendControl(Header {
+                            flags: RST,
+                            seq_nr: self.snd_nxt,
+                            ack_nr: self.rcv_cur,
+                        });
+                    };
+                    self.opts = opts;
+                    self.rcv_cur = h.seq_nr;
+                    self.rcv_irs = h.seq_nr;
+                    self.rcv_lsa = h.seq_nr.wrapping_sub(1);
+                    self.state = State::SynRcvd;
+                    return Action::SendControl(Header {
+                        flags: SYN | ACK,
+                        seq_nr: self.snd_iss,
+                        ack_nr: self.rcv_irs,
+                    });
+                }
+                Action::Nothing
+            }
+
+            State::SynSent => {
+                if h.has(SYN) && h.has(ACK) {
+                    self.rcv_cur = h.seq_nr;
+                    self.rcv_irs = h.seq_nr;
+                    self.rcv_lsa = h.seq_nr.wrapping_sub(1);
+                    self.snd_una = h.ack_nr.wrapping_add(1);
+                    self.retransmits = 0;
+                    self.state = State::Open;
+                    return Action::Opened;
+                }
+                Action::Nothing
+            }
+
+            State::SynRcvd => {
+                if h.has(ACK) && h.ack_nr == self.snd_iss {
+                    self.snd_una = h.ack_nr.wrapping_add(1);
+                    self.state = State::Open;
+                    return Action::Opened;
+                }
+                Action::Nothing
+            }
+
+            State::Open => {
+                // A duplicate or out-of-window sequence number is re-acknowledged, not
+                // delivered — that is how the peer learns to stop retransmitting.
+                if !payload.is_empty() {
+                    let expected = self.rcv_cur.wrapping_add(1);
+                    if h.seq_nr == expected {
+                        self.rcv_cur = h.seq_nr;
+                        return Action::Deliver;
+                    }
+                    return Action::SendControl(Header {
+                        flags: ACK,
+                        seq_nr: self.snd_nxt,
+                        ack_nr: self.rcv_cur,
+                    });
+                }
+                if h.has(ACK) {
+                    self.snd_una = h.ack_nr.wrapping_add(1);
+                    self.retransmits = 0;
+                }
+                Action::Nothing
+            }
+
+            State::CloseWait => {
+                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout {
+                    self.state = State::Closed;
+                    return Action::Closed(ClosedBy::UserSpace);
+                }
+                Action::Nothing
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAX_WINDOW: u32 = 5;
+
+    #[test]
+    fn header_roundtrip_and_placement() {
+        let h = Header {
+            flags: SYN | ACK,
+            seq_nr: 0x1234,
+            ack_nr: 0xABCD,
+        };
+        let payload = b"data";
+        let mut out = [0u8; 32];
+        let n = h.encode(payload, &mut out).unwrap();
+        assert_eq!(n, payload.len() + HEADER_LEN);
+        // trailer, not header: payload first
+        assert_eq!(&out[..4], b"data");
+        assert_eq!(&out[4..9], &[SYN | ACK, 0x12, 0x34, 0xAB, 0xCD]);
+        assert_eq!(Header::decode(&out[..n]).unwrap(), h);
+        assert_eq!(Header::strip(&out[..n]).unwrap(), payload);
+    }
+
+    #[test]
+    fn truncated_header_is_refused() {
+        assert_eq!(Header::decode(&[0u8; 4]), Err(Error::Truncated));
+        assert_eq!(Header::strip(&[0u8; 4]), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn syn_options_roundtrip_when_already_in_range() {
+        let o = SynOptions {
+            window_size: 3,
+            conn_timeout: 10_000,
+            packet_timeout: 1_000,
+            delayed_acks: true,
+            ack_timeout: 250,
+            ack_delay_count: 2,
+        };
+        let mut buf = [0u8; 32];
+        let n = o.encode(&mut buf).unwrap();
+        assert_eq!(n, SYN_OPTIONS_LEN);
+        assert_eq!(SynOptions::decode_clamped(&buf, MAX_WINDOW).unwrap(), o);
+    }
+
+    #[test]
+    fn a_partial_option_block_is_refused() {
+        // The C sends RST and closes rather than filling in defaults.
+        assert_eq!(
+            SynOptions::decode_clamped(&[0u8; 23], MAX_WINDOW),
+            Err(Error::Truncated)
+        );
+    }
+
+    #[test]
+    fn hostile_options_are_clamped_at_every_bound() {
+        // All-zero: every minimum.
+        let zero = [0u8; SYN_OPTIONS_LEN];
+        let o = SynOptions::decode_clamped(&zero, MAX_WINDOW).unwrap();
+        assert_eq!(o.window_size, 1, "a zero window would deadlock");
+        assert_eq!(o.conn_timeout, MIN_CONN_TIMEOUT);
+        assert_eq!(o.packet_timeout, MIN_PACKET_TIMEOUT);
+        assert!(!o.delayed_acks);
+        assert_eq!(o.ack_timeout, MIN_ACK_TIMEOUT);
+        assert_eq!(o.ack_delay_count, 1);
+
+        // All-ones: every maximum.
+        let ones = [0xFFu8; SYN_OPTIONS_LEN];
+        let o = SynOptions::decode_clamped(&ones, MAX_WINDOW).unwrap();
+        assert_eq!(o.window_size, MAX_WINDOW, "cannot exceed the local pool");
+        assert_eq!(
+            o.conn_timeout, MAX_CONN_TIMEOUT,
+            "an unbounded timeout would hold a connection slot forever"
+        );
+        assert_eq!(o.packet_timeout, MAX_PACKET_TIMEOUT);
+        assert!(o.delayed_acks);
+        assert_eq!(o.ack_timeout, o.conn_timeout, "bounded by the clamped conn_timeout");
+        assert_eq!(o.ack_delay_count, o.window_size, "bounded by the clamped window");
+    }
+
+    #[test]
+    fn one_field_cannot_widen_anothers_bound() {
+        // ack_timeout is clamped against the ALREADY clamped conn_timeout, so asking for
+        // a huge conn_timeout does not buy a huge ack_timeout.
+        let mut buf = [0u8; SYN_OPTIONS_LEN];
+        buf[4..8].copy_from_slice(&u32::MAX.to_be_bytes()); // conn_timeout
+        buf[16..20].copy_from_slice(&u32::MAX.to_be_bytes()); // ack_timeout
+        let o = SynOptions::decode_clamped(&buf, MAX_WINDOW).unwrap();
+        assert_eq!(o.conn_timeout, MAX_CONN_TIMEOUT);
+        assert_eq!(o.ack_timeout, MAX_CONN_TIMEOUT);
+        assert!(o.ack_timeout <= MAX_CONN_TIMEOUT);
+    }
+
+    #[test]
+    fn sequence_comparison_survives_the_wrap() {
+        assert!(seq_between(5, 1, 10));
+        assert!(seq_between(1, 1, 10));
+        assert!(seq_between(10, 1, 10));
+        assert!(!seq_between(11, 1, 10));
+        // across the 16-bit wrap, where a naive comparison fails
+        assert!(seq_between(0, 0xFFFE, 2));
+        assert!(seq_between(0xFFFF, 0xFFFE, 2));
+        assert!(seq_between(2, 0xFFFE, 2));
+        assert!(!seq_between(3, 0xFFFE, 2));
+    }
+
+    fn syn_payload(o: &SynOptions) -> [u8; SYN_OPTIONS_LEN] {
+        let mut b = [0u8; SYN_OPTIONS_LEN];
+        o.encode(&mut b).unwrap();
+        b
+    }
+
+    #[test]
+    fn three_way_handshake_as_the_initiator() {
+        let mut c = Connection::new(100, SynOptions::default());
+        assert_eq!(c.state, State::Closed);
+
+        let a = c.step(Event::Connect, 0, MAX_WINDOW);
+        assert!(matches!(a, Action::SendSyn(h, _) if h.flags == SYN && h.seq_nr == 100));
+        assert_eq!(c.state, State::SynSent);
+
+        // peer replies SYN|ACK
+        let a = c.step(
+            Event::Packet(
+                Header { flags: SYN | ACK, seq_nr: 500, ack_nr: 100 },
+                &[],
+            ),
+            10,
+            MAX_WINDOW,
+        );
+        assert_eq!(a, Action::Opened);
+        assert_eq!(c.state, State::Open);
+        assert_eq!(c.rcv_irs, 500);
+    }
+
+    #[test]
+    fn three_way_handshake_as_the_responder() {
+        let mut c = Connection::new(900, SynOptions::default());
+        let opts = SynOptions::default();
+        let a = c.step(
+            Event::Packet(Header { flags: SYN, seq_nr: 42, ack_nr: 0 }, &syn_payload(&opts)),
+            0,
+            MAX_WINDOW,
+        );
+        assert!(
+            matches!(a, Action::SendControl(h) if h.flags == SYN | ACK && h.ack_nr == 42),
+            "must answer SYN|ACK acknowledging the peer's ISS"
+        );
+        assert_eq!(c.state, State::SynRcvd);
+
+        let a = c.step(
+            Event::Packet(Header { flags: ACK, seq_nr: 43, ack_nr: 900 }, &[]),
+            5,
+            MAX_WINDOW,
+        );
+        assert_eq!(a, Action::Opened);
+        assert_eq!(c.state, State::Open);
+    }
+
+    #[test]
+    fn a_syn_without_options_is_reset_not_defaulted() {
+        // Using defaults here would let a truncated SYN silently pick this node's timers.
+        let mut c = Connection::new(1, SynOptions::default());
+        let a = c.step(
+            Event::Packet(Header { flags: SYN, seq_nr: 7, ack_nr: 0 }, &[0u8; 8]),
+            0,
+            MAX_WINDOW,
+        );
+        assert!(matches!(a, Action::SendControl(h) if h.flags == RST));
+        assert_eq!(c.state, State::Closed, "must not half-open");
+    }
+
+    #[test]
+    fn rst_closes_from_every_live_state() {
+        for setup in [State::SynSent, State::SynRcvd, State::Open] {
+            let mut c = Connection::new(1, SynOptions::default());
+            c.state = setup;
+            let a = c.step(
+                Event::Packet(Header { flags: RST, seq_nr: 0, ack_nr: 0 }, &[]),
+                0,
+                MAX_WINDOW,
+            );
+            assert_eq!(a, Action::Closed(ClosedBy::Protocol), "from {setup:?}");
+            assert_eq!(c.state, State::Closed);
+        }
+    }
+
+    #[test]
+    fn in_order_data_is_delivered_and_advances_the_sequence() {
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        let a = c.step(
+            Event::Packet(Header { flags: ACK, seq_nr: 11, ack_nr: 0 }, b"payload"),
+            0,
+            MAX_WINDOW,
+        );
+        assert_eq!(a, Action::Deliver);
+        assert_eq!(c.rcv_cur, 11);
+    }
+
+    #[test]
+    fn a_duplicate_is_reacknowledged_not_delivered() {
+        // Delivering a duplicate would hand the application the same bytes twice; not
+        // acknowledging it would make the peer retransmit forever.
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        let a = c.step(
+            Event::Packet(Header { flags: ACK, seq_nr: 10, ack_nr: 0 }, b"again"),
+            0,
+            MAX_WINDOW,
+        );
+        assert!(matches!(a, Action::SendControl(h) if h.flags == ACK && h.ack_nr == 10));
+        assert_eq!(c.rcv_cur, 10, "must not advance on a duplicate");
+    }
+
+    #[test]
+    fn an_out_of_window_packet_is_reacknowledged_not_delivered() {
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        let a = c.step(
+            Event::Packet(Header { flags: ACK, seq_nr: 99, ack_nr: 0 }, b"jump"),
+            0,
+            MAX_WINDOW,
+        );
+        assert!(matches!(a, Action::SendControl(h) if h.flags == ACK));
+        assert_eq!(c.rcv_cur, 10);
+    }
+
+    #[test]
+    fn idle_connections_time_out() {
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.last_activity = 0;
+        assert_eq!(c.step(Event::Tick, 5_000, MAX_WINDOW), Action::Nothing);
+        assert_eq!(
+            c.step(Event::Tick, 10_001, MAX_WINDOW),
+            Action::Closed(ClosedBy::Timeout)
+        );
+        assert_eq!(c.state, State::Closed);
+    }
+
+    #[test]
+    fn the_timeout_survives_a_wrapping_clock() {
+        // now_ms is a free-running 32-bit millisecond counter; it wraps every 49 days.
+        // A naive `now - last > timeout` with signed maths closes every connection at
+        // the wrap.
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.last_activity = u32::MAX - 1_000;
+        // 500 ms later, having wrapped through zero
+        assert_eq!(
+            c.step(Event::Tick, 1_000u32.wrapping_sub(1_500), MAX_WINDOW),
+            Action::Nothing,
+            "must not close merely because the clock wrapped"
+        );
+    }
+
+    #[test]
+    fn close_sends_rst_and_enters_close_wait() {
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        let a = c.step(Event::Close, 0, MAX_WINDOW);
+        assert!(matches!(a, Action::SendControl(h) if h.flags == RST));
+        assert_eq!(c.state, State::CloseWait);
+    }
+
+    #[test]
+    fn closing_an_already_closed_connection_does_nothing() {
+        let mut c = Connection::new(1, SynOptions::default());
+        assert_eq!(c.step(Event::Close, 0, MAX_WINDOW), Action::Nothing);
+        assert_eq!(c.step(Event::Tick, 999_999, MAX_WINDOW), Action::Nothing);
+    }
+
+    #[test]
+    fn connecting_twice_does_nothing_the_second_time() {
+        let mut c = Connection::new(1, SynOptions::default());
+        assert!(matches!(c.step(Event::Connect, 0, MAX_WINDOW), Action::SendSyn(..)));
+        assert_eq!(c.step(Event::Connect, 0, MAX_WINDOW), Action::Nothing);
+    }
+
+    #[test]
+    fn two_connections_can_use_different_options() {
+        // The C keeps its six RDP tunables in file statics shared by every connection, so
+        // this is not expressible there at all.
+        let fast = SynOptions { packet_timeout: 100, ..SynOptions::default() };
+        let slow = SynOptions { packet_timeout: 5_000, ..SynOptions::default() };
+        let a = Connection::new(1, fast);
+        let b = Connection::new(2, slow);
+        assert_eq!(a.opts.packet_timeout, 100);
+        assert_eq!(b.opts.packet_timeout, 5_000);
+    }
+
+    #[test]
+    fn arbitrary_packets_never_panic_in_any_state() {
+        let states = [
+            State::Closed,
+            State::SynSent,
+            State::SynRcvd,
+            State::Open,
+            State::CloseWait,
+        ];
+        let mut x: u32 = 0x5EED_1234;
+        let mut payload = [0u8; 40];
+        for _ in 0..20_000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            for st in states {
+                let mut c = Connection::new(x as u16, SynOptions::default());
+                c.state = st;
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = (x >> (i % 24)) as u8;
+                }
+                let h = Header {
+                    flags: x as u8,
+                    seq_nr: (x >> 8) as u16,
+                    ack_nr: (x >> 16) as u16,
+                };
+                let n = (x as usize) % payload.len();
+                let _ = c.step(Event::Packet(h, &payload[..n]), x, MAX_WINDOW);
+                let _ = c.step(Event::Tick, x.wrapping_add(1), MAX_WINDOW);
+            }
+        }
+    }
+}
