@@ -196,6 +196,7 @@ pub struct Reassembler {
     key: Option<u32>,
     total: u16,
     received: u16,
+    min_len: u16,
 }
 
 impl Default for Reassembler {
@@ -205,12 +206,30 @@ impl Default for Reassembler {
 }
 
 impl Reassembler {
-    /// Start idle.
+    /// Start idle, accepting any declared length.
     pub const fn new() -> Self {
         Reassembler {
             key: None,
             total: 0,
             received: 0,
+            min_len: 0,
+        }
+    }
+
+    /// Start idle, refusing packets that declare less than `min_len` bytes.
+    ///
+    /// `csp_eth_rx` refuses a declared length below `csp_id_get_header_size()`, because a
+    /// packet too short to hold a CSP header would be reassembled and then routed on
+    /// whatever the bytes after it happened to be. That size depends on the wire version,
+    /// which this module has no other reason to know — so a caller that knows its version
+    /// supplies it, and [`new`](Self::new) stays available for one that genuinely does not
+    /// care.
+    pub const fn with_min_len(min_len: u16) -> Self {
+        Reassembler {
+            key: None,
+            total: 0,
+            received: 0,
+            min_len,
         }
     }
 
@@ -252,11 +271,31 @@ impl Reassembler {
                 got: payload.len() as u32,
             });
         }
+        // A zero-length segment cannot advance reassembly, so a peer sending nothing but
+        // those holds a transfer open forever without ever failing — a stall rather than an
+        // error, which is the harder kind to diagnose. `csp_eth_rx` refuses it up front;
+        // this accepted it, and the corpus is what noticed.
+        if h.seg_size == 0 {
+            return Err(Error::EmptyFragment);
+        }
         let key = h.reassembly_key();
         match self.key {
             None => {
                 if h.packet_length == 0 {
                     return Err(Error::ZeroTotal);
+                }
+                // Refused on the first segment rather than whenever a segment happens to
+                // reach past the end. `csp_eth_rx` bounds the declared length against
+                // CSP_BUFFER_SIZE up front; here the caller's buffer is that bound, so a
+                // transfer that can never complete is rejected before it occupies the
+                // reassembler.
+                if h.packet_length as usize > out.len() {
+                    return Err(Error::BufferTooSmall {
+                        needed: h.packet_length as usize,
+                    });
+                }
+                if h.packet_length < self.min_len {
+                    return Err(Error::Truncated);
                 }
                 self.key = Some(key);
                 self.total = h.packet_length;
@@ -287,6 +326,17 @@ impl Reassembler {
                 total: self.total as u32,
             });
         }
+        // The *running* total, not just this segment's extent. `csp_eth_rx` bounds
+        // `rx_count + seg_size` against the declared length, which is a different check:
+        // segments that each fit on their own can still add up to more than the packet
+        // claimed. Only the per-segment bound was here, so two overlapping segments were
+        // accepted and the second silently overwrote the first.
+        if self.received as usize + payload.len() > self.total as usize {
+            return Err(Error::OffsetBeyondTotal {
+                offset: self.received as u32,
+                total: self.total as u32,
+            });
+        }
         if end > out.len() {
             return Err(Error::BufferTooSmall { needed: end });
         }
@@ -297,7 +347,7 @@ impl Reassembler {
 
     /// Abandon the packet in progress.
     pub fn reset(&mut self) {
-        *self = Reassembler::new();
+        *self = Reassembler::with_min_len(self.min_len);
     }
 }
 
@@ -652,16 +702,48 @@ mod tests {
         ));
     }
 
+    /// Both guards, in the order `csp_eth_rx` applies them: the segment size first, then
+    /// the packet length. This test used to set both to zero and expect `ZeroTotal`, which
+    /// only passed because the segment-size guard did not exist.
     #[test]
     fn a_zero_length_packet_is_refused() {
-        let mut r = Reassembler::new();
         let mut out = [0u8; 64];
+
+        let mut r = Reassembler::new();
         let h = Header {
             seg_size: 0,
             packet_length: 0,
             ..hdr()
         };
-        assert_eq!(r.push(&h, 0, &[], &mut out), Err(Error::ZeroTotal));
+        assert_eq!(r.push(&h, 0, &[], &mut out), Err(Error::EmptyFragment));
+
+        // A real segment, but a packet that declares no length at all.
+        let mut r = Reassembler::new();
+        let h = Header {
+            seg_size: 4,
+            packet_length: 0,
+            ..hdr()
+        };
+        assert_eq!(r.push(&h, 0, &[0; 4], &mut out), Err(Error::ZeroTotal));
+    }
+
+    /// A packet declaring more than the caller's buffer can ever hold is refused on the
+    /// first segment, not after the caller has held a reassembler open for a transfer that
+    /// cannot complete. `csp_eth_rx` bounds it against `CSP_BUFFER_SIZE`; sans-io, the
+    /// caller's buffer is that bound.
+    #[test]
+    fn a_packet_larger_than_the_buffer_is_refused_on_the_first_segment() {
+        let mut r = Reassembler::new();
+        let mut out = [0u8; 64];
+        let h = Header {
+            seg_size: 4,
+            packet_length: 5000,
+            ..hdr()
+        };
+        assert_eq!(
+            r.push(&h, 0, &[0; 4], &mut out),
+            Err(Error::BufferTooSmall { needed: 5000 })
+        );
     }
 
     #[test]
