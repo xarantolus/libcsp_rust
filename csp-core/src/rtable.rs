@@ -124,6 +124,54 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
+    /// Render a route in the text format [`parse`] accepts.
+    ///
+    /// Round-trips: a table written out and read back is the same table. `csp_rtable_save`
+    /// has no such guarantee — it prints through `snprintf` into a fixed buffer and
+    /// silently truncates, so a large table saves as a *valid but shorter* one.
+    pub fn format_route(route: &Route, iface_name: &str, out: &mut [u8]) -> Result<usize> {
+        let mut n = 0usize;
+        let put = |b: u8, out: &mut [u8], n: &mut usize| -> Result<()> {
+            if *n >= out.len() {
+                return Err(Error::BufferTooSmall { needed: *n + 1 });
+            }
+            out[*n] = b;
+            *n += 1;
+            Ok(())
+        };
+        let put_num = |v: u16, out: &mut [u8], n: &mut usize| -> Result<()> {
+            if v == 0 {
+                return put(b'0', out, n);
+            }
+            let mut digits = [0u8; 5];
+            let mut d = 0;
+            let mut v = v;
+            while v > 0 {
+                digits[d] = b'0' + (v % 10) as u8;
+                v /= 10;
+                d += 1;
+            }
+            while d > 0 {
+                d -= 1;
+                put(digits[d], out, n)?;
+            }
+            Ok(())
+        };
+
+        put_num(route.address, out, &mut n)?;
+        put(b'/', out, &mut n)?;
+        put_num(route.netmask, out, &mut n)?;
+        put(b' ', out, &mut n)?;
+        for &b in iface_name.as_bytes() {
+            put(b, out, &mut n)?;
+        }
+        if route.via != NO_VIA {
+            put(b' ', out, &mut n)?;
+            put_num(route.via, out, &mut n)?;
+        }
+        Ok(n)
+    }
+
     /// Longest-prefix-match lookup.
     ///
     /// On an equal-length tie the later entry wins, matching the C's `>=`.
@@ -402,6 +450,65 @@ mod tests {
         // strlen(str) > 1 in csp_rtable_stdio.c: a lone "8" is not an error, it is ignored.
         assert_eq!(parse("8", |_| Ok(())).unwrap(), 0);
         assert_eq!(parse("0/0 CAN,x", |_| Ok(())).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_route_renders_in_the_format_the_parser_accepts() {
+        let mut out = [0u8; 64];
+        let r = Route { address: 8, netmask: 5, iface: 0, via: NO_VIA };
+        let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "8/5 CAN");
+
+        let r2 = Route { address: 0, netmask: 0, iface: 0, via: 12 };
+        let n = Table::<4>::format_route(&r2, "KISS", &mut out).unwrap();
+        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "0/0 KISS 12");
+    }
+
+    #[test]
+    fn format_and_parse_round_trip() {
+        // csp_rtable_save prints through snprintf into a fixed buffer and silently
+        // truncates, so a large table saves as a valid but SHORTER one.
+        for r in [
+            Route { address: 0, netmask: 0, iface: 0, via: NO_VIA },
+            Route { address: 31, netmask: 5, iface: 0, via: 7 },
+            Route { address: 8, netmask: 3, iface: 0, via: NO_VIA },
+        ] {
+            let mut out = [0u8; 64];
+            let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
+            let text = core::str::from_utf8(&out[..n]).unwrap();
+            let mut seen = None;
+            parse(text, |p| {
+                seen = Some(p);
+                Ok(())
+            })
+            .unwrap();
+            let p = seen.expect("must parse back");
+            assert_eq!(p.address, r.address, "{text}");
+            assert_eq!(p.netmask, Some(r.netmask), "{text}");
+            assert_eq!(p.iface, "CAN");
+            assert_eq!(p.via, if r.via == NO_VIA { None } else { Some(r.via) }, "{text}");
+        }
+    }
+
+    #[test]
+    fn formatting_into_a_short_buffer_reports_rather_than_truncating() {
+        let mut tiny = [0u8; 3];
+        let r = Route { address: 1000, netmask: 14, iface: 0, via: NO_VIA };
+        assert!(matches!(
+            Table::<4>::format_route(&r, "CAN", &mut tiny),
+            Err(Error::BufferTooSmall { .. })
+        ));
+    }
+
+    #[test]
+    fn every_route_in_a_table_can_be_inspected() {
+        let mut tb = t();
+        tb.set(0, 0, 1, NO_VIA).unwrap();
+        tb.set(8, 5, 2, 12).unwrap();
+        let routes = tb.routes();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].address, 0);
+        assert_eq!(routes[1].via, 12);
     }
 
     #[test]
