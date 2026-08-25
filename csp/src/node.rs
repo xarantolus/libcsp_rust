@@ -47,6 +47,39 @@ pub enum Unroutable {
     },
 }
 
+/// Every interface a packet should go out on.
+///
+/// `csp_send_direct` does **not** pick one destination. It collects every routing-table
+/// entry tied for the longest prefix, or — if none matched — every interface marked as a
+/// default, and sends a **clone to each**, the last receiving the original. That is how
+/// both redundant links and broadcast-to-all-interfaces are configured, and a port that
+/// returns a single destination silently makes both single-path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Destinations {
+    entries: [(u8, u16); 4],
+    n: usize,
+}
+
+impl Destinations {
+    /// Interface index and next hop for each destination.
+    pub fn as_slice(&self) -> &[(u8, u16)] {
+        &self.entries[..self.n]
+    }
+    /// How many interfaces this packet goes out on.
+    pub const fn len(&self) -> usize {
+        self.n
+    }
+    /// True if the packet has nowhere to go.
+    pub const fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+    /// How many clones the caller must make: one fewer than the destination count, since
+    /// the last destination receives the original.
+    pub const fn clones_needed(&self) -> usize {
+        self.n.saturating_sub(1)
+    }
+}
+
 /// Where a packet should go next.
 ///
 /// Always carries the packet, so nothing is dropped behind the caller's back.
@@ -98,6 +131,9 @@ pub struct Node<
     /// The router. Exposed so a driver can inject received packets and the caller can
     /// drive `work`/`tick` on its own thread.
     pub router: Router<CONNS, RXQ, PORTS, QF>,
+    /// Registered interfaces. Needed for the default-route fallback and for resolving an
+    /// interface name in CMP `IF_STATS`.
+    pub ifaces: crate::iflist::IfList<8, 8>,
     version: Version,
     address: u16,
     /// Next ephemeral source port. Wraps within the dynamic range.
@@ -118,15 +154,13 @@ impl<
     > Node<'a, CONNS, BUFS, BUFSZ, PORTS, QF, RXQ>
 {
     /// Build a node over caller-supplied storage.
-    pub fn new(
-        storage: &'a CspStorage<CONNS, BUFS, BUFSZ, PORTS, QF>,
-        config: Config<'a>,
-    ) -> Self {
+    pub fn new(storage: &'a CspStorage<CONNS, BUFS, BUFSZ, PORTS, QF>, config: Config<'a>) -> Self {
         let version = config.version();
         let address = config.addr();
         Node {
             storage,
             router: Router::new(address, version),
+            ifaces: crate::iflist::IfList::new(version),
             version,
             address,
             sport_next: EPHEMERAL_FIRST,
@@ -430,18 +464,102 @@ impl<
     }
 
     /// Resolve where a packet goes, ignoring where it came from.
-    fn route(
-        &mut self,
-        packet: Packet<'a, BUFS, BUFSZ>,
-        id: Id,
-    ) -> Outbound<'a, BUFS, BUFSZ> {
+    fn route(&mut self, packet: Packet<'a, BUFS, BUFSZ>, id: Id) -> Outbound<'a, BUFS, BUFSZ> {
         self.route_from(packet, id, None)
+    }
+
+    /// Every interface a packet for `dst` should go out on.
+    ///
+    /// Mirrors `csp_send_direct`'s full policy: all routes tied for the longest prefix
+    /// first, and only if none matched, every interface marked as a default. Split horizon
+    /// is applied to both — a destination on the interface the packet arrived on is
+    /// skipped, or a forwarded packet goes straight back where it came from and loops.
+    pub fn resolve(
+        &self,
+        #[cfg_attr(not(feature = "rtable"), allow(unused_variables))] dst: u16,
+        routed_from: Option<u8>,
+    ) -> core::result::Result<Destinations, Unroutable> {
+        let mut out = Destinations {
+            entries: [(0, 0); 4],
+            n: 0,
+        };
+        let mut skipped_self = false;
+
+        #[cfg(feature = "rtable")]
+        {
+            let placeholder = rtable::Route {
+                address: 0,
+                netmask: 0,
+                iface: 0,
+                via: rtable::NO_VIA,
+            };
+            let mut found = [&placeholder; 4];
+            let n = self.router.routes.find_all(dst, &mut found);
+            for r in found.iter().take(n) {
+                if routed_from == Some(r.iface) {
+                    skipped_self = true;
+                    continue;
+                }
+                if out.n < out.entries.len() {
+                    out.entries[out.n] = (r.iface, r.via);
+                    out.n += 1;
+                }
+            }
+            if n > 0 {
+                // A routing-table match suppresses the default fallback entirely, even if
+                // split horizon left nothing usable. The C returns as soon as
+                // route_found is set.
+                return if out.n > 0 {
+                    Ok(out)
+                } else {
+                    Err(Unroutable::SplitHorizon {
+                        iface: routed_from.unwrap_or(0),
+                    })
+                };
+            }
+        }
+
+        // No route matched: fall back to every default-marked interface.
+        for idx in self.ifaces.indices() {
+            let Some(e) = self.ifaces.get(idx) else {
+                continue;
+            };
+            if !e.is_default {
+                continue;
+            }
+            if routed_from == Some(idx) {
+                skipped_self = true;
+                continue;
+            }
+            if out.n < out.entries.len() {
+                #[cfg(feature = "rtable")]
+                let via = rtable::NO_VIA;
+                #[cfg(not(feature = "rtable"))]
+                let via = 0xFFFFu16;
+                out.entries[out.n] = (idx, via);
+                out.n += 1;
+            }
+        }
+
+        if out.n > 0 {
+            Ok(out)
+        } else if skipped_self {
+            Err(Unroutable::SplitHorizon {
+                iface: routed_from.unwrap_or(0),
+            })
+        } else {
+            Err(Unroutable::NoRoute)
+        }
     }
 
     /// Resolve where a packet goes, given the interface it arrived on.
     ///
     /// Pass `routed_from` when **forwarding**: a route pointing back at that interface is
     /// skipped, which is split horizon. Pass `None` for locally originated traffic.
+    ///
+    /// Returns the **first** destination. When a packet has several — redundant routes, or
+    /// several default interfaces — use [`Node::resolve`] and clone the packet for all but
+    /// the last, which is what `csp_send_direct` does.
     pub fn route_from(
         &mut self,
         packet: Packet<'a, BUFS, BUFSZ>,
@@ -451,17 +569,13 @@ impl<
         if id.dst == self.address {
             return Outbound::Loopback(packet);
         }
-        #[cfg(feature = "rtable")]
-        {
-            if let Some(r) = self.router.routes.find(id.dst) {
-                let (iface, via) = (r.iface, r.via);
-                if routed_from == Some(iface) {
-                    return Outbound::NoRoute(packet, Unroutable::SplitHorizon { iface });
-                }
-                return Outbound::Transmit { iface, via, packet };
+        match self.resolve(id.dst, routed_from) {
+            Ok(d) => {
+                let (iface, via) = d.as_slice()[0];
+                Outbound::Transmit { iface, via, packet }
             }
+            Err(why) => Outbound::NoRoute(packet, why),
         }
-        Outbound::NoRoute(packet, Unroutable::NoRoute)
     }
 
     /// Install a route.
@@ -560,7 +674,10 @@ mod tests {
         let mut p = n.packet().unwrap();
         p.set_payload(b"self").unwrap();
         let out = n.sendto(2, ME, 20, 10, 0, p).unwrap();
-        assert!(matches!(out, Outbound::Loopback(_)), "must not go out a wire");
+        assert!(
+            matches!(out, Outbound::Loopback(_)),
+            "must not go out a wire"
+        );
     }
 
     #[test]
@@ -611,7 +728,14 @@ mod tests {
 
         // a driver injects a received packet
         let mut p = n.packet().unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"request").unwrap();
         n.router.receive(p, 0);
 
@@ -651,7 +775,14 @@ mod tests {
         let mut n = node(&s);
         n.bind(20).unwrap();
         let mut p = n.packet().unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"x").unwrap();
         n.router.receive(p, 0);
         n.work(0);
@@ -659,7 +790,11 @@ mod tests {
         let c = n.accept().unwrap();
         let before = n.buffers_free();
         n.close(c).unwrap();
-        assert_eq!(n.buffers_free(), before + 1, "the queued packet must come back");
+        assert_eq!(
+            n.buffers_free(),
+            before + 1,
+            "the queued packet must come back"
+        );
     }
 
     #[test]
@@ -669,7 +804,14 @@ mod tests {
         n.route_default(3).unwrap();
 
         let mut req = n.packet().unwrap();
-        req.set_id(Id { pri: 1, flags: 0, src: 8, dst: ME, dport: 20, sport: 33 });
+        req.set_id(Id {
+            pri: 1,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 33,
+        });
 
         let mut rep = n.packet().unwrap();
         rep.set_payload(b"answer").unwrap();
@@ -689,7 +831,14 @@ mod tests {
         let s = S::new();
         let mut n = node(&s);
         let mut req = n.packet().unwrap();
-        req.set_id(Id { pri: 1, flags: 0, src: 8, dst: ME, dport: 20, sport: 33 });
+        req.set_id(Id {
+            pri: 1,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 33,
+        });
         req.set_payload(b"original request").unwrap();
 
         let rep = n.packet().unwrap();
@@ -726,7 +875,11 @@ mod tests {
         assert_eq!(out.into_packet().id().pri, 0);
 
         let out = n.send(c, n.packet().unwrap(), 0).unwrap();
-        assert_eq!(out.into_packet().id().pri, 2, "the connection keeps its own priority");
+        assert_eq!(
+            out.into_packet().id().pri,
+            2,
+            "the connection keeps its own priority"
+        );
     }
 
     #[test]
@@ -735,14 +888,25 @@ mod tests {
         let mut n = node(&s);
         n.bind(20).unwrap();
         let mut p = n.packet().unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"connectionless").unwrap();
         n.router.receive(p, 0);
         n.work(0);
 
         let got = n.recvfrom().unwrap().expect("a packet should be waiting");
         got.with_payload(|d| assert_eq!(d, b"connectionless"));
-        assert_eq!(n.router.conns.open_count(), 0, "the connection must be released");
+        assert_eq!(
+            n.router.conns.open_count(),
+            0,
+            "the connection must be released"
+        );
     }
 
     #[test]
@@ -764,7 +928,9 @@ mod tests {
         let idin = n.router.conns.id_in(c).unwrap();
         let mut reply = n.packet().unwrap();
         reply.set_id(idin);
-        reply.set_payload(b"a reply of some arbitrary length").unwrap();
+        reply
+            .set_payload(b"a reply of some arbitrary length")
+            .unwrap();
         let idx = reply.into_index();
         n.router.conns.enqueue_rx(c, idx).unwrap();
 
@@ -806,7 +972,10 @@ mod tests {
         frag.set_payload(b"fragment").unwrap();
         let out = n.send(c, frag, 0).unwrap();
         let mut p = out.into_packet();
-        p.set_id(csp_core::Id { flags: csp_core::flags::FRAG, ..p.id() });
+        p.set_id(csp_core::Id {
+            flags: csp_core::flags::FRAG,
+            ..p.id()
+        });
         assert!(p.id().is_fragment());
         drop(p);
 
@@ -828,13 +997,23 @@ mod tests {
         n.route_default(3).unwrap();
 
         let mut p = n.packet().unwrap();
-        let id = Id { pri: 2, flags: 0, src: 8, dst: 25, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: 25,
+            dport: 20,
+            sport: 10,
+        };
         p.set_id(id);
 
         // Arrived on interface 3, and the only route points back at 3.
         let out = n.route_from(p, id, Some(3));
         assert!(
-            matches!(out, Outbound::NoRoute(_, Unroutable::SplitHorizon { iface: 3 })),
+            matches!(
+                out,
+                Outbound::NoRoute(_, Unroutable::SplitHorizon { iface: 3 })
+            ),
             "must refuse, and say why"
         );
 
@@ -851,7 +1030,87 @@ mod tests {
         n.route_default(3).unwrap();
         let c = n.connect(2, 8, 20, 0, 0).unwrap();
         let out = n.send(c, n.packet().unwrap(), 0).unwrap();
-        assert!(out.is_routed(), "a packet we originated has no ingress interface");
+        assert!(
+            out.is_routed(),
+            "a packet we originated has no ingress interface"
+        );
+    }
+
+    #[test]
+    fn a_packet_with_no_route_falls_back_to_the_default_interfaces() {
+        // csp_send_direct falls through to csp_iflist_get_by_isdfl when nothing matched.
+        // Without it, a node with a default interface and an empty routing table can send
+        // nothing at all.
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("CAN", 1, 5, true).unwrap();
+        n.ifaces.add("KISS", 2, 5, false).unwrap();
+
+        let d = n
+            .resolve(25, None)
+            .expect("the default interface must be used");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d.as_slice()[0].0, 0, "only the default-marked one");
+    }
+
+    #[test]
+    fn several_default_interfaces_all_receive_a_copy() {
+        // The C clones to each and gives the last the original -- that is how
+        // broadcast-to-all-interfaces is configured.
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("CAN", 1, 5, true).unwrap();
+        n.ifaces.add("KISS", 2, 5, true).unwrap();
+
+        let d = n.resolve(25, None).unwrap();
+        assert_eq!(d.len(), 2, "both defaults");
+        assert_eq!(d.clones_needed(), 1, "the last gets the original");
+    }
+
+    #[test]
+    fn redundant_routes_all_receive_a_copy() {
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_set(8, 5, 1, csp_core::rtable::NO_VIA).unwrap();
+        n.route_set(8, 5, 2, csp_core::rtable::NO_VIA).unwrap();
+
+        let d = n.resolve(8, None).unwrap();
+        assert_eq!(d.len(), 2, "both redundant paths");
+        assert_eq!(d.clones_needed(), 1);
+    }
+
+    #[test]
+    fn a_routing_table_match_suppresses_the_default_fallback() {
+        // The C returns as soon as route_found is set; the defaults are a fallback, not an
+        // addition. Otherwise every routed packet would also flood every default link.
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("DFL", 1, 5, true).unwrap();
+        n.route_set(8, 5, 3, csp_core::rtable::NO_VIA).unwrap();
+
+        let d = n.resolve(8, None).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d.as_slice()[0].0, 3, "the route, not the default");
+    }
+
+    #[test]
+    fn split_horizon_applies_to_the_default_fallback_too() {
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("CAN", 1, 5, true).unwrap();
+        assert!(matches!(
+            n.resolve(25, Some(0)),
+            Err(Unroutable::SplitHorizon { iface: 0 })
+        ));
+        // and a different ingress interface is fine
+        assert!(n.resolve(25, Some(1)).is_ok());
+    }
+
+    #[test]
+    fn a_node_with_no_routes_and_no_defaults_says_no_route() {
+        let s = S::new();
+        let n = node(&s);
+        assert_eq!(n.resolve(25, None), Err(Unroutable::NoRoute));
     }
 
     #[test]
@@ -879,7 +1138,14 @@ mod tests {
         n.bind(20).unwrap();
         for _ in 0..3 {
             let mut p = n.packet().unwrap();
-            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 10 });
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 20,
+                sport: 10,
+            });
             p.set_payload(b"x").unwrap();
             n.router.receive(p, 0);
         }

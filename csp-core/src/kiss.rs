@@ -275,10 +275,7 @@ mod tests {
     fn delimiters_in_the_body_are_escaped() {
         let mut out = [0u8; 32];
         let n = encode(&[FEND, FESC], &mut out).unwrap();
-        assert_eq!(
-            &out[..n],
-            &[FEND, TNC_DATA, FESC, TFEND, FESC, TFESC, FEND]
-        );
+        assert_eq!(&out[..n], &[FEND, TNC_DATA, FESC, TFEND, FESC, TFESC, FEND]);
         // and no raw FEND appears inside the body
         assert!(!out[2..n - 1].contains(&FEND));
     }

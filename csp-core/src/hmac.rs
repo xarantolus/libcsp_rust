@@ -90,7 +90,12 @@ pub fn derive_key(material: &[u8]) -> [u8; KEY_LEN] {
 /// `csp_hmac_append` and `csp_hmac_verify` take an `include_header` flag, exactly like the
 /// CRC32 pair, so the same [`Coverage`] applies. Getting it wrong on one side means every
 /// packet fails authentication with no indication why.
-pub fn mac_over(key: &[u8], header: &[u8], payload: &[u8], coverage: Coverage) -> Result<[u8; MAC_LEN]> {
+pub fn mac_over(
+    key: &[u8],
+    header: &[u8],
+    payload: &[u8],
+    coverage: Coverage,
+) -> Result<[u8; MAC_LEN]> {
     if key.is_empty() {
         return Err(Error::EmptyKey);
     }
@@ -273,10 +278,28 @@ mod tests {
         let payload = b"data";
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];
-        let na = append(key, &[1, 2, 3, 4], payload, Coverage::HeaderAndPayload, &mut a).unwrap();
-        let nb = append(key, &[1, 2, 3, 5], payload, Coverage::HeaderAndPayload, &mut b).unwrap();
+        let na = append(
+            key,
+            &[1, 2, 3, 4],
+            payload,
+            Coverage::HeaderAndPayload,
+            &mut a,
+        )
+        .unwrap();
+        let nb = append(
+            key,
+            &[1, 2, 3, 5],
+            payload,
+            Coverage::HeaderAndPayload,
+            &mut b,
+        )
+        .unwrap();
         assert_eq!(na, nb);
-        assert_ne!(&a[..na], &b[..nb], "a different header must give a different tag");
+        assert_ne!(
+            &a[..na],
+            &b[..nb],
+            "a different header must give a different tag"
+        );
 
         // and a tampered header is rejected
         assert_eq!(

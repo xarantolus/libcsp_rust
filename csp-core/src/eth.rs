@@ -69,9 +69,7 @@ impl Header {
     /// Encode into `out`, returning the header length.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize> {
         if out.len() < HEADER_LEN {
-            return Err(Error::BufferTooSmall {
-                needed: HEADER_LEN,
-            });
+            return Err(Error::BufferTooSmall { needed: HEADER_LEN });
         }
         out[0..6].copy_from_slice(&self.dst_mac);
         out[6..12].copy_from_slice(&self.src_mac);
@@ -238,7 +236,13 @@ impl Reassembler {
     /// keeps that policy out of here.
     ///
     /// Returns `true` when the packet is complete.
-    pub fn push(&mut self, h: &Header, offset: usize, payload: &[u8], out: &mut [u8]) -> Result<bool> {
+    pub fn push(
+        &mut self,
+        h: &Header,
+        offset: usize,
+        payload: &[u8],
+        out: &mut [u8],
+    ) -> Result<bool> {
         if !h.is_csp() {
             return Err(Error::UnexpectedEtherType { got: h.ethertype });
         }
@@ -510,7 +514,10 @@ mod tests {
         let data = [0u8; 3000];
         let segs = Segmenter::new(&data, 9000, B, A, 11, 1).unwrap();
         for (_, chunk) in segs {
-            assert!(chunk.len() <= FRAME_PAYLOAD_MAX, "must not exceed the Ethernet MTU");
+            assert!(
+                chunk.len() <= FRAME_PAYLOAD_MAX,
+                "must not exceed the Ethernet MTU"
+            );
         }
     }
 

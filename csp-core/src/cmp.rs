@@ -242,7 +242,10 @@ impl<'a> IfStatsMsg<'a> {
         }
         out[0] = h.kind;
         out[1] = h.code;
-        put_str(&mut out[Header::LEN..Header::LEN + len::IFACE], self.interface);
+        put_str(
+            &mut out[Header::LEN..Header::LEN + len::IFACE],
+            self.interface,
+        );
         let o = Header::LEN + len::IFACE;
         for (i, v) in [
             self.stats.tx,
@@ -726,7 +729,15 @@ mod tests {
             time: "t",
         };
         let mut out = [0u8; 128];
-        let n = id.encode(Header { kind: REPLY, code: code::IDENT }, &mut out).unwrap();
+        let n = id
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::IDENT,
+                },
+                &mut out,
+            )
+            .unwrap();
         let got = Ident::decode(&out[..n]).unwrap();
         assert_eq!(got.hostname, "12345678901234567890");
         assert_eq!(got.model, "m");
@@ -742,7 +753,15 @@ mod tests {
             time: "t",
         };
         let mut out = [0u8; 128];
-        let n = id.encode(Header { kind: REPLY, code: code::IDENT }, &mut out).unwrap();
+        let n = id
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::IDENT,
+                },
+                &mut out,
+            )
+            .unwrap();
         assert_eq!(n, Ident::LEN);
         let got = Ident::decode(&out[..n]).unwrap();
         assert_eq!(got.hostname.len(), len::HOSTNAME);
@@ -768,7 +787,13 @@ mod tests {
         };
         let mut out = [0u8; 64];
         let n = msg
-            .encode(Header { kind: REPLY, code: code::IF_STATS }, &mut out)
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::IF_STATS,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, IfStatsMsg::LEN);
         // network byte order, and unaligned: tx starts at offset 13
@@ -795,7 +820,13 @@ mod tests {
         };
         let mut out = [0u8; 16];
         let n = ts
-            .encode(Header { kind: REQUEST, code: code::CLOCK }, &mut out)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::CLOCK,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, Timestamp::LEN);
         assert_eq!(&out[2..6], &1_700_000_000u32.to_be_bytes());
@@ -809,7 +840,11 @@ mod tests {
         // The v1 form uses single-byte addresses, not the u16s of v2, and has its own
         // handler in the C (csp_cmp_route_set_v1_handler).
         assert_eq!(RouteSetV1::LEN, 2 + 2 + 11);
-        assert_eq!(RouteSetV1::LEN, 15, "matches sizeof(csp_cmp_route_set_v1_msg)");
+        assert_eq!(
+            RouteSetV1::LEN,
+            15,
+            "matches sizeof(csp_cmp_route_set_v1_msg)"
+        );
         let r = RouteSetV1 {
             dest_node: 8,
             next_hop_via: 12,
@@ -817,7 +852,13 @@ mod tests {
         };
         let mut out = [0u8; 32];
         let n = r
-            .encode(Header { kind: REQUEST, code: code::ROUTE_SET_V1 }, &mut out)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::ROUTE_SET_V1,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, 15);
         assert_eq!(out[2], 8);
@@ -828,18 +869,42 @@ mod tests {
     #[test]
     fn route_set_v1_and_v2_dispatch_separately() {
         let mut buf = [0u8; 32];
-        let n = RouteSetV1 { dest_node: 8, next_hop_via: 12, interface: "CAN" }
-            .encode(Header { kind: REQUEST, code: code::ROUTE_SET_V1 }, &mut buf)
-            .unwrap();
+        let n = RouteSetV1 {
+            dest_node: 8,
+            next_hop_via: 12,
+            interface: "CAN",
+        }
+        .encode(
+            Header {
+                kind: REQUEST,
+                code: code::ROUTE_SET_V1,
+            },
+            &mut buf,
+        )
+        .unwrap();
         assert!(matches!(
             parse_request(&buf[..n]).unwrap(),
             Query::RouteSetV1(_)
         ));
 
-        let n = RouteSetV2 { dest_node: 1000, next_hop_via: 2000, netmask: 14, interface: "CAN" }
-            .encode(Header { kind: REQUEST, code: code::ROUTE_SET_V2 }, &mut buf)
-            .unwrap();
-        assert!(matches!(parse_request(&buf[..n]).unwrap(), Query::RouteSet(_)));
+        let n = RouteSetV2 {
+            dest_node: 1000,
+            next_hop_via: 2000,
+            netmask: 14,
+            interface: "CAN",
+        }
+        .encode(
+            Header {
+                kind: REQUEST,
+                code: code::ROUTE_SET_V2,
+            },
+            &mut buf,
+        )
+        .unwrap();
+        assert!(matches!(
+            parse_request(&buf[..n]).unwrap(),
+            Query::RouteSet(_)
+        ));
     }
 
     #[test]
@@ -852,7 +917,13 @@ mod tests {
         };
         let mut out = [0u8; 32];
         let n = r
-            .encode(Header { kind: REQUEST, code: code::ROUTE_SET_V2 }, &mut out)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::ROUTE_SET_V2,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(RouteSetV2::decode(&out[..n]).unwrap(), r);
     }
@@ -866,7 +937,13 @@ mod tests {
         };
         let mut out = [0u8; 32];
         let n = p
-            .encode(Header { kind: REQUEST, code: code::PEEK }, &mut out)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::PEEK,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, Peek::HEADER_LEN);
         let got = Peek::decode(&out[..n]).unwrap();
@@ -885,7 +962,13 @@ mod tests {
         };
         let mut out = [0u8; 64];
         let n = p
-            .encode(Header { kind: REPLY, code: code::PEEK }, &mut out)
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::PEEK,
+                },
+                &mut out,
+            )
             .unwrap();
         // CMP_PEEK_SIZE(16) = sizeof(struct) + tail + 16 = 7 + 3 + 16 = 26.
         assert_eq!(n, Peek::HEADER_LEN + 16 + Peek::TAIL_LEN);
@@ -900,10 +983,20 @@ mod tests {
         // whatever was already in the pooled buffer -- so a peek reply, on a service whose
         // entire job is reading memory, pads itself with unrelated memory.
         let payload = [0xAAu8; 4];
-        let p = Peek { addr: 0x2000_0000, len: 4, data: &payload };
+        let p = Peek {
+            addr: 0x2000_0000,
+            len: 4,
+            data: &payload,
+        };
         let mut out = [0xFFu8; 64]; // pre-dirtied, standing in for a reused buffer
         let n = p
-            .encode(Header { kind: REPLY, code: code::PEEK }, &mut out)
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::PEEK,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, 7 + 4 + 3);
         assert_eq!(&out[7..11], &payload, "the data is where the C puts it");
@@ -917,10 +1010,20 @@ mod tests {
     #[test]
     fn a_request_with_no_data_carries_no_tail() {
         // The C's request path sends sizeof(struct), not CMP_PEEK_SIZE.
-        let p = Peek { addr: 0x2000_0000, len: 16, data: &[] };
+        let p = Peek {
+            addr: 0x2000_0000,
+            len: 16,
+            data: &[],
+        };
         let mut out = [0u8; 32];
         let n = p
-            .encode(Header { kind: REQUEST, code: code::PEEK }, &mut out)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::PEEK,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(n, Peek::HEADER_LEN);
     }
@@ -932,8 +1035,11 @@ mod tests {
         buf[0] = REPLY;
         buf[1] = code::PEEK;
         buf[Header::LEN + 4] = 200; // claims 200 bytes
-        // only 9 bytes of body present
-        assert_eq!(Peek::decode(&buf[..Peek::HEADER_LEN + 9]), Err(Error::Truncated));
+                                    // only 9 bytes of body present
+        assert_eq!(
+            Peek::decode(&buf[..Peek::HEADER_LEN + 9]),
+            Err(Error::Truncated)
+        );
     }
 
     #[test]
@@ -963,7 +1069,13 @@ mod tests {
         };
         let mut out = [0u8; 32];
         let n = p
-            .encode(Header { kind: REPLY, code: code::PEEK_V2 }, &mut out)
+            .encode(
+                Header {
+                    kind: REPLY,
+                    code: code::PEEK_V2,
+                },
+                &mut out,
+            )
             .unwrap();
         assert_eq!(&out[2..10], &0x0000_8000_1234_5678u64.to_be_bytes());
         assert_eq!(PeekV2::decode(&out[..n]).unwrap(), p);
@@ -997,19 +1109,40 @@ mod tests {
         assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Ident);
 
         let mut stats = [0u8; 64];
-        let n = IfStatsMsg { interface: "CAN1", stats: IfStats::default() }
-            .encode(Header { kind: REQUEST, code: code::IF_STATS }, &mut stats)
-            .unwrap();
+        let n = IfStatsMsg {
+            interface: "CAN1",
+            stats: IfStats::default(),
+        }
+        .encode(
+            Header {
+                kind: REQUEST,
+                code: code::IF_STATS,
+            },
+            &mut stats,
+        )
+        .unwrap();
         assert_eq!(
             parse_request(&stats[..n]).unwrap(),
             Query::IfStats { interface: "CAN1" }
         );
 
-        let ts = Timestamp { tv_sec: 1_700_000_000, tv_nsec: 5 };
+        let ts = Timestamp {
+            tv_sec: 1_700_000_000,
+            tv_nsec: 5,
+        };
         let n = ts
-            .encode(Header { kind: REQUEST, code: code::CLOCK }, &mut buf)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::CLOCK,
+                },
+                &mut buf,
+            )
             .unwrap();
-        assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Clock { set: Some(ts) });
+        assert_eq!(
+            parse_request(&buf[..n]).unwrap(),
+            Query::Clock { set: Some(ts) }
+        );
     }
 
     #[test]
@@ -1018,28 +1151,65 @@ mod tests {
         // sets a spacecraft's clock to 1970 whenever anyone asks it the time.
         let mut buf = [0u8; 32];
         let n = Timestamp::default()
-            .encode(Header { kind: REQUEST, code: code::CLOCK }, &mut buf)
+            .encode(
+                Header {
+                    kind: REQUEST,
+                    code: code::CLOCK,
+                },
+                &mut buf,
+            )
             .unwrap();
-        assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Clock { set: None });
+        assert_eq!(
+            parse_request(&buf[..n]).unwrap(),
+            Query::Clock { set: None }
+        );
     }
 
     #[test]
     fn peek_and_poke_report_which_address_width_was_used() {
         let mut buf = [0u8; 64];
-        let n = Peek { addr: 0x2000_0000, len: 8, data: &[] }
-            .encode(Header { kind: REQUEST, code: code::PEEK }, &mut buf)
-            .unwrap();
+        let n = Peek {
+            addr: 0x2000_0000,
+            len: 8,
+            data: &[],
+        }
+        .encode(
+            Header {
+                kind: REQUEST,
+                code: code::PEEK,
+            },
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(
             parse_request(&buf[..n]).unwrap(),
-            Query::Peek { addr: 0x2000_0000, len: 8, wide: false }
+            Query::Peek {
+                addr: 0x2000_0000,
+                len: 8,
+                wide: false
+            }
         );
 
-        let n = PeekV2 { vaddr: 0x8000_1234_5678, len: 8, data: &[] }
-            .encode(Header { kind: REQUEST, code: code::PEEK_V2 }, &mut buf)
-            .unwrap();
+        let n = PeekV2 {
+            vaddr: 0x8000_1234_5678,
+            len: 8,
+            data: &[],
+        }
+        .encode(
+            Header {
+                kind: REQUEST,
+                code: code::PEEK_V2,
+            },
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(
             parse_request(&buf[..n]).unwrap(),
-            Query::Peek { addr: 0x8000_1234_5678, len: 8, wide: true }
+            Query::Peek {
+                addr: 0x8000_1234_5678,
+                len: 8,
+                wide: true
+            }
         );
     }
 

@@ -304,9 +304,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// One step of the router.
     ///
     /// Returns [`Routed::Idle`] when there is nothing to do, which is not an error.
-    pub fn work<'p, const B: usize, const SZ: usize>(
+    pub fn work<const B: usize, const SZ: usize>(
         &mut self,
-        pool: &'p Pool<B, SZ>,
+        pool: &Pool<B, SZ>,
         now_ms: u32,
     ) -> Routed {
         let Some((packet, _iface)) = self.qfifo.pop(pool) else {
@@ -491,7 +491,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         conn_timeout_ms: u32,
     ) -> usize {
         let mut drained = [0u16; 32];
-        let (closed, n) = self.conns.expire_idle(now_ms, conn_timeout_ms, &mut drained);
+        let (closed, n) = self
+            .conns
+            .expire_idle(now_ms, conn_timeout_ms, &mut drained);
         for &idx in &drained[..n] {
             drop(pool.from_index(idx));
         }
@@ -510,9 +512,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// Returns [`Bridged::Idle`] on an empty queue. The C prints a message and returns
     /// void when the interfaces are unset, so a caller cannot tell a misconfigured bridge
     /// from an idle one; here the pair is a parameter and cannot be unset.
-    pub fn bridge_work<'p, const B: usize, const SZ: usize>(
+    pub fn bridge_work<const B: usize, const SZ: usize>(
         &mut self,
-        pool: &'p Pool<B, SZ>,
+        pool: &Pool<B, SZ>,
         a: u8,
         b: u8,
         now_ms: u32,
@@ -693,13 +695,27 @@ mod tests {
         // Four distinct peers fill the four connection slots.
         for sport in 0..4u8 {
             let mut p = pool.acquire(0).unwrap();
-            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport });
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 20,
+                sport,
+            });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
             assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
         }
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 9 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 9,
+        });
         p.set_payload(b"x").unwrap();
         r.receive(p, 0);
         assert_eq!(
@@ -720,7 +736,10 @@ mod tests {
             assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
         }
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
-        assert_eq!(r.work(&pool, 0), Routed::Dropped(DropReason::ReceiveQueueFull));
+        assert_eq!(
+            r.work(&pool, 0),
+            Routed::Dropped(DropReason::ReceiveQueueFull)
+        );
         assert_eq!(r.counters.rx_queue_full, 1);
     }
 
@@ -751,7 +770,10 @@ mod tests {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
             let _ = r.work(&pool, 0);
         }
-        assert!(r.promisc_missed() > 0, "overflow must be counted, not silent");
+        assert!(
+            r.promisc_missed() > 0,
+            "overflow must be counted, not silent"
+        );
     }
 
     #[test]
@@ -776,7 +798,11 @@ mod tests {
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
         r.work(&pool, 0);
-        assert_eq!(pool.available(), 15, "the delivered packet is held on the conn");
+        assert_eq!(
+            pool.available(),
+            15,
+            "the delivered packet is held on the conn"
+        );
 
         r.tick(&pool, 30_000, 10_000);
         assert_eq!(pool.available(), 16, "expiry must release it, not leak it");
@@ -896,7 +922,14 @@ mod tests {
         r.bind(20).unwrap();
         for sport in 0..12u8 {
             let mut p = pool.acquire(0).unwrap();
-            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport });
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 20,
+                sport,
+            });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
             r.work(&pool, 0);
@@ -939,7 +972,14 @@ mod tests {
         .unwrap();
 
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: csp_core::flags::CRC32, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(&buf[..n]).unwrap();
         r.receive(p, 0);
 
@@ -950,7 +990,10 @@ mod tests {
         let idx = r.conns.dequeue_rx(conn).unwrap().unwrap();
         let got = pool.from_index(idx).unwrap();
         got.with_payload(|d| {
-            assert_eq!(d, b"protected", "the checksum must be stripped before delivery")
+            assert_eq!(
+                d, b"protected",
+                "the checksum must be stripped before delivery"
+            )
         });
     }
 
@@ -971,7 +1014,14 @@ mod tests {
         buf[0] ^= 0x01;
 
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: csp_core::flags::CRC32, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(&buf[..n]).unwrap();
         r.receive(p, 0);
 
@@ -993,7 +1043,10 @@ mod tests {
             r.work(&pool, 0),
             Routed::Dropped(DropReason::Refused(Refusal::AuthenticationRequired))
         ));
-        assert_eq!(r.counters.auth_error, 1, "a rising autherr is its own signal");
+        assert_eq!(
+            r.counters.auth_error, 1,
+            "a rising autherr is its own signal"
+        );
         assert_eq!(r.counters.rx_error, 0);
     }
 

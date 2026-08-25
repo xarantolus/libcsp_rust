@@ -210,16 +210,7 @@ pub fn c_cfp1_parse(id: u32) -> (u16, u16, u32, u32, u16) {
     let (mut src, mut dst, mut ident) = (0u16, 0u16, 0u16);
     let (mut kind, mut remain) = (0u32, 0u32);
     // SAFETY: all out pointers are to live locals.
-    unsafe {
-        shim_cfp1_parse(
-            id,
-            &mut src,
-            &mut dst,
-            &mut kind,
-            &mut remain,
-            &mut ident,
-        )
-    }
+    unsafe { shim_cfp1_parse(id, &mut src, &mut dst, &mut kind, &mut remain, &mut ident) }
     (src, dst, kind, remain, ident)
 }
 
@@ -228,6 +219,7 @@ pub struct Rng(pub u64);
 
 impl Rng {
     /// Next 64 bits.
+    #[allow(clippy::should_implement_trait)] // `next` is the conventional name for an RNG step
     pub fn next(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;

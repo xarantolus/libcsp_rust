@@ -162,7 +162,12 @@ impl SynOptions {
             return Err(Error::Truncated);
         }
         let w = |i: usize| {
-            u32::from_be_bytes([data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]])
+            u32::from_be_bytes([
+                data[i * 4],
+                data[i * 4 + 1],
+                data[i * 4 + 2],
+                data[i * 4 + 3],
+            ])
         };
         let window_size = clamp(w(0), 1, max_window);
         let conn_timeout = clamp(w(1), MIN_CONN_TIMEOUT, MAX_CONN_TIMEOUT);
@@ -483,9 +488,7 @@ impl<const N: usize> RxQueue<N> {
     /// An empty queue.
     pub const fn new() -> Self {
         let () = Self::SANITY;
-        RxQueue {
-            entries: [None; N],
-        }
+        RxQueue { entries: [None; N] }
     }
 
     /// Packets held.
@@ -873,8 +876,14 @@ mod tests {
         );
         assert_eq!(o.packet_timeout, MAX_PACKET_TIMEOUT);
         assert!(o.delayed_acks);
-        assert_eq!(o.ack_timeout, o.conn_timeout, "bounded by the clamped conn_timeout");
-        assert_eq!(o.ack_delay_count, o.window_size, "bounded by the clamped window");
+        assert_eq!(
+            o.ack_timeout, o.conn_timeout,
+            "bounded by the clamped conn_timeout"
+        );
+        assert_eq!(
+            o.ack_delay_count, o.window_size,
+            "bounded by the clamped window"
+        );
     }
 
     #[test]
@@ -921,7 +930,11 @@ mod tests {
         // peer replies SYN|ACK
         let a = c.step(
             Event::Packet(
-                Header { flags: SYN | ACK, seq_nr: 500, ack_nr: 100 },
+                Header {
+                    flags: SYN | ACK,
+                    seq_nr: 500,
+                    ack_nr: 100,
+                },
                 &[],
             ),
             10,
@@ -937,7 +950,14 @@ mod tests {
         let mut c = Connection::new(900, SynOptions::default());
         let opts = SynOptions::default();
         let a = c.step(
-            Event::Packet(Header { flags: SYN, seq_nr: 42, ack_nr: 0 }, &syn_payload(&opts)),
+            Event::Packet(
+                Header {
+                    flags: SYN,
+                    seq_nr: 42,
+                    ack_nr: 0,
+                },
+                &syn_payload(&opts),
+            ),
             0,
             MAX_WINDOW,
         );
@@ -948,7 +968,14 @@ mod tests {
         assert_eq!(c.state, State::SynRcvd);
 
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 43, ack_nr: 900 }, &[]),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 43,
+                    ack_nr: 900,
+                },
+                &[],
+            ),
             5,
             MAX_WINDOW,
         );
@@ -961,7 +988,14 @@ mod tests {
         // Using defaults here would let a truncated SYN silently pick this node's timers.
         let mut c = Connection::new(1, SynOptions::default());
         let a = c.step(
-            Event::Packet(Header { flags: SYN, seq_nr: 7, ack_nr: 0 }, &[0u8; 8]),
+            Event::Packet(
+                Header {
+                    flags: SYN,
+                    seq_nr: 7,
+                    ack_nr: 0,
+                },
+                &[0u8; 8],
+            ),
             0,
             MAX_WINDOW,
         );
@@ -975,7 +1009,14 @@ mod tests {
             let mut c = Connection::new(1, SynOptions::default());
             c.state = setup;
             let a = c.step(
-                Event::Packet(Header { flags: RST, seq_nr: 0, ack_nr: 0 }, &[]),
+                Event::Packet(
+                    Header {
+                        flags: RST,
+                        seq_nr: 0,
+                        ack_nr: 0,
+                    },
+                    &[],
+                ),
                 0,
                 MAX_WINDOW,
             );
@@ -990,7 +1031,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 11, ack_nr: 0 }, b"payload"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 11,
+                    ack_nr: 0,
+                },
+                b"payload",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -1006,7 +1054,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 10, ack_nr: 0 }, b"again"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 10,
+                    ack_nr: 0,
+                },
+                b"again",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -1020,7 +1075,14 @@ mod tests {
         c.state = State::Open;
         c.rcv_cur = 10;
         let a = c.step(
-            Event::Packet(Header { flags: ACK, seq_nr: 99, ack_nr: 0 }, b"jump"),
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 99,
+                    ack_nr: 0,
+                },
+                b"jump",
+            ),
             0,
             MAX_WINDOW,
         );
@@ -1076,7 +1138,10 @@ mod tests {
     #[test]
     fn connecting_twice_does_nothing_the_second_time() {
         let mut c = Connection::new(1, SynOptions::default());
-        assert!(matches!(c.step(Event::Connect, 0, MAX_WINDOW), Action::SendSyn(..)));
+        assert!(matches!(
+            c.step(Event::Connect, 0, MAX_WINDOW),
+            Action::SendSyn(..)
+        ));
         assert_eq!(c.step(Event::Connect, 0, MAX_WINDOW), Action::Nothing);
     }
 
@@ -1084,8 +1149,14 @@ mod tests {
     fn two_connections_can_use_different_options() {
         // The C keeps its six RDP tunables in file statics shared by every connection, so
         // this is not expressible there at all.
-        let fast = SynOptions { packet_timeout: 100, ..SynOptions::default() };
-        let slow = SynOptions { packet_timeout: 5_000, ..SynOptions::default() };
+        let fast = SynOptions {
+            packet_timeout: 100,
+            ..SynOptions::default()
+        };
+        let slow = SynOptions {
+            packet_timeout: 5_000,
+            ..SynOptions::default()
+        };
         let a = Connection::new(1, fast);
         let b = Connection::new(2, slow);
         assert_eq!(a.opts.packet_timeout, 100);
@@ -1111,14 +1182,23 @@ mod tests {
         let mut c = open_conn();
         assert_eq!(
             c.step(
-                Event::Packet(Header { flags: ACK, seq_nr: 11, ack_nr: 0 }, b"data"),
+                Event::Packet(
+                    Header {
+                        flags: ACK,
+                        seq_nr: 11,
+                        ack_nr: 0
+                    },
+                    b"data"
+                ),
                 10,
                 MAX_WINDOW
             ),
             Action::Deliver
         );
         // Past the ack timeout, an acknowledgement is due.
-        let ack = c.poll_ack(10_000).expect("an ack must eventually be produced");
+        let ack = c
+            .poll_ack(10_000)
+            .expect("an ack must eventually be produced");
         assert_eq!(ack.flags, ACK);
         assert_eq!(ack.ack_nr, 11, "must acknowledge what was received");
     }
@@ -1156,7 +1236,10 @@ mod tests {
         c.opts.ack_timeout = 100_000; // so only the count can trigger it
         c.opts.ack_delay_count = 2;
         c.rcv_cur = 11;
-        assert!(!c.should_ack(0), "one packet outstanding, delay count is two");
+        assert!(
+            !c.should_ack(0),
+            "one packet outstanding, delay count is two"
+        );
         c.rcv_cur = 12;
         assert!(c.should_ack(0), "two outstanding reaches the delay count");
     }
@@ -1184,7 +1267,10 @@ mod tests {
             !c.should_ack(u32::MAX.wrapping_add(50)),
             "50 ms later is still inside the timeout, wrap or not"
         );
-        assert!(c.should_ack(u32::MAX.wrapping_add(500)), "500 ms later is past it");
+        assert!(
+            c.should_ack(u32::MAX.wrapping_add(500)),
+            "500 ms later is past it"
+        );
     }
 
     #[test]
@@ -1249,10 +1335,7 @@ mod tests {
         // and the caller must release its copy rather than leak it.
         let mut q: RxQueue<4> = RxQueue::new();
         q.insert(12, 112).unwrap();
-        assert_eq!(
-            q.insert(12, 999),
-            Err(Error::DuplicateSequence { seq: 12 })
-        );
+        assert_eq!(q.insert(12, 999), Err(Error::DuplicateSequence { seq: 12 }));
         assert_eq!(q.len(), 1, "the original is kept, not replaced");
         assert_eq!(q.take(12), Some(112), "and it is the original token");
     }
@@ -1300,7 +1383,10 @@ mod tests {
         }
         impl Vec8 {
             pub fn new() -> Self {
-                Vec8 { items: [0; 8], len: 0 }
+                Vec8 {
+                    items: [0; 8],
+                    len: 0,
+                }
             }
             pub fn push(&mut self, v: u16) {
                 self.items[self.len] = v;
@@ -1345,7 +1431,13 @@ mod tests {
         q.push(10, 100, 0).unwrap();
         let (out, n) = drain(&mut q, 1_500, 1_000, 10);
         assert_eq!(n, 1);
-        assert_eq!(out[0], TxAction::Retransmit { token: 100, seq_nr: 10 });
+        assert_eq!(
+            out[0],
+            TxAction::Retransmit {
+                token: 100,
+                seq_nr: 10
+            }
+        );
         assert_eq!(q.len(), 1, "still queued until acknowledged");
     }
 

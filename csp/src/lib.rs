@@ -38,12 +38,12 @@
 pub mod client;
 pub mod conn;
 pub mod dedup;
-pub mod node;
 #[cfg(feature = "sfp")]
 pub mod delivery;
 pub mod hooks;
 pub mod iface;
 pub mod iflist;
+pub mod node;
 pub mod pool;
 pub mod qfifo;
 pub mod router;
@@ -51,17 +51,17 @@ pub mod service;
 
 use csp_core::Version;
 
+pub use conn::{Kind as ConnKind, Table as ConnTable};
 #[cfg(feature = "sfp")]
 pub use delivery::{Delivery, Handler, PortTable};
-pub use conn::{Kind as ConnKind, Table as ConnTable};
-pub use node::{Node, Outbound, Unroutable};
 pub use hooks::{Hooks, NoHooks, PowerAction, Timestamp};
 pub use iface::{Interface, Sent, Transmit};
 pub use iflist::IfList;
+pub use node::{Node, Outbound, Unroutable};
+pub use pool::{Packet, Pool};
 pub use qfifo::Qfifo;
 pub use router::{Bridged, DropReason, Routed, Router};
 pub use service::{NodeStatus, Request};
-pub use pool::{Packet, Pool};
 
 /// Node configuration.
 ///

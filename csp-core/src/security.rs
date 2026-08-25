@@ -302,7 +302,16 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = hmac::append(KEY, &[], b"payload", Coverage::PayloadOnly, &mut buf).unwrap();
         assert_eq!(
-            check(0, &id, &[], &buf[..n], Coverage::PayloadOnly, Some(KEY), sup()).unwrap(),
+            check(
+                0,
+                &id,
+                &[],
+                &buf[..n],
+                Coverage::PayloadOnly,
+                Some(KEY),
+                sup()
+            )
+            .unwrap(),
             b"payload"
         );
     }
@@ -312,10 +321,24 @@ mod tests {
     fn a_forged_mac_is_refused() {
         let id = id_with(flags::HMAC);
         let mut buf = [0u8; 32];
-        let n = hmac::append(b"wrong key", &[], b"payload", Coverage::PayloadOnly, &mut buf)
-            .unwrap();
+        let n = hmac::append(
+            b"wrong key",
+            &[],
+            b"payload",
+            Coverage::PayloadOnly,
+            &mut buf,
+        )
+        .unwrap();
         assert_eq!(
-            check(0, &id, &[], &buf[..n], Coverage::PayloadOnly, Some(KEY), sup()),
+            check(
+                0,
+                &id,
+                &[],
+                &buf[..n],
+                Coverage::PayloadOnly,
+                Some(KEY),
+                sup()
+            ),
             Err(Refusal::BadAuthentication)
         );
     }
@@ -327,7 +350,15 @@ mod tests {
         // worse than refusing traffic.
         let id = id_with(flags::HMAC);
         assert_eq!(
-            check(0, &id, &[], b"payloadXXXX", Coverage::PayloadOnly, None, sup()),
+            check(
+                0,
+                &id,
+                &[],
+                b"payloadXXXX",
+                Coverage::PayloadOnly,
+                None,
+                sup()
+            ),
             Err(Refusal::BadAuthentication)
         );
     }
@@ -394,7 +425,10 @@ mod tests {
         // A rising autherr means someone is talking to you who should not be; a rising
         // rx_error usually means a bad link. Conflating them hides both.
         assert_eq!(Refusal::BadAuthentication.counter(), Counter::AuthError);
-        assert_eq!(Refusal::AuthenticationRequired.counter(), Counter::AuthError);
+        assert_eq!(
+            Refusal::AuthenticationRequired.counter(),
+            Counter::AuthError
+        );
         assert_eq!(Refusal::BadChecksum.counter(), Counter::RxError);
         assert_eq!(Refusal::ChecksumRequired.counter(), Counter::RxError);
         assert_eq!(Refusal::ReliabilityRequired.counter(), Counter::RxError);

@@ -159,13 +159,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     }
 
     /// Open a connection, saying which end initiated it.
-    pub fn alloc_kind(
-        &mut self,
-        idout: Id,
-        opts: u32,
-        now_ms: u32,
-        kind: Kind,
-    ) -> Result<Handle> {
+    pub fn alloc_kind(&mut self, idout: Id, opts: u32, now_ms: u32, kind: Kind) -> Result<Handle> {
         for step in 0..N {
             let i = (self.cursor + step + 1) % N;
             if self.conns[i].state == State::Closed {
@@ -305,7 +299,12 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     ///
     /// Connection slots are the scarcest resource on the node; without this a peer that
     /// opens connections and walks away exhausts the table permanently.
-    pub fn expire_idle(&mut self, now_ms: u32, timeout_ms: u32, drained: &mut [u16]) -> (usize, usize) {
+    pub fn expire_idle(
+        &mut self,
+        now_ms: u32,
+        timeout_ms: u32,
+        drained: &mut [u16],
+    ) -> (usize, usize) {
         let mut closed = 0;
         let mut n = 0;
         for c in self.conns.iter_mut() {
@@ -357,9 +356,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
             let matches = match c.kind {
                 Kind::Client => c.idin.dport == id.dport,
                 Kind::Server => {
-                    c.idin.dport == id.dport
-                        && c.idin.sport == id.sport
-                        && c.idin.src == id.src
+                    c.idin.dport == id.dport && c.idin.sport == id.sport && c.idin.src == id.src
                 }
             };
             if matches {
@@ -457,7 +454,10 @@ mod tests {
         // reopen; the new handle works, the old one still does not
         let h2 = t.alloc(id(11), 0, 0).unwrap();
         assert!(t.is_live(h2));
-        assert!(!t.is_live(h), "the recycled slot must not answer the old handle");
+        assert!(
+            !t.is_live(h),
+            "the recycled slot must not answer the old handle"
+        );
     }
 
     #[test]
@@ -545,15 +545,43 @@ mod tests {
         // unique source port of the connection". Matching on source too would hand every
         // broadcast reply to a NEW connection instead of the one waiting for it.
         let mut t = T::new();
-        let out = Id { pri: 2, flags: 0, src: 11, dst: 31, dport: 20, sport: 17 };
+        let out = Id {
+            pri: 2,
+            flags: 0,
+            src: 11,
+            dst: 31,
+            dport: 20,
+            sport: 17,
+        };
         let h = t.alloc_kind(out, 0, 0, Kind::Client).unwrap();
         // We expect replies addressed to our ephemeral source port 17.
-        t.set_id_in(h, Id { pri: 2, flags: 0, src: 31, dst: 11, dport: 17, sport: 20 })
-            .unwrap();
+        t.set_id_in(
+            h,
+            Id {
+                pri: 2,
+                flags: 0,
+                src: 31,
+                dst: 11,
+                dport: 17,
+                sport: 20,
+            },
+        )
+        .unwrap();
 
         // A reply from node 8 rather than the broadcast address still belongs to us.
-        let reply = Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 17, sport: 20 };
-        assert_eq!(t.find(&reply), Some(h), "a broadcast reply must find its connection");
+        let reply = Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: 11,
+            dport: 17,
+            sport: 20,
+        };
+        assert_eq!(
+            t.find(&reply),
+            Some(h),
+            "a broadcast reply must find its connection"
+        );
 
         // But a reply to a different port does not.
         let other = Id { dport: 18, ..reply };
@@ -566,18 +594,42 @@ mod tests {
         // match on source address and source port as well.
         let mut t = T::new();
         let a = t.alloc_kind(id(10), 0, 0, Kind::Server).unwrap();
-        t.set_id_in(a, Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 20, sport: 30 })
-            .unwrap();
+        t.set_id_in(
+            a,
+            Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: 11,
+                dport: 20,
+                sport: 30,
+            },
+        )
+        .unwrap();
 
-        let from_a = Id { pri: 2, flags: 0, src: 8, dst: 11, dport: 20, sport: 30 };
+        let from_a = Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: 11,
+            dport: 20,
+            sport: 30,
+        };
         assert_eq!(t.find(&from_a), Some(a));
 
         // Same port, different peer: not this connection.
         let from_b = Id { src: 9, ..from_a };
-        assert_eq!(t.find(&from_b), None, "a different peer is a different connection");
+        assert_eq!(
+            t.find(&from_b),
+            None,
+            "a different peer is a different connection"
+        );
 
         // Same peer, different source port: also not.
-        let from_a2 = Id { sport: 31, ..from_a };
+        let from_a2 = Id {
+            sport: 31,
+            ..from_a
+        };
         assert_eq!(t.find(&from_a2), None);
     }
 

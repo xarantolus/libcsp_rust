@@ -120,7 +120,12 @@ pub fn verify<'a>(
 }
 
 /// Append a CRC-32C to `payload` in `out`, returning the total length written.
-pub fn append(header: &[u8], payload: &[u8], coverage: Coverage, out: &mut [u8]) -> crate::Result<usize> {
+pub fn append(
+    header: &[u8],
+    payload: &[u8],
+    coverage: Coverage,
+    out: &mut [u8],
+) -> crate::Result<usize> {
     let needed = payload.len() + CRC32_LEN;
     if out.len() < needed {
         return Err(crate::Error::BufferTooSmall { needed });

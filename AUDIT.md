@@ -533,3 +533,92 @@ sent — `csp_cmp` returns whatever came back on the connection, so a reply to a
 request is accepted as the answer to this one and then read as the wrong message type.
 
 **Tests:** 14 in `client`, 12 in `service`.
+
+## `csp::iface` + `csp::iflist` + `csp::hooks` — interfaces, the registry, and callbacks
+
+**Rating: faithful in behaviour, rusty in shape.** 34 tests.
+
+### `iface` — the nexthop contract
+
+The C's contract is conditional ownership: `csp_send_direct_iface` frees the packet
+**only when `nexthop` returns an error** (`csp_io.c:285-295`), so a driver owns the packet
+on success and must not free it on failure. Undocumented and uncheckable; getting it
+backwards double-frees. `Transmit::transmit` borrows, so the caller frees either way and
+the rule cannot be got wrong. Verified by a pool-accounting test across both outcomes.
+
+Header prepending moved from the driver into `Interface::send`. In the C it is each
+driver's job (`csp_id_prepend`) and a driver that forgets transmits a zero-length frame —
+which is exactly what the golden-vector oracle did until it was fixed, producing 92 empty
+SFP vectors.
+
+**Counters — all ten checked against their C increment sites.** Six were already right.
+Four were not:
+
+- `rx_error` and `autherr` had no way to be incremented at all. `security.rs` computed
+  which counter a refusal belonged to and nothing applied it. Now `note_refusal` routes it
+  through `Refusal::counter()`, making one rule of what the C spreads across six call
+  sites in `csp_route.c`.
+- `irq` is never written anywhere in libcsp (deviation 21) yet is telemetered. Kept, with
+  `note_irq` so a driver can mean something by it.
+- `txbytes`/`rxbytes` count the frame here, not the payload (deviation 22), consistently
+  on both sides so they stay comparable.
+
+`csp_if_udp_tx` returning `CSP_ERR_NONE` unconditionally (deviation 23) is the silent-success
+pattern again; `Transmit` returning `Result` is what makes the honest answer expressible.
+
+### `iflist` — the registry
+
+Two errors were wrong before this pass and are now precise: a duplicate name returned
+`TableFull` (it is not a full table — `DuplicateName { name }`), and removing an unknown
+index returned `NoTransferInProgress` (`NoSuchInterface { index }`). Both were the
+"returning weird error codes" the error-enum rework was supposed to eliminate, surviving
+because nothing had tested the failure paths.
+
+Two lookups were missing and are now present:
+
+- `find_by_broadcast` (`csp_iflist_get_by_broadcast`) — decides whether an inbound packet
+  is a subnet broadcast this node should accept though it is not addressed to it.
+- `check_default` (`csp_iflist_check_dfl`) — if nothing is marked default, mark
+  everything except loopback. Worth stating plainly because of how it composes with the
+  routing fix below: **a node with no routes and no configured default floods every
+  packet onto every interface.** That is libcsp's intent for a zero-config node, not a
+  defect, but it is not what the code looks like it does.
+
+`csp_iflist_add`'s list-truncating re-add (deviation 20) is unrepresentable here — the
+list is an array of slots and `add` mutates nothing before it has decided to accept.
+
+### The routing fix this audit turned up
+
+Reading `csp_send_direct` for the nexthop contract exposed something larger, in `node`:
+**the C does not pick one destination.** It collects every routing-table entry tied for
+the longest prefix and sends a **clone to each**, the last getting the original; if no
+route matched at all, it does the same over every default-marked interface
+(`csp_io.c:206-240`). Both redundant links and broadcast-to-all-interfaces are configured
+this way. The port resolved to a single destination, silently making both single-path —
+a node with two routes to the same subnet for redundancy would have been using one of
+them, with nothing to indicate the other was idle.
+
+`Node::resolve` now returns a `Destinations` set with `clones_needed()`, applying split
+horizon to both the table and the default fallback, and preserving the C's ordering rule
+that a table match suppresses the default fallback entirely — even when split horizon
+leaves that match unusable, because the C returns as soon as `route_found` is set. Six
+tests cover the policy. `route_from` keeps the single-destination convenience shape and
+documents when it is not enough.
+
+### `hooks`
+
+Fourteen of libcsp's fifteen hooks now have a counterpart. The four that were missing:
+
+- `csp_cmp_memcpy`, `csp_cmp_memread64`, `csp_cmp_memwrite64` → `Hooks::mem_read` /
+  `mem_write`, **defaulting to refusing**. This is the most security-relevant finding in
+  the whole audit (deviation 19): libcsp's default is an unvalidated `memcpy`, so peek and
+  poke give arbitrary read and write to any peer, and the function provided to fix that has
+  an empty body. A test pins the refusal, and a second shows the shape a node that really
+  wants the service should use — one bounded region, with the offset subtraction checked so
+  an address below the base cannot wrap into a huge one.
+- `csp_panic` → deliberately absent. Rust's `#[panic_handler]` is the application's
+  already; a hook would be a second, weaker way to say the same thing.
+
+The duplicate `__weak csp_input_hook` (`csp_route.c:106` and `csp_bridge.c:19`,
+byte-identical, link-order dependent) remains unrepresentable: a trait method cannot be
+defined twice.

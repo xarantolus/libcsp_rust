@@ -153,7 +153,11 @@ mod tests {
         let mut q: Qfifo<4> = Qfifo::new();
         let before = pool.available();
         q.push(packet(&pool), 0);
-        assert_eq!(pool.available(), before - 1, "a queued packet is still allocated");
+        assert_eq!(
+            pool.available(),
+            before - 1,
+            "a queued packet is still allocated"
+        );
         let (p, _) = q.pop(&pool).unwrap();
         drop(p);
         assert_eq!(pool.available(), before);

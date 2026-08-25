@@ -24,8 +24,8 @@
 #![deny(missing_docs)]
 
 pub mod crc32;
-pub mod security;
 pub mod id;
+pub mod security;
 
 #[cfg(feature = "sha1")]
 pub mod sha1;
@@ -99,6 +99,30 @@ pub enum Error {
     /// The C overwrites its last entry and returns success, so a node that installs one
     /// route too many gets a wrong routing table with nothing reported.
     TableFull,
+    /// An interface with this name is already registered.
+    ///
+    /// `csp_iflist_add` returns `void` and silently keeps the first, so the second
+    /// interface is simply absent. Two interfaces with one name would also make CMP
+    /// `IF_STATS` ambiguous and the route text format unresolvable.
+    DuplicateName {
+        /// The name that was already taken.
+        name: &'static str,
+    },
+    /// No interface is registered at this index.
+    NoSuchInterface {
+        /// The index that was asked for.
+        index: u8,
+    },
+    /// The node refused to read or write this address.
+    ///
+    /// CMP `PEEK`/`POKE` name an address on the wire. libcsp's default
+    /// `csp_cmp_memcpy` is a bare `memcpy` with no validation, so a node built with CMP
+    /// answers a peek from any address and a poke to any address. Refusing is the default
+    /// here, and a node that wants to serve them says which addresses are allowed.
+    AddressRefused {
+        /// The address that was asked for.
+        addr: u64,
+    },
     /// The packet is a plain datagram, not an SFP fragment.
     ///
     /// Not a failure: the caller asked the wrong question. The bytes are untouched and

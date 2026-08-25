@@ -7,7 +7,11 @@
 use csp_core::{Id, Version};
 use difftest::*;
 
-const ITERS: u64 = if cfg!(debug_assertions) { 20_000 } else { 300_000 };
+const ITERS: u64 = if cfg!(debug_assertions) {
+    20_000
+} else {
+    300_000
+};
 
 fn versions() -> [Version; 2] {
     [Version::V1, Version::V2]
@@ -95,9 +99,9 @@ fn decode_encode_is_a_fixed_point_in_both() {
             let id = c_id_decode(&buf[..n]);
 
             let mut ours = [0u8; 8];
-            let m = id.encode(v, &mut ours).unwrap_or_else(|e| {
-                panic!("iter {i}: rust refused a C-decoded id {id:?}: {e:?}")
-            });
+            let m = id
+                .encode(v, &mut ours)
+                .unwrap_or_else(|e| panic!("iter {i}: rust refused a C-decoded id {id:?}: {e:?}"));
             let theirs = c_id_encode(&id);
             assert_eq!(&ours[..m], &theirs[..], "iter {i}, {v:?}, id {id:?}");
         }
@@ -262,7 +266,10 @@ fn cfp1_identifier_packing_agrees() {
             ours, theirs,
             "iter {i}: make({src},{dst},{kind},{remain},{ident}) {ours:#x} != {theirs:#x}"
         );
-        assert!(ours < (1 << 29), "iter {i}: id must fit an extended CAN identifier");
+        assert!(
+            ours < (1 << 29),
+            "iter {i}: id must fit an extended CAN identifier"
+        );
     }
 }
 

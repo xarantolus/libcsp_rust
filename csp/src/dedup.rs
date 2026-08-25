@@ -152,11 +152,17 @@ mod tests {
         for i in 0..DEDUP_COUNT as u8 {
             assert!(!d.is_duplicate(&[i], 0));
         }
-        assert!(d.is_duplicate(&[0u8], 0), "still remembered while the ring is exactly full");
+        assert!(
+            d.is_duplicate(&[0u8], 0),
+            "still remembered while the ring is exactly full"
+        );
 
         // One more distinct frame overwrites the oldest slot.
         assert!(!d.is_duplicate(&[99u8], 0));
-        assert!(!d.is_duplicate(&[0u8], 0), "now evicted, so no longer recognised");
+        assert!(
+            !d.is_duplicate(&[0u8], 0),
+            "now evicted, so no longer recognised"
+        );
         // The newest is still there.
         assert!(d.is_duplicate(&[15u8], 0));
     }

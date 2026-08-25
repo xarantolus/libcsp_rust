@@ -260,3 +260,39 @@ whoever maintains the fork can see what was found and decide for themselves.
    empty and every call returns `CSP_ERR_NOMEM` — with no error reported at the point of
    misuse. Nothing in the API says the field is init-only. In the port the version is an
    immutable field of the `Csp` value, so this is unrepresentable.
+19. **CMP `PEEK`/`POKE` are arbitrary memory read and write, on by default.** The handler
+    checks only `len <= 200`, then calls `csp_cmp_memcpy` with an address taken straight
+    off the wire. The default `csp_cmp_memcpy` (`csp_cmp_mem.c:15`) is a bare `memcpy`
+    with no validation of any kind. So a node built with CMP — the default — will read any
+    32-bit address a peer names and send the contents back, and write to any address a
+    peer names. The 64-bit variants `csp_cmp_memread64`/`csp_cmp_memwrite64` default to
+    `CSP_ERR_DRIVER`, i.e. refusing, which is what makes the 32-bit pair look like an
+    oversight rather than a decision. Compounding it, `csp_cmp_set_memcpy` — the function
+    an integrator would call to install a validating replacement — has an **empty body**:
+    it takes the pointer, discards it, returns. It carries `CSP_DEPRECATED`, so a compiler
+    warning is the only signal, and embedded builds routinely suppress those. In the port
+    the equivalent is `Hooks::mem_read`/`mem_write`, whose **defaults refuse**; a node that
+    wants the service implements them for the one region it is willing to expose.
+20. **Re-registering an interface silently unlinks every interface after it.**
+    `csp_iflist_add` sets `ifc->next = NULL` *before* walking the list to check whether
+    `ifc` is already in it. When it is, the duplicate check returns — but `next` has
+    already been cleared, so every interface registered after this one is now unreachable
+    from the head. The function returns `void`, so nothing is reported. Add LOOP, add CAN,
+    call `csp_iflist_add(&csp_if_lo)` a second time, and CAN has left the node. The port
+    returns `Error::DuplicateName` and touches nothing.
+21. **`iface->irq` is declared, printed and telemetered, and never incremented.** Grep
+    across `src/` and `include/` finds no write to it anywhere in the library. It is
+    printed by `csp_iflist_print` and reported over CMP `IF_STATS`
+    (`csp_cmp_if_stats.c:27`), so ground software receives a field that is structurally
+    always zero. Kept in the port because a driver may legitimately fill it in, with
+    `Interface::note_irq` as the way to do that.
+22. **`txbytes`/`rxbytes` exclude the header they just added.** Both count
+    `packet->length` — the payload — not the framed length (`csp_io.c:282`,
+    `csp_route.c:230`). For the 8-byte telemetry packets this fleet sends, a field
+    documented as "Transmitted bytes" under-reports the link by a third. The port counts
+    the frame, consistently on both sides.
+23. **A UDP interface can never report a transmit error.** `csp_if_udp_tx` ignores
+    `sendto`'s return value entirely, and returns `CSP_ERR_NONE` even when it took the
+    early exit for a missing socket. `csp_send_direct_iface` therefore increments `tx` and
+    `txbytes` for every packet, and `tx_error` on a UDP interface is structurally zero. A
+    node whose UDP peer is unreachable reports a perfectly healthy link.

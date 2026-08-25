@@ -227,7 +227,11 @@ fn sha1_matches_the_c() {
         } else {
             // "x*N" -- N repetitions of 'x', used to straddle the padding boundaries
             let d = v.desc.trim();
-            let n: usize = d.strip_prefix("x*").expect("unknown sha1 input").parse().unwrap();
+            let n: usize = d
+                .strip_prefix("x*")
+                .expect("unknown sha1 input")
+                .parse()
+                .unwrap();
             vec![b'x'; n]
         };
         assert_eq!(
@@ -248,9 +252,15 @@ fn hmac_matches_the_c() {
     let mut full = 0;
     let mut short = 0;
     for v in &vectors {
-        let key = v.get("key").map(|s| s.trim_matches('"').as_bytes().to_vec());
-        let data = v.get("data").map(|s| s.trim_matches('"').as_bytes().to_vec());
-        let (Some(key), Some(data)) = (key, data) else { continue };
+        let key = v
+            .get("key")
+            .map(|s| s.trim_matches('"').as_bytes().to_vec());
+        let data = v
+            .get("data")
+            .map(|s| s.trim_matches('"').as_bytes().to_vec());
+        let (Some(key), Some(data)) = (key, data) else {
+            continue;
+        };
         match v.kind.as_str() {
             "hmac_full" => {
                 assert_eq!(
@@ -282,7 +292,10 @@ fn hmac_matches_the_c() {
             _ => continue,
         }
     }
-    assert!(full >= 4 && short >= 4, "only checked {full}/{short} hmac vectors");
+    assert!(
+        full >= 4 && short >= 4,
+        "only checked {full}/{short} hmac vectors"
+    );
     println!("checked {full} full + {short} truncated hmac vectors");
 }
 
@@ -297,7 +310,14 @@ fn kiss_framing_matches_the_c() {
     for v in vectors.iter().filter(|v| v.kind.starts_with("kiss_v")) {
         let version = version_of(v);
         // gen_vectors.c uses a fixed id for the KISS cases.
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         let payload: Vec<u8> = match v.get("payload").unwrap() {
             "empty" => vec![],
             "abc" => vec![0x41, 0x42, 0x43],
@@ -344,17 +364,24 @@ fn sfp_fragmentation_matches_the_c() {
 
     let vectors = load();
     // The oracle's source data: big[i] = i * 7, truncated to a byte.
-    let big: Vec<u8> = (0..900u32).map(|i| (i.wrapping_mul(7) & 0xff) as u8).collect();
+    let big: Vec<u8> = (0..900u32)
+        .map(|i| (i.wrapping_mul(7) & 0xff) as u8)
+        .collect();
 
     // group by (version, total, mtu) -> fragments in order
     let mut groups: BTreeMap<(u8, u32, u32), Vec<&Vector>> = BTreeMap::new();
     for v in vectors.iter().filter(|v| v.kind.starts_with("sfp_v")) {
-        let (Some(total), Some(mtu)) = (v.num("total"), v.num("mtu")) else { continue };
+        let (Some(total), Some(mtu)) = (v.num("total"), v.num("mtu")) else {
+            continue;
+        };
         if v.get("rc").is_some() {
             continue; // a refusal, not a frame
         }
         let ver = v.num("v").unwrap() as u8;
-        groups.entry((ver, total as u32, mtu as u32)).or_default().push(v);
+        groups
+            .entry((ver, total as u32, mtu as u32))
+            .or_default()
+            .push(v);
     }
     assert!(!groups.is_empty(), "no sfp vectors found");
 
@@ -443,12 +470,22 @@ fn cfp_fragmentation_matches_the_c() {
     let mut groups: BTreeMap<(u8, u64), Vec<&Vector>> = BTreeMap::new();
     for v in vectors.iter().filter(|v| v.kind.starts_with("cfp_v")) {
         let ver = v.num("v").unwrap() as u8;
-        groups.entry((ver, v.num("len").unwrap())).or_default().push(v);
+        groups
+            .entry((ver, v.num("len").unwrap()))
+            .or_default()
+            .push(v);
     }
     assert!(!groups.is_empty(), "no cfp vectors");
 
     // The oracle's fixed packet: id below, payload[i] = i & 0xff, ident counter reset to 0.
-    let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 1,
+        dst: 8,
+        dport: 20,
+        sport: 10,
+    };
 
     let mut transfers = 0;
     let mut frames = 0;

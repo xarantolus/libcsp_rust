@@ -107,9 +107,8 @@ where
     fn new(first: Packet<'p, N, SZ>, source: &'s mut S) -> Self {
         // The first fragment carries the total, so a caller can size its buffer before
         // reading a single byte.
-        let total = first.with_payload(|d| {
-            sfp::Fragment::parse(true, d).map(|f| f.total).unwrap_or(0)
-        });
+        let total =
+            first.with_payload(|d| sfp::Fragment::parse(true, d).map(|f| f.total).unwrap_or(0));
         Stream {
             source,
             pending: Some(first),
@@ -345,7 +344,14 @@ mod tests {
 
     fn datagram<'p>(pool: &'p P, payload: &[u8]) -> Packet<'p, 8, 264> {
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(payload).unwrap();
         p
     }
@@ -447,7 +453,10 @@ mod tests {
         };
 
         let mut seen = 0usize;
-        while let Some(n) = s.read_chunk(100, |chunk, _off, _total| chunk.len()).unwrap() {
+        while let Some(n) = s
+            .read_chunk(100, |chunk, _off, _total| chunk.len())
+            .unwrap()
+        {
             seen += n;
         }
         assert_eq!(seen, 10);
@@ -499,7 +508,11 @@ mod tests {
             let mut out = [0u8; 16];
             s.read_to_slice(100, &mut out).unwrap();
         }
-        assert_eq!(pool.available(), start, "a stream must not leak its fragments");
+        assert_eq!(
+            pool.available(),
+            start,
+            "a stream must not leak its fragments"
+        );
     }
 
     #[test]
@@ -508,10 +521,7 @@ mod tests {
         assert!(t.bind(20).is_ok());
         assert!(t.is_bound(20));
         assert_eq!(t.bind(20), Err(Error::TableFull), "double bind");
-        assert!(matches!(
-            t.bind(200),
-            Err(Error::FieldOutOfRange { .. })
-        ));
+        assert!(matches!(t.bind(200), Err(Error::FieldOutOfRange { .. })));
         t.unbind(20);
         assert!(!t.is_bound(20));
         assert!(t.bind(20).is_ok());

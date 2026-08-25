@@ -153,7 +153,13 @@ pub struct V1Fragmenter<'a> {
 impl<'a> V1Fragmenter<'a> {
     /// `header` is the 4-byte encoded CSP v1 header; `dest` is the next hop, which is the
     /// route's via address when there is one, **not** necessarily `id.dst`.
-    pub fn new(header: [u8; V1_HEADER_SIZE], src: u16, dest: u16, ident: u16, payload: &'a [u8]) -> Self {
+    pub fn new(
+        header: [u8; V1_HEADER_SIZE],
+        src: u16,
+        dest: u16,
+        ident: u16,
+        payload: &'a [u8],
+    ) -> Self {
         V1Fragmenter {
             header,
             payload,
@@ -191,7 +197,7 @@ impl Iterator for V1Fragmenter<'_> {
             return None;
         }
         let n = core::cmp::min(CAN_FRAME_SIZE, total - self.sent);
-        let remain = (total - self.sent - n + CAN_FRAME_SIZE - 1) / CAN_FRAME_SIZE;
+        let remain = (total - self.sent - n).div_ceil(CAN_FRAME_SIZE);
         let mut data = [0u8; CAN_FRAME_SIZE];
         data[..n].copy_from_slice(&self.payload[self.sent..self.sent + n]);
         self.sent += n;
@@ -428,9 +434,7 @@ impl<R: Default + Copy, const N: usize> Pbufs<R, N> {
     /// An empty pool.
     pub fn new() -> Self {
         let () = Self::SANITY;
-        Pbufs {
-            slots: [None; N],
-        }
+        Pbufs { slots: [None; N] }
     }
 
     /// Reassemblies in flight.
@@ -594,16 +598,28 @@ mod tests {
         ] {
             let id = v1_id(src, dst, kind, remain, ident);
             let p = v1_parse(id);
-            assert_eq!((p.src, p.dst, p.kind, p.remain, p.ident), (src, dst, kind, remain, ident));
+            assert_eq!(
+                (p.src, p.dst, p.kind, p.remain, p.ident),
+                (src, dst, kind, remain, ident)
+            );
             assert!(id < (1 << 29), "must fit a 29-bit extended identifier");
         }
     }
 
     #[test]
     fn v1_begin_frame_layout() {
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         let payload = [0xAA, 0xBB, 0xCC];
-        let f: Frame = V1Fragmenter::new(hdr(&id), 1, 8, 7, &payload).next().unwrap();
+        let f: Frame = V1Fragmenter::new(hdr(&id), 1, 8, 7, &payload)
+            .next()
+            .unwrap();
         assert_eq!(&f.data()[..4], &hdr(&id));
         assert_eq!(&f.data()[4..6], &3u16.to_be_bytes(), "length field");
         assert_eq!(&f.data()[6..], &[0xAA, 0xBB], "only 2 payload bytes fit");
@@ -613,8 +629,7 @@ mod tests {
     #[test]
     fn v1_empty_payload_is_one_frame() {
         let id = Id::default();
-        let frames: heapless_vec::Vec8<Frame> =
-            V1Fragmenter::new(hdr(&id), 0, 0, 0, &[]).collect();
+        let frames: heapless_vec::Vec8<Frame> = V1Fragmenter::new(hdr(&id), 0, 0, 0, &[]).collect();
         assert_eq!(frames.len(), 1);
         assert_eq!(frames.get(0).dlc(), 6, "header + length only");
     }
@@ -639,7 +654,10 @@ mod tests {
         }
         impl<T: Copy + Default> FromIterator<T> for Vec8<T> {
             fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-                let mut v = Vec8 { items: [T::default(); 300], len: 0 };
+                let mut v = Vec8 {
+                    items: [T::default(); 300],
+                    len: 0,
+                };
                 for it in iter {
                     assert!(v.len < 300, "test collector overflow");
                     v.items[v.len] = it;
@@ -652,13 +670,24 @@ mod tests {
 
     impl Default for Frame {
         fn default() -> Self {
-            Frame { id: 0, data: [0; 8], len: 0 }
+            Frame {
+                id: 0,
+                data: [0; 8],
+                len: 0,
+            }
         }
     }
 
     #[test]
     fn v1_fragmentation_covers_the_payload_exactly() {
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         for total in [0usize, 1, 2, 3, 7, 8, 9, 10, 16, 100, 200] {
             let payload: heapless_vec::Vec8<u8> = (0..total).map(|i| (i & 0xff) as u8).collect();
             let frames: heapless_vec::Vec8<Frame> =
@@ -690,10 +719,18 @@ mod tests {
 
     #[test]
     fn v1_roundtrip_through_reassembly() {
-        let id = Id { pri: 2, flags: flags::CRC32, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: flags::CRC32,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         for total in [0usize, 1, 2, 3, 8, 9, 100, 200] {
-            let payload: heapless_vec::Vec8<u8> =
-                (0..total).map(|i| (i.wrapping_mul(5) & 0xff) as u8).collect();
+            let payload: heapless_vec::Vec8<u8> = (0..total)
+                .map(|i| (i.wrapping_mul(5) & 0xff) as u8)
+                .collect();
             let mut r = V1Reassembler::new();
             let mut out = [0u8; 256];
             let mut got = None;
@@ -744,7 +781,14 @@ mod tests {
 
     #[test]
     fn v2_begin_frame_carries_the_header_extension() {
-        let id = Id { pri: 2, flags: 0x10, src: 1000, dst: 2000, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0x10,
+            src: 1000,
+            dst: 2000,
+            dport: 20,
+            sport: 10,
+        };
         let frag = V2Fragmenter::new(id, 5, 0, &[]);
         let ext = frag.header_extension();
         let raw = u32::from_be_bytes(ext);
@@ -756,15 +800,21 @@ mod tests {
 
     #[test]
     fn v2_sets_begin_and_end_correctly() {
-        let id = Id { pri: 1, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 1,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         // Fits in the first frame: begin and end both set.
         let f: Frame = V2Fragmenter::new(id, 5, 0, &[1, 2]).next().unwrap();
         assert_eq!((f.id >> V2_BEGIN_OFFSET) & 1, 1);
         assert_eq!((f.id >> V2_END_OFFSET) & 1, 1);
 
         // Needs two frames: end only on the last.
-        let frames: heapless_vec::Vec8<Frame> =
-            V2Fragmenter::new(id, 5, 0, &[0u8; 20]).collect();
+        let frames: heapless_vec::Vec8<Frame> = V2Fragmenter::new(id, 5, 0, &[0u8; 20]).collect();
         assert!(frames.len() > 1);
         for i in 0..frames.len() {
             let f = frames.get(i);
@@ -779,8 +829,7 @@ mod tests {
         // 8 * 8 = 64 payload bytes after the first frame's 4 => fc must wrap.
         let id = Id::default();
         let payload = [0u8; 100];
-        let frames: heapless_vec::Vec8<Frame> =
-            V2Fragmenter::new(id, 1, 0, &payload).collect();
+        let frames: heapless_vec::Vec8<Frame> = V2Fragmenter::new(id, 1, 0, &payload).collect();
         let mut expected_fc = 1u32;
         for i in 1..frames.len() {
             let fc = (frames.get(i).id >> V2_FC_OFFSET) & V2_FC_MASK;
@@ -792,7 +841,14 @@ mod tests {
 
     #[test]
     fn v2_fragmentation_covers_the_payload_exactly() {
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         for total in [0usize, 1, 4, 5, 12, 13, 100] {
             let payload: heapless_vec::Vec8<u8> = (0..total).map(|i| (i & 0xff) as u8).collect();
             let frames: heapless_vec::Vec8<Frame> =
@@ -812,9 +868,18 @@ mod tests {
 
     #[test]
     fn v2_roundtrip_through_reassembly() {
-        let id = Id { pri: 2, flags: 0x10, src: 1000, dst: 2000, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0x10,
+            src: 1000,
+            dst: 2000,
+            dport: 20,
+            sport: 10,
+        };
         for total in [0usize, 1, 4, 5, 12, 13, 100, 250] {
-            let payload: heapless_vec::Vec8<u8> = (0..total).map(|i| (i.wrapping_mul(3) & 0xff) as u8).collect();
+            let payload: heapless_vec::Vec8<u8> = (0..total)
+                .map(|i| (i.wrapping_mul(3) & 0xff) as u8)
+                .collect();
             let mut r = V2Reassembler::new();
             let mut out = [0u8; 300];
             let mut done = None;
@@ -849,19 +914,29 @@ mod tests {
 
     #[test]
     fn v2_detects_a_lost_fragment_by_its_counter() {
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         let payload = [0u8; 60];
-        let frames: heapless_vec::Vec8<Frame> =
-            V2Fragmenter::new(id, 5, 0, &payload).collect();
+        let frames: heapless_vec::Vec8<Frame> = V2Fragmenter::new(id, 5, 0, &payload).collect();
         assert!(frames.len() >= 3, "need at least three frames to skip one");
 
         let mut r = V2Reassembler::new();
         let mut out = [0u8; 100];
-        r.push(frames.get(0).id, frames.get(0).data(), &mut out).unwrap();
+        r.push(frames.get(0).id, frames.get(0).data(), &mut out)
+            .unwrap();
         // skip frame 1, feed frame 2
         let f2 = frames.get(2);
         assert!(
-            matches!(r.push(f2.id, f2.data(), &mut out), Err(Error::UnexpectedOffset { .. })),
+            matches!(
+                r.push(f2.id, f2.data(), &mut out),
+                Err(Error::UnexpectedOffset { .. })
+            ),
             "a gap in the 3-bit fragment counter must be caught"
         );
     }
@@ -876,7 +951,14 @@ mod tests {
 
     #[test]
     fn v2_reports_an_output_buffer_that_is_too_small() {
-        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
         let payload = [0u8; 100];
         let mut r = V2Reassembler::new();
         let mut tiny = [0u8; 8];
@@ -894,8 +976,22 @@ mod tests {
     fn interleaved_transfers_both_survive() {
         // The whole reason the pool exists: on a shared bus, fragments from different
         // senders arrive interleaved. A single reassembler drops both.
-        let a = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
-        let b = Id { pri: 2, flags: 0, src: 2, dst: 9, dport: 21, sport: 11 };
+        let a = Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        };
+        let b = Id {
+            pri: 2,
+            flags: 0,
+            src: 2,
+            dst: 9,
+            dport: 21,
+            sport: 11,
+        };
         let pa = [0xAAu8; 40];
         let pb = [0xBBu8; 40];
 
@@ -955,7 +1051,10 @@ mod tests {
         pool.get_or_create(2, 5_000).unwrap();
         assert_eq!(pool.expire(6_000, 3_000), 1, "only the stale one");
         assert_eq!(pool.len(), 1);
-        assert!(pool.get_or_create(3, 6_000).is_some(), "the slot is reusable");
+        assert!(
+            pool.get_or_create(3, 6_000).is_some(),
+            "the slot is reusable"
+        );
     }
 
     #[test]
@@ -972,11 +1071,25 @@ mod tests {
 
     #[test]
     fn all_identifiers_fit_29_bits() {
-        let id = Id { pri: 3, flags: 0x3f, src: 16383, dst: 16383, dport: 63, sport: 63 };
+        let id = Id {
+            pri: 3,
+            flags: 0x3f,
+            src: 16383,
+            dst: 16383,
+            dport: 63,
+            sport: 63,
+        };
         for f in V2Fragmenter::new(id, 63, 3, &[0u8; 64]) {
             assert!(f.id < (1 << 29), "CFP2 id overflowed: {:#x}", f.id);
         }
-        let v1 = Id { pri: 3, flags: 0xff, src: 31, dst: 31, dport: 63, sport: 63 };
+        let v1 = Id {
+            pri: 3,
+            flags: 0xff,
+            src: 31,
+            dst: 31,
+            dport: 63,
+            sport: 63,
+        };
         for f in V1Fragmenter::new(hdr(&v1), 31, 31, 1023, &[0u8; 64]) {
             assert!(f.id < (1 << 29), "CFP1 id overflowed: {:#x}", f.id);
         }

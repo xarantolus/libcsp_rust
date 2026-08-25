@@ -174,7 +174,10 @@ mod tests {
     #[test]
     fn reboot_and_shutdown_differ_only_in_the_magic() {
         assert_ne!(reboot().payload, shutdown().payload);
-        assert_eq!(reboot().payload, &crate::service::REBOOT_MAGIC.to_be_bytes());
+        assert_eq!(
+            reboot().payload,
+            &crate::service::REBOOT_MAGIC.to_be_bytes()
+        );
         assert_eq!(
             shutdown().payload,
             &crate::service::SHUTDOWN_MAGIC.to_be_bytes()
@@ -205,7 +208,10 @@ mod tests {
         assert!(check_ping(sent, b"abcdefgh").is_ok());
         assert_eq!(check_ping(sent, b"abcdefgX"), Err(Error::BadChecksum));
         assert!(
-            matches!(check_ping(sent, b"abc"), Err(Error::LengthExceedsMaximum { .. })),
+            matches!(
+                check_ping(sent, b"abc"),
+                Err(Error::LengthExceedsMaximum { .. })
+            ),
             "a short reply is a different failure from a corrupted one"
         );
     }
@@ -252,11 +258,7 @@ mod tests {
             buf_free: 12,
             uptime_s: 3600,
         };
-        for (req, expected) in [
-            (uptime(), 3600u32),
-            (memfree(), 4096),
-            (buf_free(), 12),
-        ] {
+        for (req, expected) in [(uptime(), 3600u32), (memfree(), 4096), (buf_free(), 12)] {
             let svc = SvcRequest::decode(req.port, req.payload).unwrap();
             let mut out = [0u8; 16];
             let n = respond(svc, req.payload, &status, &mut out)
@@ -322,6 +324,9 @@ mod tests {
     #[cfg(feature = "cmp")]
     #[test]
     fn a_truncated_cmp_reply_is_refused() {
-        assert_eq!(check_cmp_reply(cmp::code::IDENT, &[0xff]), Err(Error::Truncated));
+        assert_eq!(
+            check_cmp_reply(cmp::code::IDENT, &[0xff]),
+            Err(Error::Truncated)
+        );
     }
 }
