@@ -31,6 +31,11 @@
 {"suite":"cmp","case":"a_bare_clock_request_gets_no_reply","verdict":"must_match","input":{"request":"0006"},"observed":{"replies":0,"reply_len":0,"reply_type":-1,"reply_code":-1}}
 {"suite":"cmp","case":"a_full_size_clock_request_is_answered","verdict":"must_match","input":{"request":"00060000000000000000"},"observed":{"replies":1,"reply_len":10,"reply_type":255,"reply_code":6}}
 {"suite":"cmp","case":"the_minimum_request_length_is_the_whole_reply","verdict":"must_match","observed":{"ident_min":93,"clock_min":10}}
+{"suite":"cmp","case":"route_set_v2_installs_a_route_that_is_used","verdict":"must_match","input":{"request":"000700c80000000e524f555445440000000000"},"observed":{"replies":1,"reply_len":19,"reply_type":255,"reply_code":7}}
+{"suite":"cmp","case":"route_set_v2_for_an_unknown_interface_changes_nothing","verdict":"must_match","input":{"request":"000700c80000000e4e4f535543484946000000"},"observed":{"replies":0,"reply_len":0,"reply_type":-1,"reply_code":-1}}
+{"suite":"cmp","case":"route_set_v2_one_byte_short_changes_nothing","verdict":"must_match","input":{"request":"000700c80000000e524f5554454400000000"},"observed":{"replies":0,"reply_len":0,"reply_type":-1,"reply_code":-1}}
+{"suite":"cmp","case":"route_set_v1_installs_a_route_that_is_used","verdict":"must_match","input":{"request":"0002c800524f555445440000000000"},"observed":{"replies":1,"reply_len":15,"reply_type":255,"reply_code":2}}
+{"suite":"cmp","case":"if_stats_reports_counters_that_moved","verdict":"must_match","input":{"request":"0003494e475245535300000000"},"observed":{"replies":1,"reply_len":53,"reply_type":255,"reply_code":3}}
 {"suite":"cmp","case":"peek_returns_the_bytes_at_the_address","verdict":"must_match","input":{"request":"0004000010100400000000000000"},"observed":{"replies":1,"reply_len":14,"reply_type":255,"reply_code":4}}
 {"suite":"cmp","case":"the_peek_tail_echoes_the_requesters_own_bytes","verdict":"must_match","input":{"request":"000400001000045a5a5a5a5a5a5a"},"observed":{"replies":1,"reply_len":14,"reply_type":255,"reply_code":4}}
 {"suite":"cmp","case":"the_peek_tail_when_the_request_did_not_cover_it","verdict":"must_match","input":{"request":"00040000100004","buffer_zero_clear":1},"observed":{"reply_len":14,"tail":"000000"}}
