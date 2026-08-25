@@ -628,7 +628,12 @@ impl Connection {
     /// its own retransmission timer fired. Every packet cost a full `packet_timeout` of
     /// latency and a duplicate on the link.
     pub fn should_ack(&self, now_ms: u32) -> bool {
-        // Nothing to acknowledge.
+        // Nothing to acknowledge. **Deliberately unlike the C**, which returns true
+        // unconditionally when delayed acks are off and so transmits an acknowledgement for
+        // a sequence number the peer already has. Measured in
+        // `ctest/suite_rdp.c::an_ack_is_sent_even_with_nothing_to_acknowledge`; recorded in
+        // SCOPE.md. A redundant frame costs power on a link that has none to spare, and a
+        // peer that does not receive it loses nothing.
         if self.rcv_cur == self.rcv_lsa {
             return false;
         }
@@ -640,8 +645,17 @@ impl Connection {
             return true;
         }
         // Enough packets have gone unacknowledged.
+        //
+        // Strictly greater, not `>=`. The C tests
+        // `csp_rdp_seq_after(rcv_cur, rcv_lsa + ack_delay_count)`, so the acknowledgement
+        // fires once the outstanding count *exceeds* the delay — at count + 1. This used
+        // `>=` and fired one packet early, which is 50% more acknowledgements at the
+        // default count of 2. Not a correctness difference, and not worth having: the
+        // extra frames cost power on a downlink that is already the scarce resource.
+        // `ctest/suite_rdp.c::the_delay_count_fires_one_packet_after_it` measures it —
+        // [0,0,1,1,1] for a count of 2.
         let outstanding = self.rcv_cur.wrapping_sub(self.rcv_lsa);
-        outstanding as u32 >= self.opts.ack_delay_count
+        outstanding as u32 > self.opts.ack_delay_count
     }
 
     /// Take the acknowledgement that is due, if any.
@@ -1229,19 +1243,24 @@ mod tests {
         assert!(c.should_ack(500), "past the ack timeout");
     }
 
+    /// The acknowledgement fires once the outstanding count *exceeds* the delay, not when
+    /// it reaches it -- `csp_rdp_seq_after(rcv_cur, rcv_lsa + ack_delay_count)` is strictly
+    /// after. This asserted `>=`, describing a policy one packet more eager than the C's.
+    /// `ctest/suite_rdp.c` measures the real thing: with a delay count of 2, five packets
+    /// produce acknowledgements [0, 0, 1, 1, 1].
     #[test]
-    fn a_delayed_ack_fires_on_the_packet_count() {
+    fn a_delayed_ack_fires_one_packet_after_the_count() {
         let mut c = open_conn();
         c.opts.delayed_acks = true;
         c.opts.ack_timeout = 100_000; // so only the count can trigger it
         c.opts.ack_delay_count = 2;
+
         c.rcv_cur = 11;
-        assert!(
-            !c.should_ack(0),
-            "one packet outstanding, delay count is two"
-        );
+        assert!(!c.should_ack(0), "one outstanding, below the delay count");
         c.rcv_cur = 12;
-        assert!(c.should_ack(0), "two outstanding reaches the delay count");
+        assert!(!c.should_ack(0), "two outstanding only *reaches* the count");
+        c.rcv_cur = 13;
+        assert!(c.should_ack(0), "three outstanding exceeds it");
     }
 
     #[test]
