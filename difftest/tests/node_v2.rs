@@ -319,3 +319,58 @@ fn a_local_subnet_beats_the_routing_table() {
     assert_eq!(c.tx[0], r.tx[0], "byte-identical");
     assert_eq!(r.tx_via[0].0, c.tx_via[0].0, "and the same interface");
 }
+
+/// The `is_to_me` conditions on v2, where the address space is 14 bits rather than 5.
+///
+/// Both parts are subnet arithmetic, which is the thing that differs between the versions,
+/// so the v1 checks in `diff.rs` do not cover this.
+#[test]
+fn any_interface_address_and_both_broadcast_forms_are_ours() {
+    let _g = LOCK.lock().unwrap();
+    setup();
+
+    // 1. The other interface's own address.
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 4000,
+        dst: EGRESS_ADDR,
+        dport: 10,
+        sport: 40,
+    };
+    let c = c_node_exchange(&framed(id, b"for our other interface"), &[10]);
+    let r = rust_exchange(&framed(id, b"for our other interface"), &[10], &[]);
+    assert_eq!(c.delivered.len(), 1, "the C delivers it locally");
+    assert_eq!(
+        r.delivered.len(),
+        1,
+        "the port must too -- it sent {} frame(s) out",
+        r.tx.len()
+    );
+
+    // 2. INGRESS is 9/12 of 14 host bits, so its subnet is 8..11 and its broadcast is 11.
+    //    And the global broadcast is max_node_id() = 16383.
+    for (dst, what) in [
+        (11u16, "the ingress subnet broadcast"),
+        (16383, "the global broadcast"),
+    ] {
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 4000,
+            dst,
+            dport: 10,
+            sport: 40,
+        };
+        let frame = framed(id, b"broadcast");
+        let c = c_node_exchange(&frame, &[10]);
+        let r = rust_exchange(&frame, &[10], &[]);
+        assert_eq!(c.delivered.len(), 1, "the C delivers {what} (dst {dst})");
+        assert_eq!(
+            r.delivered.len(),
+            1,
+            "the port must deliver {what} (dst {dst}) -- it sent {} frame(s) out",
+            r.tx.len()
+        );
+    }
+}

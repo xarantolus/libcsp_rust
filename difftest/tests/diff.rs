@@ -1099,3 +1099,134 @@ fn a_local_subnet_beats_the_routing_table() {
          either way"
     );
 }
+
+/// A packet addressed to *any* of this node's interfaces is for this node.
+///
+/// The C's `is_to_me` is `csp_iflist_get_by_addr(dst) != NULL` — **any** interface's
+/// address, not a single node address. A node with interfaces on 9 and 20 answers to both.
+///
+/// The port compared against one `self.address`, so a packet for its *other* interface
+/// failed the check, fell through to forwarding, and went back out on the wire instead of
+/// reaching the application. On a satellite with a CAN interface and a KISS interface that
+/// is a command addressed to the radio-side address being bounced onto the bus.
+#[test]
+fn a_packet_for_any_of_our_own_interfaces_is_delivered_locally() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
+    assert_eq!(c_node_bind(10), 0);
+
+    // Addressed to the EGRESS interface's own address, arriving on INGRESS.
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 3,
+        dst: EGRESS_ADDR,
+        dport: 10,
+        sport: 4,
+    };
+    let frame = framed(version, id, b"for our other interface");
+
+    let c = c_node_exchange(&frame, &[10]);
+    let r = rust_node_exchange_routed(version, &frame, &[10], &[10], &[]);
+
+    assert_eq!(c.delivered.len(), 1, "the C delivers it locally");
+    assert!(c.tx.is_empty(), "and puts nothing back on the wire");
+
+    assert_eq!(
+        r.delivered.len(),
+        1,
+        "the port must deliver it locally too, not forward it -- it sent {} frame(s) out",
+        r.tx.len()
+    );
+    assert!(r.tx.is_empty(), "and must not put it back on the wire");
+    assert_eq!(c.delivered[0].payload, r.delivered[0].payload);
+}
+
+/// Both broadcast forms are for this node, and the subnet one is relative to the
+/// interface the packet arrived on.
+///
+/// `csp_id_is_broadcast(addr, iface)` accepts two things: the **subnet** broadcast of that
+/// interface (all host bits set, network bits matching), and the **global** broadcast
+/// `csp_id_get_max_nodeid()`.
+///
+/// The port passed `self.address` and a hardcoded netmask of `0`. With netmask 0 the host
+/// mask becomes the whole address space, so the subnet test degenerates to `addr == 31` —
+/// the global case — and **every subnet broadcast was missed** and forwarded instead.
+/// INGRESS is 9/2 here, so its subnet is 8..15 and its broadcast is 15.
+#[test]
+fn both_broadcast_forms_are_delivered_locally() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
+    assert_eq!(c_node_bind(10), 0);
+
+    for (dst, what) in [
+        (15u16, "the ingress interface's subnet broadcast"),
+        (31, "the global broadcast"),
+    ] {
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 3,
+            dst,
+            dport: 10,
+            sport: 4,
+        };
+        let frame = framed(version, id, b"broadcast");
+
+        let c = c_node_exchange(&frame, &[10]);
+        let r = rust_node_exchange_routed(version, &frame, &[10], &[10], &[]);
+
+        assert_eq!(c.delivered.len(), 1, "the C delivers {what} (dst {dst})");
+        assert_eq!(
+            r.delivered.len(),
+            1,
+            "the port must deliver {what} (dst {dst}) -- it sent {} frame(s) out instead",
+            r.tx.len()
+        );
+        assert_eq!(
+            c.delivered[0].payload, r.delivered[0].payload,
+            "payload for dst {dst}"
+        );
+    }
+}
+
+/// An address in a *different* interface's subnet is not a broadcast for the ingress one.
+///
+/// The guard on the test above: if `is_broadcast_for` ignored which interface a packet
+/// arrived on, EGRESS's subnet broadcast (23) would also look local, and the node would
+/// swallow traffic it should forward.
+#[test]
+fn another_interfaces_broadcast_is_not_ours_to_swallow() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
+    assert_eq!(c_node_bind(10), 0);
+
+    // 23 is EGRESS's subnet broadcast (16..23), arriving on INGRESS.
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 3,
+        dst: 23,
+        dport: 10,
+        sport: 4,
+    };
+    let frame = framed(version, id, b"not for the ingress subnet");
+
+    let c = c_node_exchange(&frame, &[10]);
+    let r = rust_node_exchange_routed(version, &frame, &[10], &[10], &[]);
+
+    assert_eq!(
+        c.delivered.len(),
+        r.delivered.len(),
+        "delivery must agree: C {:?}, port {:?}",
+        c.delivered,
+        r.delivered
+    );
+    assert_eq!(c.tx.len(), r.tx.len(), "and so must what goes on the wire");
+}
