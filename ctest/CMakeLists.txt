@@ -56,6 +56,7 @@ target_sources(ctest PRIVATE
   suite_security.c
   suite_cmp.c
   suite_eth.c
+  suite_sfp.c
 )
 
 target_sources(ctest PRIVATE
