@@ -453,14 +453,32 @@ impl<'a> Peek<'a> {
     /// Bytes of alignment tail the C counts into the message length but does not fill.
     ///
     /// `CMP_PEEK_SIZE(len)` is `sizeof(struct) + tail + len` = `10 + len`, while the
-    /// handler writes `len` bytes at `cmp->data`, which is at packed offset **7**. So the
-    /// C declares a reply three bytes longer than the data it contains, and those three
-    /// bytes are whatever was already in the pooled buffer — a peek reply pads itself with
-    /// unrelated memory, which on a *memory-read service* is the wrong direction to be
-    /// wrong in.
+    /// handler writes `len` bytes at `cmp->data`, which is at packed offset **7**. So the C
+    /// declares a reply three bytes longer than the data it wrote.
     ///
-    /// The port emits the same wire length so a C peer sees the size it expects, but
-    /// **zeroes** the tail.
+    /// What ends up in those three bytes **depends on `CSP_BUFFER_ZERO_CLEAR`**, and both
+    /// branches are measured in `ctest/suite_cmp.c`:
+    ///
+    /// - **On** (the upstream default): the pool clears what it hands out, so the tail is
+    ///   zeros. No leak.
+    /// - **Off** — which is what a build that cares about cycles picks, since clearing 256
+    ///   bytes per allocation is not free on an STM32 — the tail carries whatever the
+    ///   buffer's previous user left there, and hands it to whoever sent the peek.
+    ///   `just ctest-noclear` demonstrates it: stamp the pool, then send the seven-byte
+    ///   minimum request declaring four bytes of data, and the stamp comes back.
+    ///
+    /// Reaching it needs a request *shorter* than `10 + len`, which the C's own client
+    /// never sends — `csp_cmp_peek` sends `CMP_PEEK_SIZE(peek->len)`, so in an ordinary
+    /// exchange the tail merely echoes the requester's own bytes. It is a hand-crafted
+    /// request that turns the padding into a read of someone else's packet, on the one
+    /// service whose job is reading memory.
+    ///
+    /// An earlier version of this comment asserted the leak unconditionally. That was
+    /// right about the mechanism and wrong to state without the condition: in the default
+    /// configuration it simply does not happen.
+    ///
+    /// The port emits the same wire length so a C peer sees the size it expects, and
+    /// **zeroes** the tail in every configuration.
     pub const TAIL_LEN: usize = 3;
 
     /// Decode.
@@ -629,6 +647,26 @@ pub enum Query<'a> {
     },
 }
 
+/// A `POKE` has to carry every byte it says it is writing.
+///
+/// `csp_cmp_poke_handler` checks the length **twice** — once for the header, then again for
+/// `sizeof(*cmp) + cmp->len` — and only the second one catches a request that declares 64
+/// bytes and carries none. `csp_cmp_peek_handler` has no second check, because a `PEEK`
+/// request legitimately carries no body while declaring how much to read.
+///
+/// The distinction lives here rather than in [`Peek::decode`] for exactly that reason: the
+/// decoder is shared between the two and cannot tell them apart. Its own "must carry all of
+/// it" check was skipped when the body was *empty*, which is the one case that matters —
+/// so a `POKE` for 64 bytes carrying none used to become a silent zero-byte write, answered
+/// as success. On a memory-write service, reporting a write that did not happen is worse
+/// than refusing.
+fn poke_carries_its_data(declared: u8, present: usize) -> Result<()> {
+    if present != declared as usize {
+        return Err(Error::Truncated);
+    }
+    Ok(())
+}
+
 /// Classify an incoming CMP request.
 ///
 /// Returns [`Error::NotAReply`] inverted — that is, refuses a message marked as a *reply*,
@@ -682,6 +720,7 @@ pub fn parse_request(data: &[u8]) -> Result<Query<'_>> {
         }
         code::POKE => {
             let p = Peek::decode(data)?;
+            poke_carries_its_data(p.len, p.data.len())?;
             Ok(Query::Poke {
                 addr: p.addr as u64,
                 data: p.data,
@@ -690,6 +729,7 @@ pub fn parse_request(data: &[u8]) -> Result<Query<'_>> {
         }
         code::POKE_V2 => {
             let p = PeekV2::decode(data)?;
+            poke_carries_its_data(p.len, p.data.len())?;
             Ok(Query::Poke {
                 addr: p.vaddr,
                 data: p.data,
@@ -1142,6 +1182,42 @@ mod tests {
         out[1] = code;
         out[Header::LEN..Header::LEN + body.len()].copy_from_slice(body);
         Header::LEN + body.len()
+    }
+
+    /// A POKE must carry every byte it claims to write, or the node reports a success for
+    /// a write that did not happen.
+    ///
+    /// Found by the corpus: the C refuses this request and the port answered it. The shared
+    /// `Peek::decode` skipped its own "must carry all of it" check when the body was
+    /// *empty* — the one case that matters — because a PEEK request legitimately carries no
+    /// body, and the decoder cannot tell the two codes apart.
+    #[test]
+    fn a_poke_that_does_not_carry_its_data_is_refused() {
+        let mut buf = [0u8; 64];
+        buf[0] = REQUEST;
+        buf[1] = code::POKE;
+        buf[Header::LEN + 4] = 64; // declares 64 bytes...
+        let n = Peek::HEADER_LEN; // ...and carries none
+
+        assert_eq!(parse_request(&buf[..n]), Err(Error::Truncated));
+
+        // Carrying fewer than declared is refused too, not silently truncated.
+        buf[Header::LEN + 4] = 8;
+        assert_eq!(
+            parse_request(&buf[..Peek::HEADER_LEN + 4]),
+            Err(Error::Truncated)
+        );
+
+        // Carrying exactly what it declares is fine.
+        buf[Header::LEN + 4] = 4;
+        let q = parse_request(&buf[..Peek::HEADER_LEN + 4]).unwrap();
+        assert!(matches!(q, Query::Poke { data, .. } if data.len() == 4));
+
+        // A PEEK request keeps its no-body form: it declares how much to *read*.
+        buf[1] = code::PEEK;
+        buf[Header::LEN + 4] = 64;
+        let q = parse_request(&buf[..Peek::HEADER_LEN]).unwrap();
+        assert!(matches!(q, Query::Peek { len: 64, .. }));
     }
 
     #[test]

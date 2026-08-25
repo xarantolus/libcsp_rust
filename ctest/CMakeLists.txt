@@ -30,6 +30,10 @@ set(CTEST_USE_RDP 1 CACHE STRING "CSP_USE_RDP")
 set(CTEST_USE_HMAC 1 CACHE STRING "CSP_USE_HMAC")
 set(CTEST_USE_PROMISC 1 CACHE STRING "CSP_USE_PROMISC")
 set(CTEST_USE_RTABLE 1 CACHE STRING "CSP_USE_RTABLE")
+# Default ON upstream, but a flight build turns it off: zeroing 256 bytes on every
+# buffer allocation is not free. Whether an unwritten reply tail leaks the previous
+# packet depends entirely on it, so both settings are measured.
+set(CTEST_BUFFER_ZERO_CLEAR 1 CACHE STRING "CSP_BUFFER_ZERO_CLEAR")
 
 configure_file(autoconfig.h.in ${CMAKE_CURRENT_BINARY_DIR}/gen/csp/autoconfig.h @ONLY)
 

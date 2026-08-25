@@ -18,6 +18,16 @@ ctest suite="": ctest-build
     if [ -n "{{suite}}" ]; then export CK_RUN_SUITE="{{suite}}"; fi
     ./build/ctest/ctest
 
+# The C oracle with the packet pool NOT zeroed on allocation, which is what a build that
+# cares about cycles does. Reaches the branches the canonical config hides.
+ctest-noclear:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmake -S ctest -B build/ctest-noclear -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCTEST_BUFFER_ZERO_CLEAR=0
+    cmake --build build/ctest-noclear
+    ./build/ctest-noclear/ctest
+
 # Regenerate the corpus: what the C did, for the Rust side to replay.
 #
 # Byte-stable across runs by construction — every source of non-determinism in libcsp
