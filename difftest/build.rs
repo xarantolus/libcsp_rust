@@ -42,10 +42,24 @@ fn main() {
         "src/csp_rtable_cidr.c",
         "src/csp_rtable_stdio.c",
         "src/csp_iflist.c",
-        // KISS framing. csp_kiss_rx pushes into the qfifo, which the shim overrides to
-        // capture the frame, so only the buffer pool comes with it.
         "src/interfaces/csp_if_kiss.c",
         "src/csp_buffer.c",
+        // The whole portable node, so the harness can run a real C node against a real
+        // Rust one instead of comparing codecs and hoping the layers above agree.
+        "src/csp_io.c",
+        "src/csp_conn.c",
+        "src/csp_port.c",
+        "src/csp_qfifo.c",
+        "src/csp_route.c",
+        "src/csp_promisc.c",
+        "src/csp_dedup.c",
+        "src/csp_services.c",
+        "src/csp_service_handler.c",
+        "src/csp_sfp.c",
+        "src/csp_rdp.c",
+        "src/csp_rdp_queue.c",
+        "src/csp_hex_dump.c",
+        "src/interfaces/csp_if_lo.c",
         // csp_buffer.c uses the OS queue shim.
         "src/arch/posix/csp_queue.c",
         "src/arch/posix/pthread_queue.c",

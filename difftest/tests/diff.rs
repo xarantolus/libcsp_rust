@@ -713,3 +713,312 @@ fn a_corrupted_kiss_frame_never_reaches_the_router_with_the_wrong_payload() {
         "no corruption was survivable; the generator never hits a byte that does not matter"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Node level: a real C node and a real Rust node, same frames, same questions
+//
+// Everything above this line compares codecs -- bytes in, bytes out. That leaves the
+// layer where the port actually had a missing behaviour (the default-interface routing
+// fan-out) checked only against a careful reading of the C. These tests close that.
+//
+// The comparison is deliberately behavioural. Both sides are asked only what an
+// application or a peer could observe: which port received what payload on a connection
+// with which endpoints, and what frames went out. Neither side's queue depths,
+// connection-table indices or refcounts are touched -- pinning those would be testing
+// libcsp's implementation, and the port is entitled to differ there and does.
+// ---------------------------------------------------------------------------
+
+use csp::{Config, CspStorage, Node, Routed};
+
+/// The node under test on the Rust side, sized like the C's defaults.
+type NodeStorage = CspStorage<8, 24, 300, 64, 8>;
+/// `RXQ` is the seventh parameter of `Node` and is not implied by the storage type.
+type TestNode<'a> = Node<'a, 8, 24, 300, 64, 8, 8>;
+
+/// Address both nodes answer to. Fits CSP v1's 5 bits.
+const NODE_ADDR: u16 = 9;
+/// Address of the egress interface, in a different subnet from the ingress one.
+const EGRESS_ADDR: u16 = 20;
+
+/// Drive a Rust node with one frame and report the same observable outcome the C shim
+/// reports, so the two can be compared directly.
+fn rust_node_exchange(
+    version: Version,
+    frame: &[u8],
+    bind_ports: &[u8],
+    watch_ports: &[u8],
+) -> NodeOutcome {
+    rust_node_exchange_routed(version, frame, bind_ports, watch_ports, &[])
+}
+
+/// As above, with routing-table entries installed first: `(address, netmask, iface, via)`.
+fn rust_node_exchange_routed(
+    version: Version,
+    frame: &[u8],
+    bind_ports: &[u8],
+    watch_ports: &[u8],
+    routes: &[(u16, u16, u8, u16)],
+) -> NodeOutcome {
+    let storage = NodeStorage::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(version).address(NODE_ADDR));
+    // Same topology as the C shim: ingress on 8..15, egress on 16..23, so a forwarded
+    // packet has a different subnet to leave by and split horizon does not veto it.
+    node.ifaces.add("INGRESS", NODE_ADDR, 2, false).unwrap();
+    node.ifaces.add("EGRESS", EGRESS_ADDR, 2, true).unwrap();
+    for &p in bind_ports {
+        node.bind(p).unwrap();
+    }
+    for &(a, m, i, v) in routes {
+        node.route_set(a, m, i, v).unwrap();
+    }
+
+    let mut out = NodeOutcome::default();
+
+    // A driver hands the node a framed packet off the wire.
+    let Some(mut p) = node.packet() else {
+        return out;
+    };
+    if p.set_frame(version, frame).is_err() {
+        return out; // malformed frame: the node never sees it, same as csp_id_strip failing
+    }
+    node.router.receive(p, 0);
+
+    // Turn the crank to quiescence, capturing anything that goes back out.
+    //
+    // Forwarding is the part that matters here: the router hands back a pool index and the
+    // caller is responsible for putting the frame on the wire. Doing that here is what
+    // makes this an end-to-end test rather than an assertion about which interface index
+    // the router picked -- and it is exactly what no unit test did, which is how a router
+    // that forwarded nothing at all passed 451 of them.
+    for _ in 0..64 {
+        match node.work(0) {
+            Routed::Idle => break,
+            Routed::Delivered { .. } => {}
+            Routed::Forwarded { packet, .. } => {
+                if let Some(mut p) = node.take_forwarded(packet) {
+                    if p.prepend_header(version).is_ok() {
+                        out.tx.push(p.with_frame(|f| f.to_vec()));
+                    }
+                }
+            }
+            Routed::Dropped(_) => {}
+        }
+    }
+
+    // What did the application get?
+    for &port in watch_ports {
+        while let Some(conn) = node.accept() {
+            let info = match node.conn_info(conn) {
+                Ok(i) => i,
+                Err(_) => break,
+            };
+            while let Ok(Some(pkt)) = node.read(conn) {
+                let payload = pkt.with_payload(|d| d.to_vec());
+                out.delivered.push(Delivered {
+                    port: info.dport,
+                    src: info.src,
+                    dst: info.dst,
+                    dport: info.dport,
+                    sport: info.sport,
+                    payload,
+                });
+            }
+            let _ = node.close(conn);
+            let _ = port;
+        }
+    }
+    out
+}
+
+/// Build a complete framed packet: encoded header followed by payload.
+fn framed(version: Version, id: Id, payload: &[u8]) -> Vec<u8> {
+    let hdr = match version {
+        Version::V1 => 4,
+        Version::V2 => 6,
+    };
+    let mut v = vec![0u8; hdr + payload.len()];
+    id.encode(version, &mut v).expect("id fits the version");
+    v[hdr..].copy_from_slice(payload);
+    v
+}
+
+/// A packet addressed to this node, on a bound port, must reach the application on both
+/// sides with the same endpoints and the same bytes.
+///
+/// This is the plainest thing a CSP node does and it was never checked against the C —
+/// only against a reading of it.
+#[test]
+fn a_packet_for_a_bound_port_reaches_the_application_identically() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR), "C node came up");
+    assert_eq!(c_node_bind(10), 0, "bind failed");
+
+    let mut rng = Rng(0x0DE_0001);
+    let mut compared = 0u32;
+
+    for _ in 0..200 {
+        let sport = (rng.next() % 32) as u8;
+        let src = (rng.next() % 30) as u16;
+        if src == NODE_ADDR {
+            continue; // a packet from ourselves is a different case
+        }
+        let len = (rng.next() % 24) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src,
+            dst: NODE_ADDR,
+            dport: 10,
+            sport,
+        };
+        let frame = framed(version, id, &payload);
+
+        let c = c_node_exchange(&frame, &[10]);
+        let r = rust_node_exchange(version, &frame, &[10], &[10]);
+
+        assert_eq!(
+            c.delivered.len(),
+            r.delivered.len(),
+            "delivery count differs for {id:?}\n  C {:?}\n  R {:?}",
+            c.delivered,
+            r.delivered
+        );
+        if let (Some(cd), Some(rd)) = (c.delivered.first(), r.delivered.first()) {
+            assert_eq!(cd.payload, rd.payload, "payload for {id:?}");
+            assert_eq!(
+                (cd.src, cd.dport, cd.sport),
+                (rd.src, rd.dport, rd.sport),
+                "connection endpoints for {id:?}"
+            );
+            compared += 1;
+        }
+    }
+    assert!(
+        compared > 150,
+        "only {compared} deliveries actually compared"
+    );
+}
+
+/// A packet for a port nobody bound must not reach any application, on either side.
+#[test]
+fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR));
+    assert_eq!(c_node_bind(10), 0, "bind failed");
+
+    // Port 11 is never bound on either side.
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 3,
+        dst: NODE_ADDR,
+        dport: 11,
+        sport: 4,
+    };
+    let frame = framed(version, id, b"nobody is listening");
+
+    let c = c_node_exchange(&frame, &[10, 11]);
+    let r = rust_node_exchange(version, &frame, &[10], &[10, 11]);
+
+    assert!(c.delivered.is_empty(), "C delivered {:?}", c.delivered);
+    assert!(r.delivered.is_empty(), "Rust delivered {:?}", r.delivered);
+}
+
+/// A packet addressed to somebody else must leave the node on the wire.
+///
+/// This is the whole job of a router, and it is the one thing the codec-level differential
+/// tests structurally could not check. The C emits the frame on its default interface.
+#[test]
+fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR));
+    assert_eq!(c_node_bind(10), 0);
+
+    // Addressed to node 18: not us, not either interface's own address, but inside the
+    // egress interface's subnet (16..23) so it has somewhere to go.
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 3,
+        dst: 18,
+        dport: 10,
+        sport: 4,
+    };
+    let frame = framed(version, id, b"please forward me");
+
+    let c = c_node_exchange(&frame, &[10]);
+    // Interface 0 is the Rust node's only interface and its default route.
+    let r = rust_node_exchange_routed(version, &frame, &[10], &[10], &[(18, 5, 1, 0xFFFF)]);
+
+    assert!(
+        c.delivered.is_empty(),
+        "not addressed to us, so no local delivery"
+    );
+    assert!(r.delivered.is_empty());
+
+    assert_eq!(c.tx.len(), 1, "the C forwards it onto the wire");
+    assert_eq!(r.tx.len(), 1, "the port must forward it too");
+    assert_eq!(
+        c.tx[0], r.tx[0],
+        "the forwarded frame must be byte-identical -- a router that forwards a \
+         different packet than it received is worse than one that forwards none"
+    );
+    // And what went out is what came in: forwarding must not mutate the packet.
+    assert_eq!(c.tx[0], frame, "the C forwards the frame unchanged");
+}
+
+/// Nothing leaks, whatever the node decides to do with a packet.
+///
+/// Delivery, forwarding and dropping all take a buffer out of the pool; each must put it
+/// back. The C's own robustness suite exists to catch this, and a leak here would starve
+/// the node in orbit long after the packet that caused it was forgotten.
+#[test]
+fn no_path_through_the_node_leaks_a_buffer() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR));
+    assert_eq!(c_node_bind(10), 0);
+
+    let before = c_node_buf_free();
+    let mut rng = Rng(0x0DE_0002);
+
+    for _ in 0..400 {
+        // A spread across every outcome: delivered, forwarded, dropped for no route,
+        // dropped for an unbound port.
+        let dst = match rng.next() % 4 {
+            0 => NODE_ADDR, // to us, bound port
+            1 => 18,        // forwardable, egress subnet
+            2 => 2,         // no route, no interface subnet
+            _ => NODE_ADDR, // to us, unbound port below
+        };
+        let dport = if rng.next() % 4 == 3 { 11 } else { 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 3,
+            dst,
+            dport,
+            sport: 4,
+        };
+        let len = (rng.next() % 20) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let frame = framed(version, id, &payload);
+
+        let _ = c_node_exchange(&frame, &[10]);
+    }
+
+    assert_eq!(
+        c_node_buf_free(),
+        before,
+        "the C node leaked {} buffers over 400 exchanges",
+        before - c_node_buf_free()
+    );
+}

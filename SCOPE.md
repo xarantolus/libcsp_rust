@@ -344,3 +344,36 @@ whoever maintains the fork can see what was found and decide for themselves.
     UART. Not a defect in the framing, but a deployment default sharp enough that
     `kiss::encode`'s documentation now states it, backed by a differential test against the
     real `csp_kiss_rx`.
+
+---
+
+## Port defects found by the node-level differential harness
+
+Not divergences from the C — **bugs in this port**, found on 2026-08-25 by building the
+Rust-node-against-C-node harness that the plan called for and the branches were reported
+done without.
+
+1. **A forwarded packet was destroyed and never sent.** `Router::forward` reported
+   `Routed::Forwarded { iface, via }` and then `drop(packet)`, with a comment deferring to
+   a `Csp::forward` **that was never written**. Nothing anywhere re-sent it. So the node
+   routed nothing at all: every packet addressed to another node was silently discarded
+   while the router reported success and incremented `forwarded`. `Routed::Forwarded` now
+   carries the pool slot index, reclaimed with `Node::take_forwarded`.
+
+   The shape of the enum caused the bug: `Routed` has no lifetime or size parameters, so
+   there was nowhere to put the packet, and dropping it compiled.
+
+   It survived 451 unit tests, the `csp::router` audit and the `csp::node` audit. What
+   the unit tests asserted was the *interface index* the router chose — never that a frame
+   reached a wire. The C-node comparison found it in one test.
+
+2. **`SHIM_PORTS` was 8 while `CSP_PORT_MAX_BIND` is 16** (harness, not the port): binding
+   port 10 returned an error nobody checked, so the first version of the harness compared
+   "C delivered nothing" against "Rust delivered correctly" and looked like a port bug.
+   Checking the C's own return code is what separated the two.
+
+**Still open, and now visible:** `Router::forward` uses the single-destination
+`routes.find`, not the `find_all` fan-out and default-interface fallback that
+`Node::resolve` implements. So the router path still cannot forward to redundant routes
+or fall back to a default interface — the fix for that landed in `resolve` and the router
+does not call it. Recorded rather than fixed: it is a design change, not a patch.

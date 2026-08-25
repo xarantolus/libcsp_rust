@@ -1,12 +1,15 @@
 [package]
 name = "difftest"
-description = "Differential tests: run csp-core and the C libcsp on the same inputs and compare. Dev-only — links C, and is never part of a shipped crate."
+description = "Differential tests: run the Rust port and the C libcsp on the same inputs and compare, at both the codec level and the node level. Dev-only — links C, and is never part of a shipped crate."
 version.workspace = true
 edition.workspace = true
 publish = false
 
 [dependencies]
 csp-core = { path = "../csp-core" }
+# The node layer. Without this the harness can only reach the codecs, which is why the
+# routing fan-out went unnoticed for as long as it did.
+csp = { path = "../csp" }
 
 [build-dependencies]
 cc = "1"
