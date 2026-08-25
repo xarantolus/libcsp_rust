@@ -221,7 +221,42 @@ the scarcest resource on a node (8 by default, 16 in flight).
 interface that is neither side is **refused**; the C's `if/else` has no third branch and
 injects it into side A.
 
+## Routing: a packet has destinations, plural
+
+`csp_send_direct` does not pick one destination. It collects **every** routing-table entry
+tied for the longest prefix and sends a clone to each, the last getting the original; if no
+route matched, it does the same over every interface marked as a default. Redundant links
+and broadcast-to-all-interfaces are both configured that way, so an API that resolves to
+one destination silently makes both single-path.
+
+```rust
+let dests = node.resolve(dst, routed_from)?;   // Err(Unroutable::NoRoute | ::SplitHorizon)
+for d in dests.as_slice() {
+    // d.iface, d.via -- a named struct, because two small unsigned integers in a tuple
+    // are one destructuring away from routing every packet to the wrong place
+}
+// dests.clones_needed() copies, then the original for the last
+```
+
+`route_from` keeps the single-destination shape for the common case and returns the first.
+
+`resolve` applies **split horizon** to both paths: a destination on the interface the
+packet arrived on is skipped, or a forwarded packet goes straight back where it came from.
+And a routing-table match suppresses the default fallback entirely — even when split
+horizon leaves that match unusable — because the C returns as soon as `route_found` is set.
+
+Note how this composes with `IfList::check_default` (`csp_iflist_check_dfl`): if nothing is
+marked as a default, **every** interface except loopback becomes one. A node with no routes
+and no configured default therefore floods every packet onto every link. That is libcsp's
+intent for a zero-config node; it is not what the code looks like it does.
+
 ## Connections
+
+`node.conn_info(handle)` returns src, dst, dport, sport and opts in **one** fallible
+lookup. The C has five separate calls (`csp_conn_dst`, `csp_conn_src`, `csp_conn_dport`,
+`csp_conn_sport`, `csp_conn_flags`) and the port mirrored them; a caller logging a
+connection made and unwrapped all five. The individual accessors remain for the cases that
+want one field.
 
 Handles are generation-tagged. Closing a connection and opening a new one recycles the
 index, so a caller holding the old handle would otherwise operate on someone else's
@@ -243,11 +278,20 @@ get wrong at *runtime* stays in the error enum.
 
 ## Testing
 
-- **254 tests** across the crates.
+- **449 tests** across the crates.
 - **922 golden vectors** captured from the running C library — real wire bytes, after
   `csp_id_prepend`, after SFP headers, after CFP fragmentation.
-- **12 differential tests** in `difftest/`, ~3M random inputs per run, linking the real C
-  and comparing. Dev-only: the shipped crates contain no C.
+- **19 differential tests** in `difftest/`, millions of random inputs per run, linking the
+  real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
+  codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
+  lookups, and the real `csp_kiss_rx` state machine.
+- Every module carries a written audit in `AUDIT.md` rating it against the C
+  function by function, and every intentional divergence is numbered in `SCOPE.md`.
 
 Deliberate divergences are asserted **as divergences**, so a regression back toward C
 behaviour fails rather than passes.
+
+Every random generator carries an assertion on how much of its output actually reached the
+code under test. Two versions of the KISS fuzz test passed while exercising nothing —
+`CSP_ENABLE_KISS_CRC` is on by default, so random bytes are rejected essentially always —
+and the coverage assertion is what caught it.

@@ -22,6 +22,15 @@
 //! FreeRTOS and Zephyr ones, so whether an application can override them depends on which
 //! platform it built for.
 //!
+//! # `csp_panic` has no counterpart here
+//!
+//! libcsp's fifteenth hook is `csp_panic(const char *)`, called when the library reaches a
+//! state it cannot continue from. Rust already has that mechanism and the application
+//! already owns it: in `no_std` the `#[panic_handler]` is the binary's to define, so a
+//! `csp_panic` method would be a second, weaker way to do the same thing. The invariants
+//! that would call it are compile-time assertions where they can be and typed errors
+//! where they cannot.
+
 //! # The input tap must be able to clone
 //!
 //! `csp_input_hook` is not a filter — the payload board's side-link relay uses it to
@@ -138,6 +147,36 @@ pub trait Hooks<const B: usize, const SZ: usize> {
         Some(len)
     }
 
+    /// Read `out.len()` bytes of node memory at `addr`, for CMP `PEEK`.
+    ///
+    /// **Defaults to refusing.** In libcsp this is `csp_cmp_memcpy`, and its default
+    /// implementation (`csp_cmp_mem.c:15`) is a bare `memcpy` with no validation
+    /// whatsoever — the only check anywhere on the path is `len <= 200`. So a node built
+    /// with CMP, which is the default, will read any 32-bit address a peer names and send
+    /// the contents back. The 64-bit variants `csp_cmp_memread64`/`csp_cmp_memwrite64`
+    /// default to `CSP_ERR_DRIVER`, i.e. refusing; that the 32-bit pair does not is the
+    /// tell that its default is an oversight rather than a decision.
+    ///
+    /// A node that genuinely wants peek/poke — for a memory dump service, say — implements
+    /// this for the specific region it is willing to expose.
+    ///
+    /// Note also that libcsp's `csp_cmp_set_memcpy`, the function an integrator would
+    /// reach for to install a validating replacement, has an empty body: it takes the
+    /// function pointer, discards it, and returns. It is marked `CSP_DEPRECATED`, so a
+    /// compiler warning is the only thing standing between that call and a false sense of
+    /// security.
+    fn mem_read(&self, addr: u64, _out: &mut [u8]) -> csp_core::Result<()> {
+        Err(csp_core::Error::AddressRefused { addr })
+    }
+
+    /// Write `data` to node memory at `addr`, for CMP `POKE`. **Defaults to refusing.**
+    ///
+    /// Same story as [`mem_read`](Self::mem_read), one step worse: the default C
+    /// implementation lets a peer write arbitrary memory.
+    fn mem_write(&mut self, addr: u64, _data: &[u8]) -> csp_core::Result<()> {
+        Err(csp_core::Error::AddressRefused { addr })
+    }
+
     /// A routing decision was made for an ingress packet.
     ///
     /// The DEDRA feed uses this to learn reverse routes: both peer UARTs share a source
@@ -184,16 +223,27 @@ mod tests {
         let mut h = NoHooks;
         assert!(!Hooks::<4, 264>::set_clock(
             &mut h,
-            Timestamp { tv_sec: 1_700_000_000, tv_nsec: 0 }
+            Timestamp {
+                tv_sec: 1_700_000_000,
+                tv_nsec: 0
+            }
         ));
     }
 
     #[test]
     fn an_unset_timestamp_is_recognisable() {
         assert!(Timestamp::UNSET.is_unset());
-        assert!(!Timestamp { tv_sec: 1, tv_nsec: 0 }.is_unset());
+        assert!(!Timestamp {
+            tv_sec: 1,
+            tv_nsec: 0
+        }
+        .is_unset());
         // tv_sec == 0 is already reserved on the wire by csp_cmp_clock_handler.
-        assert!(Timestamp { tv_sec: 0, tv_nsec: 999 }.is_unset());
+        assert!(Timestamp {
+            tv_sec: 0,
+            tv_nsec: 999
+        }
+        .is_unset());
     }
 
     /// A tap that relays broadcasts, as the payload side-link relay does.
@@ -224,7 +274,14 @@ mod tests {
         let mut tap = RelayTap::default();
 
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 31, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 31,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"broadcast").unwrap();
 
         tap.on_input(0, &p);
@@ -242,7 +299,14 @@ mod tests {
         let pool = P::new();
         let mut tap = RelayTap::default();
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 31, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 31,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"broadcast").unwrap();
         let _rest: [_; 3] = core::array::from_fn(|_| pool.acquire(0).unwrap());
 
@@ -287,7 +351,10 @@ mod tests {
         assert_eq!(Hooks::<4, 264>::mem_free(&n), 4096);
         assert_eq!(Hooks::<4, 264>::uptime_s(&n), 3600);
 
-        let t = Timestamp { tv_sec: 1_700_000_000, tv_nsec: 42 };
+        let t = Timestamp {
+            tv_sec: 1_700_000_000,
+            tv_nsec: 42,
+        };
         assert!(Hooks::<4, 264>::set_clock(&mut n, t));
         assert_eq!(Hooks::<4, 264>::clock(&n), t);
 
@@ -296,6 +363,75 @@ mod tests {
             PowerAction::Shutdown
         );
         assert!(n.rebooted);
+    }
+
+    #[test]
+    fn peek_and_poke_are_refused_until_a_node_opts_in() {
+        // libcsp's default csp_cmp_memcpy is a bare memcpy with no validation, so a node
+        // built with CMP -- the default -- reads and writes any address a peer names. The
+        // 64-bit variants refuse by default; the 32-bit pair does not.
+        let mut h = NoHooks;
+        let mut out = [0u8; 8];
+        assert_eq!(
+            Hooks::<4, 264>::mem_read(&h, 0x2000_0000, &mut out),
+            Err(csp_core::Error::AddressRefused { addr: 0x2000_0000 })
+        );
+        assert_eq!(out, [0u8; 8], "and nothing was written into the reply");
+        assert_eq!(
+            Hooks::<4, 264>::mem_write(&mut h, 0x0800_0000, &[0xff; 4]),
+            Err(csp_core::Error::AddressRefused { addr: 0x0800_0000 }),
+            "least of all a write into the flash image"
+        );
+    }
+
+    /// A node that exposes exactly one region, which is how peek should be used.
+    struct MemDump {
+        base: u64,
+        region: [u8; 16],
+    }
+
+    impl MemDump {
+        fn window(&self, addr: u64, len: usize) -> Option<core::ops::Range<usize>> {
+            let off = addr.checked_sub(self.base)? as usize;
+            let end = off.checked_add(len)?;
+            (end <= self.region.len()).then_some(off..end)
+        }
+    }
+
+    impl Hooks<4, 264> for MemDump {
+        fn mem_read(&self, addr: u64, out: &mut [u8]) -> csp_core::Result<()> {
+            let r = self
+                .window(addr, out.len())
+                .ok_or(csp_core::Error::AddressRefused { addr })?;
+            out.copy_from_slice(&self.region[r]);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_node_that_opts_in_still_bounds_the_region() {
+        let m = MemDump {
+            base: 0x2000_0000,
+            region: *b"0123456789abcdef",
+        };
+        let mut out = [0u8; 4];
+        assert!(Hooks::<4, 264>::mem_read(&m, 0x2000_0004, &mut out).is_ok());
+        assert_eq!(&out, b"4567");
+
+        // One byte past the end.
+        let mut big = [0u8; 4];
+        assert!(Hooks::<4, 264>::mem_read(&m, 0x2000_000d, &mut big).is_err());
+        // Below the base -- the subtraction must not wrap into a huge offset.
+        assert!(Hooks::<4, 264>::mem_read(&m, 0x1fff_ffff, &mut big).is_err());
+        // The whole region exactly.
+        let mut all = [0u8; 16];
+        assert!(Hooks::<4, 264>::mem_read(&m, 0x2000_0000, &mut all).is_ok());
+        // And writes are still refused, because MemDump did not implement mem_write.
+        let mut m2 = MemDump {
+            base: 0x2000_0000,
+            region: [0; 16],
+        };
+        assert!(Hooks::<4, 264>::mem_write(&mut m2, 0x2000_0000, &[1]).is_err());
     }
 
     #[test]
@@ -311,6 +447,9 @@ mod tests {
         a.on_input(0, &p);
         b.on_input(0, &p);
         assert_eq!(a.seen, 1);
-        assert_eq!(b.seen, 1, "two implementations are two objects, not a link race");
+        assert_eq!(
+            b.seen, 1,
+            "two implementations are two objects, not a link race"
+        );
     }
 }

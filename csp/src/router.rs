@@ -22,6 +22,7 @@ use crate::conn::{self, Handle};
 use crate::dedup::Dedup;
 use crate::pool::{Packet, Pool};
 use crate::qfifo::Qfifo;
+use csp_core::security::{self, Refusal};
 use csp_core::{Id, Version};
 
 #[cfg(feature = "rtable")]
@@ -83,6 +84,11 @@ pub enum DropReason {
     ReceiveQueueFull,
     /// The frame did not decode.
     Malformed,
+    /// The endpoint's security policy refused it.
+    ///
+    /// Distinct from every other reason: this one means the packet arrived intact and was
+    /// turned away on policy, which is an operational signal rather than a fault.
+    Refused(Refusal),
 }
 
 /// Counters the router keeps.
@@ -97,6 +103,10 @@ pub struct Counters {
     pub conn_table_full: u32,
     pub rx_queue_full: u32,
     pub malformed: u32,
+    /// Authentication failures, kept apart from `rx_error` as the C does.
+    pub auth_error: u32,
+    /// Other receive errors from the security policy.
+    pub rx_error: u32,
 }
 
 /// The mutable half of a node: everything the router touches.
@@ -124,6 +134,16 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     promisc_missed: u32,
     /// Counters.
     pub counters: Counters,
+    /// Options every bound port requires of incoming packets.
+    ///
+    /// The C keeps these per socket; one policy for the node is the shape both firmware
+    /// consumers actually use, since each binds `CSP_ANY` once.
+    pub endpoint_opts: u32,
+    /// HMAC key, if one is configured.
+    ///
+    /// `None` means a packet claiming authentication cannot be verified, and is refused
+    /// rather than trusted.
+    pub hmac_key: Option<&'static [u8]>,
     /// Connections delivered to but not yet accepted by the application.
     ///
     /// One queue, not one per port: every consumer of the C binds `CSP_ANY` and dispatches
@@ -163,6 +183,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             promisc_enabled: false,
             promisc_missed: 0,
             counters: Counters::default(),
+            endpoint_opts: 0,
+            hmac_key: None,
             accept: [None; 8],
             accept_len: 0,
             accept_missed: 0,
@@ -187,9 +209,43 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     }
 
     /// Release a port.
-    pub fn unbind(&mut self, port: u8) {
-        if (port as usize) < PORTS {
-            self.bound[port as usize] = false;
+    /// Stop accepting on a port, closing every server connection still open on it.
+    ///
+    /// Returns how many connections were closed and the slot indices to release.
+    ///
+    /// `csp_socket_close` drains the socket's queue for the same reason: without it a
+    /// connection created before the unbind stays acceptable, and `accept` keeps handing
+    /// out connections for a port nothing is serving any more.
+    ///
+    /// The C also stops after unbinding the **first** port that names the socket
+    /// (`csp_port.c:145`, `break`), even though `csp_bind` happily binds one socket to
+    /// several ports — it only checks that the *port* is free. So closing a socket bound
+    /// to ports 10 and 11 leaves port 11 pointing at a socket whose queue has just been
+    /// drained. Here a port is unbound by number, so the situation cannot arise.
+    pub fn unbind(&mut self, port: u8, drained: &mut [u16]) -> (usize, usize) {
+        if (port as usize) >= PORTS {
+            return (0, 0);
+        }
+        self.bound[port as usize] = false;
+        let r = self.conns.close_port(port, drained);
+        self.purge_dead_accepts();
+        r
+    }
+
+    /// Drop backlog entries whose connection is no longer open.
+    ///
+    /// The accept backlog holds handles, and a connection can be closed underneath one —
+    /// by [`unbind`](Self::unbind) or by the idle sweep in [`tick`](Self::tick). Without
+    /// this, `accept` hands out a handle that every later call rejects, and the caller has
+    /// to learn the connection is dead by being told so three times.
+    fn purge_dead_accepts(&mut self) {
+        for slot in self.accept.iter_mut() {
+            if let Some(h) = *slot {
+                if !self.conns.is_live(h) {
+                    *slot = None;
+                    self.accept_len -= 1;
+                }
+            }
         }
     }
 
@@ -282,9 +338,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// One step of the router.
     ///
     /// Returns [`Routed::Idle`] when there is nothing to do, which is not an error.
-    pub fn work<'p, const B: usize, const SZ: usize>(
+    pub fn work<const B: usize, const SZ: usize>(
         &mut self,
-        pool: &'p Pool<B, SZ>,
+        pool: &Pool<B, SZ>,
         now_ms: u32,
     ) -> Routed {
         let Some((packet, _iface)) = self.qfifo.pop(pool) else {
@@ -346,13 +402,43 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
 
     fn deliver_local<'p, const B: usize, const SZ: usize>(
         &mut self,
-        packet: Packet<'p, B, SZ>,
+        mut packet: Packet<'p, B, SZ>,
         id: Id,
         now_ms: u32,
     ) -> Routed {
         if !self.is_bound(id.dport) {
             self.counters.port_not_bound += 1;
             return Routed::Dropped(DropReason::PortNotBound);
+        }
+
+        // The endpoint's policy, before the application sees anything. This is the only
+        // thing standing between a node configured to demand HMAC and an unauthenticated
+        // peer -- and the "required but absent" half is silent when it is missing.
+        let verified_len = packet.with_payload(|body| {
+            security::check(
+                self.endpoint_opts,
+                &id,
+                &[],
+                body,
+                csp_core::crc32::Coverage::PayloadOnly,
+                self.hmac_key,
+                security::Support::default(),
+            )
+            .map(|stripped| stripped.len())
+        });
+        match verified_len {
+            Ok(n) => {
+                // Drop whatever the policy stripped (CRC, MAC) so the application sees
+                // only the payload.
+                packet.with_payload_mut(|_| (n, ()));
+            }
+            Err(refusal) => {
+                match refusal.counter() {
+                    security::Counter::AuthError => self.counters.auth_error += 1,
+                    security::Counter::RxError => self.counters.rx_error += 1,
+                }
+                return Routed::Dropped(DropReason::Refused(refusal));
+            }
         }
 
         let handle = match self.conns.find(&id) {
@@ -439,13 +525,19 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         conn_timeout_ms: u32,
     ) -> usize {
         let mut drained = [0u16; 32];
-        let (closed, n) = self.conns.expire_idle(now_ms, conn_timeout_ms, &mut drained);
+        let (closed, n) = self
+            .conns
+            .expire_idle(now_ms, conn_timeout_ms, &mut drained);
         for &idx in &drained[..n] {
             drop(pool.from_index(idx));
         }
 
         #[cfg(feature = "rdp")]
         let closed = closed + self.conns.tick_rdp(now_ms, 5);
+
+        if closed > 0 {
+            self.purge_dead_accepts();
+        }
 
         closed
     }
@@ -458,9 +550,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// Returns [`Bridged::Idle`] on an empty queue. The C prints a message and returns
     /// void when the interfaces are unset, so a caller cannot tell a misconfigured bridge
     /// from an idle one; here the pair is a parameter and cannot be unset.
-    pub fn bridge_work<'p, const B: usize, const SZ: usize>(
+    pub fn bridge_work<const B: usize, const SZ: usize>(
         &mut self,
-        pool: &'p Pool<B, SZ>,
+        pool: &Pool<B, SZ>,
         a: u8,
         b: u8,
         now_ms: u32,
@@ -641,13 +733,27 @@ mod tests {
         // Four distinct peers fill the four connection slots.
         for sport in 0..4u8 {
             let mut p = pool.acquire(0).unwrap();
-            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport });
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 20,
+                sport,
+            });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
             assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
         }
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 9 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 9,
+        });
         p.set_payload(b"x").unwrap();
         r.receive(p, 0);
         assert_eq!(
@@ -668,7 +774,10 @@ mod tests {
             assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
         }
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
-        assert_eq!(r.work(&pool, 0), Routed::Dropped(DropReason::ReceiveQueueFull));
+        assert_eq!(
+            r.work(&pool, 0),
+            Routed::Dropped(DropReason::ReceiveQueueFull)
+        );
         assert_eq!(r.counters.rx_queue_full, 1);
     }
 
@@ -699,7 +808,10 @@ mod tests {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
             let _ = r.work(&pool, 0);
         }
-        assert!(r.promisc_missed() > 0, "overflow must be counted, not silent");
+        assert!(
+            r.promisc_missed() > 0,
+            "overflow must be counted, not silent"
+        );
     }
 
     #[test]
@@ -724,7 +836,11 @@ mod tests {
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
         r.work(&pool, 0);
-        assert_eq!(pool.available(), 15, "the delivered packet is held on the conn");
+        assert_eq!(
+            pool.available(),
+            15,
+            "the delivered packet is held on the conn"
+        );
 
         r.tick(&pool, 30_000, 10_000);
         assert_eq!(pool.available(), 16, "expiry must release it, not leak it");
@@ -844,12 +960,132 @@ mod tests {
         r.bind(20).unwrap();
         for sport in 0..12u8 {
             let mut p = pool.acquire(0).unwrap();
-            p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport });
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 20,
+                sport,
+            });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
             r.work(&pool, 0);
         }
         assert!(r.accept_missed() > 0, "backlog overflow must be counted");
+    }
+
+    #[test]
+    fn an_endpoint_that_requires_a_checksum_refuses_a_bare_packet() {
+        // csp_route_security_check. Without it a node configured to demand a protection
+        // silently stops demanding it -- every packet still arrives.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        r.endpoint_opts = csp_core::security::opts::CRC32_REQ;
+
+        r.receive(pkt(&pool, ME, 20, b"unprotected"), 0);
+        assert_eq!(
+            r.work(&pool, 0),
+            Routed::Dropped(DropReason::Refused(Refusal::ChecksumRequired))
+        );
+        assert_eq!(r.counters.rx_error, 1);
+        assert_eq!(pool.available(), 16, "and the packet is released");
+    }
+
+    #[test]
+    fn a_packet_with_a_good_checksum_is_accepted_and_stripped() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        r.endpoint_opts = csp_core::security::opts::CRC32_REQ;
+
+        let mut buf = [0u8; 64];
+        let n = csp_core::crc32::append(
+            &[],
+            b"protected",
+            csp_core::crc32::Coverage::PayloadOnly,
+            &mut buf,
+        )
+        .unwrap();
+
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(&buf[..n]).unwrap();
+        r.receive(p, 0);
+
+        let conn = match r.work(&pool, 0) {
+            Routed::Delivered { conn, .. } => conn,
+            other => panic!("expected delivery, got {other:?}"),
+        };
+        let idx = r.conns.dequeue_rx(conn).unwrap().unwrap();
+        let got = pool.from_index(idx).unwrap();
+        got.with_payload(|d| {
+            assert_eq!(
+                d, b"protected",
+                "the checksum must be stripped before delivery"
+            )
+        });
+    }
+
+    #[test]
+    fn a_corrupted_checksum_is_refused() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = csp_core::crc32::append(
+            &[],
+            b"protected",
+            csp_core::crc32::Coverage::PayloadOnly,
+            &mut buf,
+        )
+        .unwrap();
+        buf[0] ^= 0x01;
+
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(&buf[..n]).unwrap();
+        r.receive(p, 0);
+
+        assert_eq!(
+            r.work(&pool, 0),
+            Routed::Dropped(DropReason::Refused(Refusal::BadChecksum))
+        );
+    }
+
+    #[test]
+    fn authentication_failures_are_counted_apart_from_link_errors() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        r.endpoint_opts = csp_core::security::opts::HMAC_REQ;
+
+        r.receive(pkt(&pool, ME, 20, b"unauthenticated"), 0);
+        assert!(matches!(
+            r.work(&pool, 0),
+            Routed::Dropped(DropReason::Refused(Refusal::AuthenticationRequired))
+        ));
+        assert_eq!(
+            r.counters.auth_error, 1,
+            "a rising autherr is its own signal"
+        );
+        assert_eq!(r.counters.rx_error, 0);
     }
 
     #[test]

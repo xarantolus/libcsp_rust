@@ -128,9 +128,7 @@ impl<const N: usize, const A: usize> IfList<N, A> {
             });
         }
         if self.find_by_name(name).is_some() {
-            // Two interfaces with one name makes CMP IF_STATS ambiguous, and the route
-            // text format unresolvable.
-            return Err(Error::TableFull);
+            return Err(Error::DuplicateName { name });
         }
         for (i, slot) in self.entries.iter_mut().enumerate() {
             if slot.is_none() {
@@ -151,7 +149,7 @@ impl<const N: usize, const A: usize> IfList<N, A> {
     pub fn remove(&mut self, index: u8) -> Result<()> {
         let i = index as usize;
         if i >= N || self.entries[i].is_none() {
-            return Err(Error::NoTransferInProgress);
+            return Err(Error::NoSuchInterface { index });
         }
         self.entries[i] = None;
         // Aliases pointing at it would otherwise resolve to a freed slot.
@@ -175,18 +173,20 @@ impl<const N: usize, const A: usize> IfList<N, A> {
 
     /// Look up by name — what CMP `IF_STATS` and the route text format use.
     pub fn find_by_name(&self, name: &str) -> Option<u8> {
-        self.entries.iter().enumerate().find_map(|(i, e)| {
-            e.as_ref()
-                .filter(|e| e.name == name)
-                .map(|_| i as u8)
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| e.as_ref().filter(|e| e.name == name).map(|_| i as u8))
     }
 
     /// Look up by exact address, including aliases.
     pub fn find_by_addr(&self, addr: u16) -> Option<u8> {
-        if let Some(i) = self.entries.iter().enumerate().find_map(|(i, e)| {
-            e.as_ref().filter(|e| e.addr == addr).map(|_| i as u8)
-        }) {
+        if let Some(i) = self
+            .entries
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| e.as_ref().filter(|e| e.addr == addr).map(|_| i as u8))
+        {
             return Some(i);
         }
         self.aliases
@@ -221,9 +221,45 @@ impl<const N: usize, const A: usize> IfList<N, A> {
 
     /// First interface marked as a default-route target.
     pub fn find_default(&self) -> Option<u8> {
-        self.entries.iter().enumerate().find_map(|(i, e)| {
-            e.as_ref().filter(|e| e.is_default).map(|_| i as u8)
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| e.as_ref().filter(|e| e.is_default).map(|_| i as u8))
+    }
+
+    /// Find the interface for which `addr` is the subnet broadcast address.
+    ///
+    /// `csp_iflist_get_by_broadcast`. Decides whether an inbound packet is a subnet
+    /// broadcast this node should accept even though it is not addressed to it.
+    pub fn find_by_broadcast(&self, addr: u16) -> Option<u8> {
+        self.indices().find(|&i| self.is_broadcast_for(addr, i))
+    }
+
+    /// If no interface is marked default, mark every one except loopback.
+    ///
+    /// `csp_iflist_check_dfl`, called from `csp_init`. It is how a zero-config node is
+    /// meant to work, and it is more aggressive than it looks: combined with the
+    /// default-route fallback in [`Node::resolve`](crate::Node::resolve), a node that never
+    /// set `is_default` and has no routes **floods every unroutable packet onto every
+    /// interface**. Intended behaviour, not a defect — but worth knowing before wondering
+    /// why a packet appeared on a link nothing routed it to.
+    ///
+    /// Returns how many interfaces were marked.
+    pub fn check_default(&mut self, loopback: Option<u8>) -> usize {
+        if self.find_default().is_some() {
+            return 0;
+        }
+        let mut n = 0;
+        for i in 0..N as u8 {
+            if Some(i) == loopback {
+                continue;
+            }
+            if let Some(e) = self.get_mut(i) {
+                e.is_default = true;
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Every registered index, in order.
@@ -300,7 +336,90 @@ mod tests {
         // format unresolvable.
         let mut l = list();
         l.add("CAN", 1, 5, false).unwrap();
-        assert_eq!(l.add("CAN", 2, 5, false), Err(Error::TableFull));
+        assert_eq!(
+            l.add("CAN", 2, 5, false),
+            Err(Error::DuplicateName { name: "CAN" }),
+            "a duplicate name is not a full table -- the caller needs to tell them apart"
+        );
+    }
+
+    #[test]
+    fn re_registering_an_interface_does_not_lose_the_ones_after_it() {
+        // csp_iflist_add sets ifc->next = NULL BEFORE walking the list to check for a
+        // duplicate. Re-adding an interface that is already in the list therefore unlinks
+        // every interface registered after it, then returns void with nothing reported.
+        // Add LOOP, add CAN, add LOOP again -- and CAN is gone from the node.
+        let mut l = list();
+        let lo = l.add("LOOP", 1, 5, false).unwrap();
+        let can = l.add("CAN", 2, 5, false).unwrap();
+        assert_eq!(l.len(), 2);
+
+        assert!(l.add("LOOP", 1, 5, false).is_err(), "refused, not accepted");
+        assert_eq!(l.len(), 2, "and nothing was unlinked");
+        assert!(l.get(lo).is_some());
+        assert!(
+            l.get(can).is_some(),
+            "the interface added after it survives"
+        );
+    }
+
+    #[test]
+    fn removing_an_unknown_interface_names_the_index() {
+        let mut l = list();
+        assert_eq!(l.remove(3), Err(Error::NoSuchInterface { index: 3 }));
+        let i = l.add("CAN", 1, 5, false).unwrap();
+        assert!(l.remove(i).is_ok());
+        assert_eq!(
+            l.remove(i),
+            Err(Error::NoSuchInterface { index: i }),
+            "removing twice is refused, not silently accepted"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_node_makes_every_interface_a_default() {
+        // csp_iflist_check_dfl, called from csp_init. Combined with the default-route
+        // fallback this means a node with no routes floods every packet onto every link.
+        let mut l = list();
+        let lo = l.add("LOOP", 1, 5, false).unwrap();
+        l.add("CAN", 2, 5, false).unwrap();
+        l.add("KISS", 3, 5, false).unwrap();
+
+        assert_eq!(l.check_default(Some(lo)), 2, "all but loopback");
+        assert!(!l.get(lo).unwrap().is_default, "loopback is exempt");
+        assert!(l.get(1).unwrap().is_default);
+        assert!(l.get(2).unwrap().is_default);
+    }
+
+    #[test]
+    fn a_configured_default_is_left_alone() {
+        let mut l = list();
+        l.add("LOOP", 1, 5, false).unwrap();
+        l.add("CAN", 2, 5, true).unwrap();
+        assert_eq!(
+            l.check_default(Some(0)),
+            0,
+            "the user configured it correctly"
+        );
+        assert!(
+            !l.get(0).unwrap().is_default,
+            "and nothing else was promoted"
+        );
+    }
+
+    #[test]
+    fn a_subnet_broadcast_resolves_to_its_interface() {
+        // csp_iflist_get_by_broadcast: an inbound packet for a subnet broadcast is for
+        // this node even though it is not addressed to it.
+        let mut l = list();
+        l.add("CAN", 1, 5, false).unwrap();
+        let bcast = 31; // 5 host bits all set
+        assert_eq!(l.find_by_broadcast(bcast), Some(0));
+        assert_eq!(
+            l.find_by_broadcast(8),
+            None,
+            "an ordinary address is not one"
+        );
     }
 
     #[test]
@@ -340,13 +459,8 @@ mod tests {
     fn a_full_registry_reports_rather_than_overwriting() {
         let mut l = list();
         for i in 0..4u16 {
-            l.add(
-                ["A", "B", "C", "D"][i as usize],
-                i,
-                5,
-                false,
-            )
-            .unwrap();
+            l.add(["A", "B", "C", "D"][i as usize], i, 5, false)
+                .unwrap();
         }
         assert_eq!(l.add("E", 9, 5, false), Err(Error::TableFull));
     }
@@ -357,7 +471,10 @@ mod tests {
         let mut l = list();
         let i = l.add("CAN", 0b01000, 3, false).unwrap();
         assert!(l.is_within_subnet(0b01000, i));
-        assert!(l.is_within_subnet(0b01011, i), "same network, different host");
+        assert!(
+            l.is_within_subnet(0b01011, i),
+            "same network, different host"
+        );
         assert!(!l.is_within_subnet(0b10000, i), "different network");
         assert_eq!(l.find_by_subnet(0b01011), Some(i));
         assert_eq!(l.find_by_subnet(0b10000), None);
@@ -396,7 +513,11 @@ mod tests {
         l.add_alias(7, can).unwrap();
         assert!(l.is_alias(7));
         assert!(!l.is_alias(8));
-        assert_eq!(l.find_by_addr(7), Some(can), "an alias resolves like an address");
+        assert_eq!(
+            l.find_by_addr(7),
+            Some(can),
+            "an alias resolves like an address"
+        );
         assert_eq!(l.find_by_addr(1), Some(can), "and so does the real address");
     }
 
@@ -456,7 +577,10 @@ mod tests {
         }
         impl FromIterator<u8> for Vec8 {
             fn from_iter<I: IntoIterator<Item = u8>>(it: I) -> Self {
-                let mut v = Vec8 { items: [0; 8], len: 0 };
+                let mut v = Vec8 {
+                    items: [0; 8],
+                    len: 0,
+                };
                 for i in it {
                     v.items[v.len] = i;
                     v.len += 1;
@@ -472,7 +596,9 @@ mod tests {
         // csp_if_lo.addr: self-addressed packets would go out on the wire instead of
         // looping back.
         let mut l = list();
-        let i = l.add("LOOP", 11, Version::V1.host_bits() as u16, false).unwrap();
+        let i = l
+            .add("LOOP", 11, Version::V1.host_bits() as u16, false)
+            .unwrap();
         assert!(
             l.is_broadcast_for(11, i),
             "with netmask == host_bits the interface's own address reads as broadcast"

@@ -60,11 +60,7 @@ pub const fn max_mtu(buffer_size: usize, options: u32) -> usize {
     if options & opts::HMAC != 0 {
         overhead += HMAC_LEN;
     }
-    if buffer_size <= overhead {
-        0
-    } else {
-        buffer_size - overhead
-    }
+    buffer_size.saturating_sub(overhead)
 }
 
 /// A parsed fragment: where it sits in the reassembled message, and its payload.
@@ -324,7 +320,10 @@ mod tests {
         let n = Fragment::encode(200, 100, &[1, 2, 3], &mut out).unwrap();
         assert_eq!(
             Fragment::parse(true, &out[..n]),
-            Err(Error::OffsetBeyondTotal { offset: 200, total: 100 })
+            Err(Error::OffsetBeyondTotal {
+                offset: 200,
+                total: 100
+            })
         );
     }
 
@@ -386,7 +385,10 @@ mod tests {
         // The error says exactly which byte was expected, so a caller can log the gap.
         assert_eq!(
             r.push(&f2, &mut out),
-            Err(Error::UnexpectedOffset { expected: 0, got: 8 })
+            Err(Error::UnexpectedOffset {
+                expected: 0,
+                got: 8
+            })
         );
     }
 
@@ -407,7 +409,10 @@ mod tests {
         assert!(!r.push(&a, &mut out).unwrap());
         assert_eq!(
             r.push(&b, &mut out),
-            Err(Error::InconsistentTotal { expected: 16, got: 99 })
+            Err(Error::InconsistentTotal {
+                expected: 16,
+                got: 99
+            })
         );
     }
 
@@ -432,6 +437,9 @@ mod tests {
             total: 16,
             payload: &[0u8; 8],
         };
-        assert_eq!(r.push(&f, &mut out), Err(Error::BufferTooSmall { needed: 8 }));
+        assert_eq!(
+            r.push(&f, &mut out),
+            Err(Error::BufferTooSmall { needed: 8 })
+        );
     }
 }

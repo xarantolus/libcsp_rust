@@ -20,6 +20,22 @@
 use crate::pool::Packet;
 use csp_core::Result;
 
+/// What happened to a packet handed to [`Interface::send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// It went out on the link.
+    Transmitted,
+    /// It is addressed to this interface itself and must be fed back in with
+    /// [`Router::receive`](crate::Router::receive) instead.
+    ///
+    /// `csp_can1_tx` and `csp_can2_tx` both open with this check, and it is easy to miss
+    /// because the *node* address and an *interface* address are not the same thing — a
+    /// node can hold several interfaces on different subnets. Without it, a packet
+    /// addressed to an interface goes out on the wire and comes back, or does not come
+    /// back at all.
+    Loopback,
+}
+
 // I2C, UDP and LOOP need no module of their own. Each is a *datagram* interface: one CSP
 // frame per link-layer frame, no segmentation, so the entire protocol logic is
 // `Interface::send` (prepend the header, hand over the frame) on transmit and
@@ -32,8 +48,24 @@ use csp_core::Result;
 
 /// Statistics every interface keeps.
 ///
-/// Plain counters. The C's equivalents are `uint8_t` globals written from ISR and task
-/// context with no synchronisation, which it documents as deliberate.
+/// Plain counters. The C's equivalents are written from ISR and task context with no
+/// synchronisation, which it documents as deliberate.
+///
+/// # `txbytes`/`rxbytes` count the frame, not the payload
+///
+/// The C counts `packet->length` on both sides — the **payload**, excluding the 4- or
+/// 6-byte CSP header it just prepended (`csp_io.c:282`, `csp_route.c:230`). A field
+/// documented as "Transmitted bytes" therefore under-reports what crossed the link by
+/// `header_size` per packet, which for the 8-byte telemetry packets this fleet sends is a
+/// third of the traffic. These count the framed length. Both sides use the same rule, so
+/// tx and rx remain comparable.
+///
+/// # `irq` is never incremented
+///
+/// Nothing in libcsp writes `iface->irq` — not the core, not the interfaces. It is
+/// declared, printed by `csp_iflist_print`, and reported over CMP `IF_STATS`
+/// (`csp_cmp_if_stats.c:27`), and it is structurally always zero. It is left here because
+/// a driver may fill it in, and [`Interface::note_irq`] is how.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub struct Stats {
@@ -110,28 +142,42 @@ impl<T> Interface<T> {
         self
     }
 
+    /// True if `dst` is this interface's own address.
+    ///
+    /// Aliases are resolved through [`IfList`](crate::IfList), which is where they live;
+    /// `csp_can2_tx` additionally consults `csp_addr_is_alias` here.
+    pub const fn is_self(&self, dst: u16) -> bool {
+        dst == self.addr
+    }
+
     /// Frame and send a packet, updating the counters.
     ///
     /// Prepending the header is done here rather than left to the driver. In the C it is
     /// the interface's job and it is easy to forget — a `nexthop` that reads
     /// `frame_begin`/`frame_length` without calling `csp_id_prepend` first sees a
     /// zero-length frame and cheerfully transmits nothing.
+    ///
+    /// Returns [`Sent::Loopback`] for a packet addressed to this interface, which the
+    /// caller must feed back in rather than transmit.
     pub fn send<'p, const N: usize, const SZ: usize>(
         &mut self,
         version: csp_core::Version,
         via: u16,
         packet: &mut Packet<'p, N, SZ>,
-    ) -> Result<()>
+    ) -> Result<Sent>
     where
         T: Transmit<'p, N, SZ>,
     {
+        if self.is_self(packet.id().dst) {
+            return Ok(Sent::Loopback);
+        }
         packet.prepend_header(version)?;
         let len = packet.with_frame(|f| f.len());
         match self.driver.transmit(via, packet) {
             Ok(()) => {
                 self.stats.tx += 1;
                 self.stats.txbytes += len as u32;
-                Ok(())
+                Ok(Sent::Transmitted)
             }
             Err(e) => {
                 self.stats.tx_error += 1;
@@ -140,10 +186,42 @@ impl<T> Interface<T> {
         }
     }
 
-    /// Record a received packet.
+    /// Record a received packet. `bytes` is the **framed** length, matching `txbytes`.
     pub fn note_rx(&mut self, bytes: usize) {
         self.stats.rx += 1;
         self.stats.rxbytes += bytes as u32;
+    }
+
+    /// Record a receive error: a packet that arrived but could not be used.
+    pub fn note_rx_error(&mut self) {
+        self.stats.rx_error += 1;
+    }
+
+    /// Record an authentication failure.
+    ///
+    /// Kept apart from [`note_rx_error`](Self::note_rx_error) because the two mean
+    /// different things operationally: a rising `autherr` is someone talking to you who
+    /// should not be, `rx_error` is usually a bad link.
+    pub fn note_auth_error(&mut self) {
+        self.stats.autherr += 1;
+    }
+
+    /// Record a refused packet against whichever counter it belongs to.
+    ///
+    /// This is the half the C leaves to each call site: `csp_route_security_check` returns
+    /// an error and the *caller* picks the counter, at six separate sites in
+    /// `csp_route.c`. Routing the decision through
+    /// [`Refusal::counter`](csp_core::security::Refusal::counter) makes it one rule.
+    pub fn note_refusal(&mut self, r: csp_core::security::Refusal) {
+        match r.counter() {
+            csp_core::security::Counter::AuthError => self.note_auth_error(),
+            csp_core::security::Counter::RxError => self.note_rx_error(),
+        }
+    }
+
+    /// Record an interrupt, for a driver that counts them.
+    pub fn note_irq(&mut self) {
+        self.stats.irq += 1;
     }
 
     /// Record a malformed frame.
@@ -200,7 +278,14 @@ mod tests {
 
     fn packet<'p>(pool: &'p P) -> Packet<'p, 4, 264> {
         let mut p = pool.acquire(0).unwrap();
-        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 });
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        });
         p.set_payload(b"payload").unwrap();
         p
     }
@@ -211,13 +296,18 @@ mod tests {
         let pool = P::new();
         let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
         let mut p = packet(&pool);
-        iface.send(Version::V1, 8, &mut p).unwrap();
+        assert_eq!(
+            iface.send(Version::V1, 8, &mut p).unwrap(),
+            Sent::Transmitted
+        );
 
         assert_eq!(iface.driver.n, 1);
         let len = iface.driver.lens[0];
         assert_eq!(len, 4 + 7, "header + payload, not just payload");
         assert_eq!(
-            Id::decode(Version::V1, &iface.driver.frames[0][..len]).unwrap().dst,
+            Id::decode(Version::V1, &iface.driver.frames[0][..len])
+                .unwrap()
+                .dst,
             8
         );
     }
@@ -253,7 +343,11 @@ mod tests {
             let mut p = packet(&pool);
             assert_eq!(pool.available(), before - 1);
             let _ = iface.send(Version::V1, 8, &mut p);
-            assert_eq!(pool.available(), before - 1, "still ours after a failed send");
+            assert_eq!(
+                pool.available(),
+                before - 1,
+                "still ours after a failed send"
+            );
         }
         assert_eq!(pool.available(), before, "and released exactly once");
     }
@@ -292,8 +386,23 @@ mod tests {
         // I2C, UDP and LOOP are all this: frame out, decode back in.
         let pool = P::new();
         for version in [Version::V1, Version::V2] {
-            let mut iface = Interface::new("LOOP", 1, 5, Loopback { last: [0; 64], len: 0 });
-            let id = Id { pri: 1, flags: 0x10, src: 11, dst: 11, dport: 20, sport: 10 };
+            let mut iface = Interface::new(
+                "LOOP",
+                1,
+                5,
+                Loopback {
+                    last: [0; 64],
+                    len: 0,
+                },
+            );
+            let id = Id {
+                pri: 1,
+                flags: 0x10,
+                src: 11,
+                dst: 11,
+                dport: 20,
+                sport: 10,
+            };
 
             let mut out = pool.acquire(0).unwrap();
             out.set_id(id);
@@ -310,6 +419,40 @@ mod tests {
     }
 
     #[test]
+    fn a_packet_addressed_to_the_interface_loops_back_instead_of_transmitting() {
+        // csp_can1_tx and csp_can2_tx both open with this check. Easy to miss, because
+        // the NODE address and an INTERFACE address are not the same thing.
+        let pool = P::new();
+        let mut iface = Interface::new("CAN", 7, 5, Recorder::new());
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 1,
+            dst: 7,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"to myself").unwrap();
+
+        assert_eq!(iface.send(Version::V1, 7, &mut p).unwrap(), Sent::Loopback);
+        assert_eq!(iface.driver.n, 0, "nothing may go out on the link");
+        assert_eq!(iface.stats.tx, 0);
+    }
+
+    #[test]
+    fn a_packet_for_anyone_else_still_transmits() {
+        let pool = P::new();
+        let mut iface = Interface::new("CAN", 7, 5, Recorder::new());
+        let mut p = packet(&pool);
+        assert_eq!(
+            iface.send(Version::V1, 8, &mut p).unwrap(),
+            Sent::Transmitted
+        );
+        assert_eq!(iface.driver.n, 1);
+    }
+
+    #[test]
     fn rx_and_error_counters_are_separate() {
         let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
         iface.note_rx(42);
@@ -320,5 +463,92 @@ mod tests {
         assert_eq!(iface.stats.frame, 1);
         assert_eq!(iface.stats.drop, 1);
         assert_eq!(iface.stats.rx_error, 0);
+    }
+
+    #[test]
+    fn byte_counters_include_the_header_and_agree_across_a_loopback() {
+        // The C counts packet->length on both sides -- the payload, excluding the header
+        // it just prepended. For an 8-byte telemetry packet that under-reports the link by
+        // a third. What matters most is that tx and rx use the same rule.
+        let pool = P::new();
+        let mut iface = Interface::new(
+            "LOOP",
+            1,
+            5,
+            Loopback {
+                last: [0; 64],
+                len: 0,
+            },
+        );
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 1,
+            flags: 0,
+            src: 11,
+            dst: 8,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"12345678").unwrap();
+        iface.send(Version::V1, 8, &mut p).unwrap();
+
+        assert_eq!(
+            iface.stats.txbytes,
+            4 + 8,
+            "header counted, not just payload"
+        );
+        iface.note_rx(iface.driver.len);
+        assert_eq!(
+            iface.stats.rxbytes, iface.stats.txbytes,
+            "same rule both ways"
+        );
+    }
+
+    #[test]
+    fn a_refusal_lands_on_the_counter_it_belongs_to() {
+        // The C picks the counter at each of six call sites in csp_route.c. One rule here.
+        use csp_core::security::Refusal;
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+
+        iface.note_refusal(Refusal::BadAuthentication);
+        iface.note_refusal(Refusal::AuthenticationRequired);
+        assert_eq!(iface.stats.autherr, 2);
+        assert_eq!(iface.stats.rx_error, 0, "auth failures are not link errors");
+
+        iface.note_refusal(Refusal::BadChecksum);
+        iface.note_refusal(Refusal::ChecksumRequired);
+        iface.note_refusal(Refusal::ReliabilityRequired);
+        iface.note_refusal(Refusal::Prohibited);
+        iface.note_refusal(Refusal::Unsupported);
+        assert_eq!(iface.stats.rx_error, 5);
+        assert_eq!(iface.stats.autherr, 2, "and the auth count is untouched");
+    }
+
+    #[test]
+    fn irq_is_zero_until_a_driver_reports_one() {
+        // Nothing in libcsp ever writes iface->irq, yet it is printed and reported over
+        // CMP IF_STATS. Here it is zero for the same reason but can actually be set.
+        let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
+        assert_eq!(iface.stats.irq, 0);
+        iface.note_irq();
+        assert_eq!(iface.stats.irq, 1);
+    }
+
+    #[test]
+    fn a_driver_that_reports_failure_is_counted_as_a_failure() {
+        // csp_if_udp_tx ignores sendto's return value and returns CSP_ERR_NONE even when
+        // the socket is missing, so a UDP interface counts every packet as transmitted and
+        // its tx_error is structurally zero. Transmit returns Result, so a driver that
+        // knows it failed can say so.
+        let pool = P::new();
+        let mut iface = Interface::new("UDP", 1, 5, Recorder::new());
+        iface.driver.fail = true;
+        for _ in 0..3 {
+            let mut p = packet(&pool);
+            let _ = iface.send(Version::V1, 8, &mut p);
+        }
+        assert_eq!(iface.stats.tx, 0, "nothing left the node");
+        assert_eq!(iface.stats.tx_error, 3);
+        assert_eq!(iface.stats.txbytes, 0, "and no bytes are claimed");
     }
 }

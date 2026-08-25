@@ -172,7 +172,10 @@ mod tests {
             Request::decode(ports::BUF_FREE, b"").unwrap(),
             Request::BufFree
         );
-        assert_eq!(Request::decode(ports::UPTIME, b"").unwrap(), Request::Uptime);
+        assert_eq!(
+            Request::decode(ports::UPTIME, b"").unwrap(),
+            Request::Uptime
+        );
     }
 
     #[test]
