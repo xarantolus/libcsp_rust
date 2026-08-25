@@ -18,6 +18,15 @@ ctest suite="": ctest-build
     if [ -n "{{suite}}" ]; then export CK_RUN_SUITE="{{suite}}"; fi
     ./build/ctest/ctest
 
+# Regenerate the corpus: what the C did, for the Rust side to replay.
+#
+# Byte-stable across runs by construction — every source of non-determinism in libcsp
+# reachable from here is driven by clock.c. `git diff --stat corpus/` on an unchanged tree
+# is the check that it stayed that way.
+corpus: ctest-build
+    mkdir -p corpus
+    ./build/ctest/ctest --trace corpus/ctest.jsonl
+
 # Run the C oracle under AddressSanitizer.
 #
 # suite_eth is excluded: libcsp has known out-of-bounds reads in the Ethernet

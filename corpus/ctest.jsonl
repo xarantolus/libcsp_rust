@@ -1,0 +1,1 @@
+{"suite":"rdp","case":"isn_is_a_function_of_the_clock","verdict":"c_only","observed":{"clock_ms":1234567,"snd_iss":17867,"snd_nxt":17868,"snd_una":17867}}
