@@ -27,37 +27,30 @@ use crate::{Error, Result};
 /// Bytes of trailer each fragment carries.
 pub const HEADER_LEN: usize = 8;
 
-/// Connection option bits, as used for MTU accounting.
-///
-/// These are *socket options*, and they are **not** the same numbers as the packet header
-/// [`flags`](crate::flags) — `RDP` is `0x02` in a header and `0x01` here.
-pub mod opts {
-    /// Reliable delivery.
-    pub const RDP: u32 = 0x01;
-    /// CRC-32C checksum.
-    pub const CRC32: u32 = 0x04;
-    /// HMAC authentication.
-    pub const HMAC: u32 = 0x40;
-}
-
 const RDP_HEADER_LEN: usize = 5;
 const CRC32_LEN: usize = 4;
 const HMAC_LEN: usize = 4;
 
-/// Largest fragment payload that still fits a `buffer_size` packet with `opts` in use.
+/// Largest fragment payload that still fits a `buffer_size` packet with `options` in use.
+///
+/// `options` is a mask of [`security::opts`](crate::security::opts) — the same bits the C
+/// calls `CSP_SO_*`, and **not** the packet header [`flags`](crate::flags), which use
+/// different numbers for the same three features.
 ///
 /// Every protocol that appends a trailer competes for the same buffer, and libcsp does no
 /// bounds check when appending — this accounting is the only thing keeping the writes in
 /// range. Get it wrong and the C overruns the packet.
 pub const fn max_mtu(buffer_size: usize, options: u32) -> usize {
+    use crate::security::opts;
+
     let mut overhead = HEADER_LEN;
-    if options & opts::RDP != 0 {
+    if options & opts::RDP_REQ != 0 {
         overhead += RDP_HEADER_LEN;
     }
-    if options & opts::CRC32 != 0 {
+    if options & opts::CRC32_REQ != 0 {
         overhead += CRC32_LEN;
     }
-    if options & opts::HMAC != 0 {
+    if options & opts::HMAC_REQ != 0 {
         overhead += HMAC_LEN;
     }
     buffer_size.saturating_sub(overhead)
@@ -262,15 +255,30 @@ impl Reassembler {
 mod tests {
     use super::*;
 
+    use crate::security::opts;
+
+    /// `max_mtu` charges four bytes for CRC32 and four for HMAC, so swapping the two
+    /// constants gives the same answer for every input and no MTU test can see it. This
+    /// pins the numbers themselves against `csp_types.h`.
+    #[test]
+    fn option_bits_match_csp_so() {
+        assert_eq!(opts::RDP_REQ, 0x0001, "CSP_SO_RDPREQ");
+        assert_eq!(opts::HMAC_REQ, 0x0004, "CSP_SO_HMACREQ");
+        assert_eq!(opts::CRC32_REQ, 0x0040, "CSP_SO_CRC32REQ");
+    }
+
     #[test]
     fn max_mtu_matches_the_c() {
         // Values captured from csp_sfp_opts_max_mtu with CSP_BUFFER_SIZE=256.
         assert_eq!(max_mtu(256, 0), 248);
-        assert_eq!(max_mtu(256, opts::RDP), 243);
-        assert_eq!(max_mtu(256, opts::CRC32), 244);
-        assert_eq!(max_mtu(256, opts::HMAC), 244);
-        assert_eq!(max_mtu(256, opts::RDP | opts::HMAC), 239);
-        assert_eq!(max_mtu(256, opts::RDP | opts::CRC32 | opts::HMAC), 235);
+        assert_eq!(max_mtu(256, opts::RDP_REQ), 243);
+        assert_eq!(max_mtu(256, opts::CRC32_REQ), 244);
+        assert_eq!(max_mtu(256, opts::HMAC_REQ), 244);
+        assert_eq!(max_mtu(256, opts::RDP_REQ | opts::HMAC_REQ), 239);
+        assert_eq!(
+            max_mtu(256, opts::RDP_REQ | opts::CRC32_REQ | opts::HMAC_REQ),
+            235
+        );
     }
 
     #[test]
@@ -278,7 +286,10 @@ mod tests {
         // A tiny buffer must report 0, not wrap to a huge number and authorise a write
         // far past the end.
         assert_eq!(max_mtu(8, 0), 0);
-        assert_eq!(max_mtu(4, opts::RDP | opts::CRC32 | opts::HMAC), 0);
+        assert_eq!(
+            max_mtu(4, opts::RDP_REQ | opts::CRC32_REQ | opts::HMAC_REQ),
+            0
+        );
     }
 
     #[test]
