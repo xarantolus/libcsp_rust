@@ -43,6 +43,13 @@ ctest-ubsan suite="":
     if [ -n "{{suite}}" ]; then export CK_RUN_SUITE="{{suite}}"; fi
     ./build/ctest-ubsan/ctest
 
+# Mutation-test the corpus: break each guard, count which records notice.
+#
+# A mutation nothing notices is a hole. See ctest/tools/mutants.py for why counting
+# records is not the same as measuring anything.
+mutants:
+    python3 ctest/tools/mutants.py
+
 # Regenerate the corpus: what the C did, for the Rust side to replay.
 #
 # Byte-stable across runs by construction — every source of non-determinism in libcsp

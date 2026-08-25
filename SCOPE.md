@@ -386,6 +386,40 @@ application calls `csp_service_handler` from its own receive loop
 `Router` never calls them. Worth stating because the opposite would mean a node answering
 `CSP_REBOOT` that its author never opted into.
 
+### The same connection was announced to the application once per packet
+
+Found on 2026-08-25 by `ctest/suite_conn.c`, the first suite covering the connection table.
+
+`csp_route_deliver_connection` posts a new connection to its socket and then immediately
+does `conn->dest_socket = NULL`, with the comment *"Ensure that this connection will not be
+posted to this socket again"*. A second packet joins a connection the application already
+holds without announcing it again.
+
+`Router::deliver_local` called `queue_accept(handle)` on **every** delivery, because
+`enqueue_rx` returns `Ok(true)` for any successful enqueue and not just the first. Measured:
+three packets arriving after the application accepted the connection produced **three extra
+offers** where the C produces none.
+
+Two consequences, and the second is the one that matters:
+
+- An application looping on `accept` is handed the same connection repeatedly, and would
+  read and close it more than once.
+- The accept backlog is a fixed array. One peer sending eight packets fills it with eight
+  copies of itself, so **every other peer's new connection has nowhere to be announced** —
+  `accept_missed` climbs and those peers are never served. One peer starves the rest by
+  sending entirely ordinary traffic.
+
+The delivery path now tracks whether the connection was newly allocated and announces only
+then.
+
+**How the mutation sweep found it.** The first two connection-table records — exhaustion and
+slot reuse — both passed, and both still passed with `Table::close` neutered to return
+without freeing anything. That is what a sweep is for: `conn: slot returned on close` was
+the one mutation nothing noticed. Chasing *why* the port still accepted 24 connections
+across three rounds with `close` disabled turned up the re-announcement, which was doing the
+work the reuse test thought it was measuring. The suspicious result was not the bug, but it
+was the thread that led to it.
+
 ### Mutation testing the corpus: what the records could not see
 
 On 2026-08-25, after a `diverges` verdict was found passing vacuously, the whole corpus was
