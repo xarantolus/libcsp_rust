@@ -17,10 +17,20 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | `static mut` | **90** | 90 | **0** |
 | `extern "C"` | 486 | 486 | 0 |
 | raw pointers | **2 709** | 2 709 | 0 |
-| Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **5 451 (0.64×)** |
+| Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **8 353 (0.89×)** |
+| Rust LOC (tests) | 0 | 0 | 7 568 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **254** |
+| Tests passing | 0 | 0 | **451** |
+| Differential tests vs the C | 0 | 0 | **19** |
 | Two nodes in one process | no | no | **yes** |
+
+The implementation figure grew from 5 451 to 8 353 during the audit phase, and that is the
+most useful number in the table. The 0.64× version was **missing functionality** — the
+default-interface routing fan-out, the CMP memory hooks, `csp_socket_close`,
+`csp_ping_noreply`, several interface counters — and it looked finished because every
+module in the goal list had a file with its name on it. Counting public C functions rather
+than module names is what exposed it. All 186 are now accounted for: covered, replaced by
+a different mechanism, or deferred by an explicit decision recorded in `SCOPE.md`.
 
 ## corrode — ruled out without running
 
@@ -138,6 +148,52 @@ with the behaviour the port adopts instead.
 | 8 | Wrong-shape SFP delivery is destructive: `csp_sfp_header_remove` bails the moment `CSP_FFRAG` is clear and the caller frees the packet, so a plain datagram sent to a stream port is lost with a misleading `-103` |
 
 Items 3, 4 and 5 were each found by the oracle doing the obvious thing and getting burned.
+
+**The audit phase took the count from 8 to 29.** The full list is in `SCOPE.md`; the ones
+that would matter most on a flying spacecraft:
+
+| # | Defect |
+|---|---|
+| 19 | **CMP `PEEK`/`POKE` are arbitrary memory read and write, on by default.** The handler checks only `len <= 200` and then calls `csp_cmp_memcpy` with an address off the wire; the default implementation is a bare `memcpy` with no validation. The 64-bit variants refuse by default, which is what makes the 32-bit pair look like an oversight. `csp_cmp_set_memcpy`, the function an integrator would call to install a validating replacement, has an empty body |
+| 20 | `csp_iflist_add` clears `ifc->next` *before* checking for a duplicate, so re-registering an interface silently unlinks every interface added after it, and returns `void` |
+| 23 | A UDP interface can never report a transmit error: `csp_if_udp_tx` ignores `sendto`'s return and returns success even with no socket, so `tx` counts packets that never left |
+| 27 | A one-character route-table entry ends the parse and `csp_rtable_load` reports success, silently dropping every entry after it |
+| 28 | The route table is truncated at 100 characters — rejecting a valid table outright if the cut lands mid-entry, or silently dropping its tail if it lands on a separator |
+| 29 | `CSP_ENABLE_KISS_CRC` defaults ON, so a KISS frame without a trailing CRC32 is dropped with `iface->frame++` as the only trace — a node whose frames all vanish this way looks exactly like one with a dead UART |
+
+The distribution is worth noting: **the first eight were found by building, and most of the
+next twenty-one were found by auditing module by module against the C.** Getting the port
+working found the defects that stop you; reading every function against its original found
+the ones that do not.
+
+None of these were reported upstream — the instruction for this project was to record them
+here, not to file them.
+
+## What the audit changed about the conclusion
+
+The convergence prediction held, and the branches do converge. But the experiment produced
+a second result that the plan did not anticipate, and it is the more useful one.
+
+**A port can pass a conformance suite, match golden vectors captured from the running C,
+and still be missing a third of the library.** This one did. 254 tests passed, 922 vectors
+matched, 12 differential tests were green, and the default-interface routing fan-out was
+absent — meaning a node with two redundant routes to a subnet would have used one of them
+and reported nothing. The suite did not catch it because the suite tested what the port
+implemented.
+
+What caught it was enumerating the C's 186 public functions and checking each one off, then
+auditing each module against its original function by function. That found:
+
+- entire behaviours missing (the fan-out, the CMP memory hooks, `csp_socket_close`);
+- **two slot leaks in the port's own code**, both the same shape — a queue entry taken out
+  and then discarded when the report buffer was full;
+- errors reused for unrelated conditions, surviving because nothing tested the failure path;
+- and twenty-one more defects in the C.
+
+So the honest recommendation is not just "hand port with the transpile as an oracle". It is
+that **the checklist and the audit are the deliverable, and the tests are how you keep what
+they found.** A transpile gives you the checklist for free — every function, in a form you
+can diff against — and that is worth more than its code ever was.
 
 ## Recommendation
 
