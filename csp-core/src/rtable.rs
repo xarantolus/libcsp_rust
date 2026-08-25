@@ -172,6 +172,32 @@ impl<const N: usize> Table<N> {
         Ok(n)
     }
 
+    /// Every route tied for the longest prefix match.
+    ///
+    /// `csp_send_direct` does not stop at the first match: it walks *backwards* through
+    /// the table with `csp_rtable_search_backward`, collecting every entry with the same
+    /// address and netmask, and **sends a clone to each** — the last one gets the
+    /// original. That is how a redundant link is configured. A port that returns only one
+    /// route silently uses a single path and the redundancy is decorative.
+    ///
+    /// Writes matching routes into `out` and returns how many. Excess matches are not
+    /// silently dropped: the return value is the number written, so a caller can compare
+    /// it against `out.len()`.
+    pub fn find_all<'r>(&'r self, addr: u16, out: &mut [&'r Route]) -> usize {
+        let Some(best) = self.find(addr) else {
+            return 0;
+        };
+        let (addr_m, mask_m) = (best.address, best.netmask);
+        let mut n = 0;
+        for e in self.entries[..self.len].iter() {
+            if e.address == addr_m && e.netmask == mask_m && n < out.len() {
+                out[n] = e;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Longest-prefix-match lookup.
     ///
     /// On an equal-length tie the later entry wins, matching the C's `>=`.
@@ -339,6 +365,45 @@ mod tests {
         assert!(tb.set(1000, 5, 1, NO_VIA).is_err(), "1000 does not fit 5 bits");
         let mut tb2: Table<4> = Table::new(Version::V2);
         assert!(tb2.set(1000, 14, 1, NO_VIA).is_ok());
+    }
+
+    #[test]
+    fn every_route_tied_for_the_longest_prefix_is_returned() {
+        // csp_send_direct walks backwards collecting every entry with the same
+        // address/netmask and clones to each -- that is how a redundant link is set up.
+        // Returning only one silently uses a single path.
+        let mut tb = t();
+        tb.set(8, 5, 1, NO_VIA).unwrap();
+        tb.set(8, 5, 2, NO_VIA).unwrap();
+        tb.set(0, 0, 3, NO_VIA).unwrap();
+
+        let mut out = [&Route { address: 0, netmask: 0, iface: 0, via: NO_VIA }; 4];
+        let n = tb.find_all(8, &mut out);
+        assert_eq!(n, 2, "both redundant paths must come back");
+        let ifaces: [u8; 2] = [out[0].iface, out[1].iface];
+        assert!(ifaces.contains(&1) && ifaces.contains(&2));
+
+        // A less specific address falls to the default, which has only one route.
+        let n = tb.find_all(20, &mut out);
+        assert_eq!(n, 1);
+        assert_eq!(out[0].iface, 3);
+    }
+
+    #[test]
+    fn find_all_on_an_empty_table_returns_nothing() {
+        let tb = t();
+        let mut out = [&Route { address: 0, netmask: 0, iface: 0, via: NO_VIA }; 4];
+        assert_eq!(tb.find_all(8, &mut out), 0);
+    }
+
+    #[test]
+    fn find_all_reports_what_it_wrote_rather_than_overflowing() {
+        let mut tb = t();
+        for i in 0..3u8 {
+            tb.set(8, 5, i, NO_VIA).unwrap();
+        }
+        let mut tiny = [&Route { address: 0, netmask: 0, iface: 0, via: NO_VIA }; 2];
+        assert_eq!(tb.find_all(8, &mut tiny), 2, "writes what fits and says so");
     }
 
     #[test]

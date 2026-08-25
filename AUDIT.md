@@ -318,3 +318,41 @@ builders and server handlers but **no decoder**, which is why the packet sniffer
 flight repository reimplements the entire wire format by hand.
 
 **Tests:** 25 in `cmp`, up from 18.
+
+---
+
+## `csp-core::rtable` + routing in `csp::node`
+
+Against `src/csp_rtable_cidr.c`, `csp_rtable_stdio.c`, and the routing half of `csp_io.c`.
+
+**Two gaps found, both in the *use* of the table rather than the table itself.**
+
+**1. Redundant routes were collapsed to one.** `csp_send_direct` does not stop at the
+first match — it walks *backwards* with `csp_rtable_search_backward`, collecting every
+entry with the same address and netmask, and **sends a clone to each**, the last getting
+the original. That is how a redundant link is configured. The port returned a single route,
+so the second path would never have been used and the redundancy would have been
+decorative. Added `Table::find_all`.
+
+**2. Split horizon was missing.** The C skips a route whose interface shares a subnet with
+the one the packet arrived on. Without it a forwarded packet can go straight back out the
+interface it came from and loop. Added `Node::route_from(packet, id, routed_from)`, with
+`Unroutable::SplitHorizon { iface }` so a caller can tell "nowhere to send this" from
+"the only path is backwards" — two different operational problems.
+
+`Outbound::NoRoute` now carries an [`Unroutable`] saying which.
+
+**Still open, tracked separately:** the C falls back to `csp_iflist_get_by_isdfl` when no
+route matches, walking every default-marked interface. The port has `IfList::find_default`
+but the node does not yet own an `IfList`, so the fallback is not wired. Recorded in the
+`csp::node` audit rather than silently left.
+
+**Faithful:** the table itself, yes — longest-prefix match, the equal-length tie-break, and
+update-in-place all match. Routing *policy* now matches too.
+
+**Rusty:** yes. `find_all` writes into a caller slice and returns the count rather than
+handing out an iterator over an internal pointer, and the table is a value rather than a
+`static`.
+
+**Deviations:** `SCOPE.md` — full-table refusal, and the parser's lack of a 100-character
+cliff.

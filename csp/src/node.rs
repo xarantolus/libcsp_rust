@@ -31,6 +31,22 @@ use csp_core::{Error, Id, Result, Version};
 #[cfg(feature = "rtable")]
 use csp_core::rtable;
 
+/// Why a route was not usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unroutable {
+    /// No routing table entry matched and no default interface is registered.
+    NoRoute,
+    /// The only route points back at the interface the packet arrived on.
+    ///
+    /// **Split horizon.** `csp_send_direct` skips a route whose interface shares a subnet
+    /// with the one the packet came from; without it a forwarded packet can go straight
+    /// back where it came from and loop.
+    SplitHorizon {
+        /// The interface it arrived on, and would have gone back out.
+        iface: u8,
+    },
+}
+
 /// Where a packet should go next.
 ///
 /// Always carries the packet, so nothing is dropped behind the caller's back.
@@ -47,8 +63,8 @@ pub enum Outbound<'p, const B: usize, const SZ: usize> {
     },
     /// Addressed to this node. Feed it back in with [`Router::receive`].
     Loopback(Packet<'p, B, SZ>),
-    /// No route matched. The packet is **returned**, not dropped.
-    NoRoute(Packet<'p, B, SZ>),
+    /// No usable route. The packet is **returned**, not dropped.
+    NoRoute(Packet<'p, B, SZ>, Unroutable),
 }
 
 impl<'p, const B: usize, const SZ: usize> Outbound<'p, B, SZ> {
@@ -57,7 +73,7 @@ impl<'p, const B: usize, const SZ: usize> Outbound<'p, B, SZ> {
         match self {
             Outbound::Transmit { packet, .. }
             | Outbound::Loopback(packet)
-            | Outbound::NoRoute(packet) => packet,
+            | Outbound::NoRoute(packet, _) => packet,
         }
     }
 
@@ -408,30 +424,39 @@ impl<
         }
     }
 
-    /// Resolve where a packet goes.
+    /// Resolve where a packet goes, ignoring where it came from.
     fn route(
         &mut self,
         packet: Packet<'a, BUFS, BUFSZ>,
         id: Id,
+    ) -> Outbound<'a, BUFS, BUFSZ> {
+        self.route_from(packet, id, None)
+    }
+
+    /// Resolve where a packet goes, given the interface it arrived on.
+    ///
+    /// Pass `routed_from` when **forwarding**: a route pointing back at that interface is
+    /// skipped, which is split horizon. Pass `None` for locally originated traffic.
+    pub fn route_from(
+        &mut self,
+        packet: Packet<'a, BUFS, BUFSZ>,
+        id: Id,
+        routed_from: Option<u8>,
     ) -> Outbound<'a, BUFS, BUFSZ> {
         if id.dst == self.address {
             return Outbound::Loopback(packet);
         }
         #[cfg(feature = "rtable")]
         {
-            match self.router.routes.find(id.dst) {
-                Some(r) => Outbound::Transmit {
-                    iface: r.iface,
-                    via: r.via,
-                    packet,
-                },
-                None => Outbound::NoRoute(packet),
+            if let Some(r) = self.router.routes.find(id.dst) {
+                let (iface, via) = (r.iface, r.via);
+                if routed_from == Some(iface) {
+                    return Outbound::NoRoute(packet, Unroutable::SplitHorizon { iface });
+                }
+                return Outbound::Transmit { iface, via, packet };
             }
         }
-        #[cfg(not(feature = "rtable"))]
-        {
-            Outbound::NoRoute(packet)
-        }
+        Outbound::NoRoute(packet, Unroutable::NoRoute)
     }
 
     /// Install a route.
@@ -515,6 +540,7 @@ mod tests {
         let before = n.buffers_free();
         let out = n.send(c, p, 0).unwrap();
         assert!(!out.is_routed());
+        assert!(matches!(out, Outbound::NoRoute(_, Unroutable::NoRoute)));
         let back = out.into_packet();
         assert_eq!(back.id().dst, 8, "still ours, still addressed");
         drop(back);
@@ -786,6 +812,41 @@ mod tests {
             !out.into_packet().id().is_fragment(),
             "the connection must not carry FRAG over to the next packet"
         );
+    }
+
+    #[test]
+    fn split_horizon_refuses_to_send_a_packet_back_where_it_came_from() {
+        // csp_send_direct skips a route whose interface matches the one the packet
+        // arrived on. Without it, a forwarded packet can go straight back and loop.
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+
+        let mut p = n.packet().unwrap();
+        let id = Id { pri: 2, flags: 0, src: 8, dst: 25, dport: 20, sport: 10 };
+        p.set_id(id);
+
+        // Arrived on interface 3, and the only route points back at 3.
+        let out = n.route_from(p, id, Some(3));
+        assert!(
+            matches!(out, Outbound::NoRoute(_, Unroutable::SplitHorizon { iface: 3 })),
+            "must refuse, and say why"
+        );
+
+        // Arrived on a different interface: forwarding is fine.
+        let mut p2 = n.packet().unwrap();
+        p2.set_id(id);
+        assert!(n.route_from(p2, id, Some(1)).is_routed());
+    }
+
+    #[test]
+    fn locally_originated_traffic_is_not_subject_to_split_horizon() {
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+        let out = n.send(c, n.packet().unwrap(), 0).unwrap();
+        assert!(out.is_routed(), "a packet we originated has no ingress interface");
     }
 
     #[test]
