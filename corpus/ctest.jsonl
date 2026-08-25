@@ -63,3 +63,8 @@
 {"suite":"eth","case":"a_packet_for_another_node_is_delivered_when_promiscuous","verdict":"must_match","input":{"frames":["11111111111122222222222288b5000d000b001600168019002cca00d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"]},"observed":{"refused":0,"frame":0,"drop":0,"buffers_consumed":0}}
 {"suite":"eth","case":"a_high_packet_id_still_reassembles","verdict":"must_match","input":{"frames":["11111111111122222222222288b50080000b00160016800a002cca00d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"]},"observed":{"refused":0,"frame":0,"drop":0,"buffers_consumed":0}}
 {"suite":"eth","case":"the_header_round_trips","verdict":"must_match","observed":{"header":"000000000000000000000000000012340abc057807d0"}}
+{"suite":"sfp","case":"a_single_fragment_stream_is_delivered","verdict":"must_match","input":{"frag_flag":true,"body":"68656c6c6f","offset":0,"totalsize":5},"observed":{"ret":0,"delivered_bytes":5,"recovered":0}}
+{"suite":"sfp","case":"a_plain_datagram_given_to_the_stream_reader_is_destroyed","verdict":"diverges","input":{"frag_flag":false,"body":"68656c6c6f"},"observed":{"ret":-103,"delivered_bytes":0,"recovered":0}}
+{"suite":"sfp","case":"a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape","verdict":"must_match","observed":{"corrupt_ret":-103,"wrong_shape_ret":-103,"indistinguishable":true}}
+{"suite":"sfp","case":"a_fragment_at_the_wrong_offset_is_refused","verdict":"must_match","input":{"frag_flag":true,"body":"776f726c64","offset":5,"totalsize":10},"observed":{"ret":-103,"delivered_bytes":0,"recovered":0}}
+{"suite":"sfp","case":"a_zero_total_transfer_is_refused","verdict":"must_match","input":{"frag_flag":true,"body":"68656c6c6f","offset":0,"totalsize":0},"observed":{"ret":-103,"delivered_bytes":0,"recovered":0}}

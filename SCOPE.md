@@ -516,6 +516,15 @@ whoever maintains the fork can see what was found and decide for themselves.
    bails the moment `CSP_FFRAG` is clear and the caller frees the packet, so a plain
    datagram sent to a stream port is lost with a misleading `-103`. The port returns the
    packet to the handler instead.
+
+   Measured on 2026-08-25 rather than read. `csp_sfp_recv_fp` given a well-formed datagram
+   returns **-103 with the packet freed and nothing delivered** — and the same -103 for a
+   genuinely corrupt fragment, recorded as `indistinguishable: true`. So the application
+   cannot tell "you used the wrong reader on valid data" from "the peer sent rubbish", and
+   in both cases the data is gone. Which shape arrived is a per-packet flag any peer
+   controls, so a narrow handler is one flag away from silently losing a message.
+   `Delivery::classify` returns `Datagram(packet)` with the payload intact.
+   Corpus case: `sfp::a_plain_datagram_given_to_the_stream_reader_is_destroyed`.
 4. **`csp_buffer_free` sets an error code on the success path** — `csp_buffer.c` flags
    `CSP_DBG_ERR_REFCOUNT` on the perfectly normal "still referenced" branch.
 5. **`csp_buffer_copy` copies stale `next`/`conn` pointers** into the clone
