@@ -1261,7 +1261,8 @@ mod tests {
     }
 
     #[test]
-    fn decoding_arbitrary_bytes_never_panics() {
+    fn decoding_arbitrary_bytes_never_panics_and_still_decodes_some() {
+        let mut decoded = 0u32;
         let mut buf = [0u8; 128];
         let mut x: u32 = 0xC0FF_EE00;
         for _ in 0..20_000 {
@@ -1273,7 +1274,9 @@ mod tests {
             }
             for n in [0usize, 2, 7, 11, 19, 53, 93, 128] {
                 let d = &buf[..n];
-                let _ = Header::decode(d);
+                if Header::decode(d).is_ok() {
+                    decoded += 1;
+                }
                 let _ = Ident::decode(d);
                 let _ = IfStatsMsg::decode(d);
                 let _ = Timestamp::decode(d);
@@ -1282,5 +1285,8 @@ mod tests {
                 let _ = PeekV2::decode(d);
             }
         }
+        // Measured at 140 000 of 160 000 header decodes. The guard stops a stricter
+        // decoder quietly reducing this to "the length check does not panic".
+        assert!(decoded > 10_000, "only {decoded} headers decoded");
     }
 }
