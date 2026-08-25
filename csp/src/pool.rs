@@ -75,8 +75,21 @@ impl<const N: usize, const SZ: usize> Default for Pool<N, SZ> {
 }
 
 impl<const N: usize, const SZ: usize> Pool<N, SZ> {
+    /// Compile-time invariants. Violating either would be a bug in the caller's storage
+    /// sizing, and both would otherwise fail at runtime in an obscure way: `SZ <= PADDING`
+    /// makes `payload_capacity()` underflow to a huge number, and `N == 0` makes
+    /// `acquire` always return `None` for no visible reason.
+    const SANITY: () = {
+        assert!(
+            SZ > PADDING,
+            "buffer size must exceed the header padding; see pool::PADDING"
+        );
+        assert!(N > 0, "a pool needs at least one buffer");
+    };
+
     /// Create an empty pool.
     pub fn new() -> Self {
+        let () = Self::SANITY;
         Pool {
             slots: core::array::from_fn(|_| RefCell::new(Slot::new())),
             refcounts: core::array::from_fn(|_| AtomicU8::new(0)),
@@ -99,6 +112,21 @@ impl<const N: usize, const SZ: usize> Pool<N, SZ> {
             .iter()
             .filter(|r| r.load(Ordering::Acquire) == 0)
             .count()
+    }
+
+    /// Rebuild a handle from an index produced by [`Packet::into_index`].
+    ///
+    /// Takes back the reference that `into_index` left outstanding, so the slot is
+    /// released when the returned handle drops.
+    ///
+    /// Returns `None` for an index that is out of range or not currently allocated, so a
+    /// corrupted queue entry cannot resurrect a freed slot.
+    pub fn from_index(&self, idx: u16) -> Option<Packet<'_, N, SZ>> {
+        let i = idx as usize;
+        if i >= N || self.refcounts[i].load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        Some(Packet { pool: self, idx })
     }
 
     /// Take a slot, or `None` if the pool is exhausted.
@@ -238,6 +266,23 @@ impl<'p, const N: usize, const SZ: usize> Packet<'p, N, SZ> {
         }
         self.set_id(id);
         self.set_payload(payload)
+    }
+
+    /// Give up the handle without releasing the slot, yielding its index.
+    ///
+    /// This is how a packet is put into a queue. A queue cannot hold [`Packet`] handles:
+    /// they borrow the pool, and the pool lives in the same storage the queue does, so
+    /// storing one would make the storage self-referential. Holding an index sidesteps
+    /// that entirely.
+    ///
+    /// The reference count is **not** decremented, so the slot stays live. Every
+    /// `into_index` must be paired with a [`Pool::from_index`] or the slot leaks — the
+    /// one place in this crate where a leak is expressible, and it is contained to the
+    /// queue implementations.
+    pub fn into_index(self) -> u16 {
+        let idx = self.idx;
+        core::mem::forget(self);
+        idx
     }
 
     /// Take another reference to the same slot.

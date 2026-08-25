@@ -35,16 +35,25 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod conn;
+pub mod dedup;
 #[cfg(feature = "sfp")]
 pub mod delivery;
 pub mod iface;
 pub mod pool;
+pub mod qfifo;
+pub mod router;
+pub mod service;
 
 use csp_core::Version;
 
 #[cfg(feature = "sfp")]
 pub use delivery::{Delivery, Handler, PortTable};
+pub use conn::Table as ConnTable;
 pub use iface::{Interface, Transmit};
+pub use qfifo::Qfifo;
+pub use router::{Bridged, DropReason, Routed, Router};
+pub use service::{NodeStatus, Request};
 pub use pool::{Packet, Pool};
 
 /// Node configuration.
