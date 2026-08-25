@@ -35,12 +35,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(feature = "sfp")]
 pub mod delivery;
 pub mod iface;
 pub mod pool;
 
 use csp_core::Version;
 
+#[cfg(feature = "sfp")]
 pub use delivery::{Delivery, Handler, PortTable};
 pub use iface::{Interface, Transmit};
 pub use pool::{Packet, Pool};
