@@ -55,6 +55,7 @@ target_sources(ctest PRIVATE
   suite_dedup.c
   suite_security.c
   suite_cmp.c
+  suite_eth.c
 )
 
 target_sources(ctest PRIVATE
@@ -92,6 +93,8 @@ target_sources(ctest PRIVATE
   ${LIBCSP}/src/crypto/csp_sha1.c
   ${LIBCSP}/src/crypto/csp_hmac.c
   ${LIBCSP}/src/interfaces/csp_if_lo.c
+  ${LIBCSP}/src/interfaces/csp_if_eth.c
+  ${LIBCSP}/src/interfaces/csp_if_eth_pbuf.c
   ${LIBCSP}/src/interfaces/csp_if_kiss.c
   # csp_buffer.c and csp_conn.c reach the OS through these.
   ${LIBCSP}/src/arch/posix/csp_queue.c

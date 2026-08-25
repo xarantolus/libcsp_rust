@@ -28,6 +28,21 @@ ctest-noclear:
     cmake --build build/ctest-noclear
     ./build/ctest-noclear/ctest
 
+# The C oracle under UndefinedBehaviorSanitizer.
+#
+# Separate from ctest-asan: ASan aborts on libcsp's out-of-bounds reads in the Ethernet
+# path before a test can record what the C did, while UBSan reports and continues. This is
+# what catches csp_if_eth.c:46 shifting a promoted uint16_t into the sign bit of an int.
+ctest-ubsan suite="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cmake -S ctest -B build/ctest-ubsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-omit-frame-pointer" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=undefined"
+    cmake --build build/ctest-ubsan
+    if [ -n "{{suite}}" ]; then export CK_RUN_SUITE="{{suite}}"; fi
+    ./build/ctest-ubsan/ctest
+
 # Regenerate the corpus: what the C did, for the Rust side to replay.
 #
 # Byte-stable across runs by construction — every source of non-determinism in libcsp

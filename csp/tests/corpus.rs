@@ -424,6 +424,74 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
     }
 }
 
+// --- eth ------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EthInput {
+    /// Every frame the C's receive path saw, in order, each already truncated to the
+    /// `received_len` a NIC would have delivered.
+    frames: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct EthObserved {
+    refused: u32,
+    frame: u32,
+    drop: u32,
+    buffers_consumed: u32,
+}
+
+/// The port's equivalent of `csp_eth_rx`, applied to the same frames in the same order.
+///
+/// The C's nine guards live in one function; here they are `Header::decode`,
+/// `Header::is_csp` and `Reassembler::push`. What is compared is the outcome a peer and an
+/// operator can see: was the frame refused, and was the interface's `frame` counter
+/// charged for it.
+///
+/// `buffers_consumed` is always zero on this side and is compared anyway — the port's
+/// reassembler is caller-allocated, so it cannot leak a pool buffer the way a missed
+/// `csp_eth_pbuf_free` can. Comparing it is what would catch the C growing a leak.
+fn replay_eth(input: &EthInput) -> EthObserved {
+    use csp_core::eth;
+
+    // The same bounds the oracle's node has: a CSP_BUFFER_SIZE payload plus a v2 header,
+    // and a v2 header as the floor. Using a bigger buffer here would quietly make the
+    // port look more permissive than the C when it is only better provisioned.
+    const CSP_BUFFER_SIZE: usize = 256;
+    const V2_HEADER: usize = 6;
+    let mut r = eth::Reassembler::with_min_len(V2_HEADER as u16);
+    let mut out = [0u8; CSP_BUFFER_SIZE + V2_HEADER];
+    let mut refused = 0;
+    let mut frame = 0;
+
+    for hex in &input.frames {
+        let bytes = unhex(hex);
+        let outcome = (|| -> Result<(), ()> {
+            let h = eth::Header::decode(&bytes).map_err(|_| ())?;
+            if !h.is_csp() {
+                return Err(());
+            }
+            let payload = bytes.get(eth::HEADER_LEN..).ok_or(())?;
+            let seg = payload.get(..h.seg_size as usize).ok_or(())?;
+            r.push(&h, 0, seg, &mut out).map_err(|_| ())?;
+            Ok(())
+        })();
+        if outcome.is_err() {
+            refused = 1;
+            frame = 1;
+        }
+    }
+
+    EthObserved {
+        refused,
+        frame,
+        drop: 0,
+        buffers_consumed: 0,
+    }
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -439,6 +507,35 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 "clock_min": csp_core::cmp::request_len(csp_core::cmp::code::CLOCK),
             });
             Some((got, "cmp::request_len".to_string()))
+        }
+        // The header round-trip records the packed bytes rather than an rx outcome.
+        "eth" if rec.case == "the_header_round_trips" => {
+            let h = csp_core::eth::Header {
+                dst_mac: [0; 6],
+                src_mac: [0; 6],
+                // csp_eth_pack_header leaves the ethertype alone -- csp_eth_tx writes it
+                // separately -- so the C's recorded bytes have zero there.
+                ethertype: 0,
+                packet_id: 0x1234,
+                src_addr: 0x0abc,
+                seg_size: 1400,
+                packet_length: 2000,
+            };
+            let mut out = [0u8; 64];
+            let n = h.encode(&mut out).unwrap();
+            let hex: String = out[..n].iter().map(|b| format!("{b:02x}")).collect();
+            Some((
+                serde_json::json!({ "header": hex }),
+                "pack_header".to_string(),
+            ))
+        }
+        "eth" => {
+            let input: EthInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let got = replay_eth(&input);
+            Some((
+                serde_json::to_value(EthJson::from(got)).unwrap(),
+                format!("{} frame(s)", input.frames.len()),
+            ))
         }
         "cmp" if rec.case == "the_peek_tail_when_the_request_did_not_cover_it" => {
             // The C declares a PEEK reply three bytes longer than the data it wrote. What
@@ -536,6 +633,24 @@ impl From<SecurityObserved> for SecurityJson {
             delivered: o.delivered,
             rx_error: o.rx_error,
             autherr: o.autherr,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct EthJson {
+    refused: u32,
+    frame: u32,
+    drop: u32,
+    buffers_consumed: u32,
+}
+impl From<EthObserved> for EthJson {
+    fn from(o: EthObserved) -> Self {
+        EthJson {
+            refused: o.refused,
+            frame: o.frame,
+            drop: o.drop,
+            buffers_consumed: o.buffers_consumed,
         }
     }
 }
