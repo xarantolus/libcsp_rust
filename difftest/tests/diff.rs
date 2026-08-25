@@ -250,7 +250,7 @@ fn rust_refuses_an_empty_hmac_key_and_the_c_leaves_the_buffer_untouched() {
 #[test]
 fn cfp1_identifier_packing_agrees() {
     use csp_core::cfp;
-    let mut rng = Rng(0xCF71_0000_0000_000b);
+    let mut rng = Rng(0xCF71_0000_0000_000B);
     for i in 0..ITERS {
         // In-range values: the C's macros mask, so out-of-range inputs are silently
         // truncated on both sides and would not prove anything.
@@ -276,7 +276,7 @@ fn cfp1_identifier_packing_agrees() {
 #[test]
 fn cfp1_identifier_parsing_agrees_for_arbitrary_identifiers() {
     use csp_core::cfp;
-    let mut rng = Rng(0xCF72_0000_0000_000d);
+    let mut rng = Rng(0xCF72_0000_0000_000D);
     for i in 0..ITERS {
         // Any 29-bit pattern, including ones no sane sender would produce.
         let id = (rng.next() as u32) & ((1 << 29) - 1);
@@ -288,4 +288,428 @@ fn cfp1_identifier_parsing_agrees_for_arbitrary_identifiers() {
             "iter {i}: parse({id:#x})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CFP 2 -- the CSP v2 CAN identifier
+// ---------------------------------------------------------------------------
+
+/// Every field the real fragmenter puts in a CAN id must read back the same through the
+/// C's macros.
+///
+/// This runs the production path rather than comparing constants: an offset or mask typo
+/// in `V2Fragmenter::base_id` would silently corrupt every v2 CAN frame the node sends,
+/// and no round-trip test against our own reassembler would notice, because both sides
+/// would be wrong in the same way.
+#[test]
+fn cfp2_identifiers_from_the_fragmenter_agree_with_the_c() {
+    let mut rng = Rng(0xC2F2_0001);
+    let mut checked = 0u32;
+
+    for _ in 0..20_000 {
+        let id = csp_core::Id {
+            pri: (rng.next() % 4) as u8,
+            flags: (rng.next() % 0x40) as u8,
+            src: (rng.next() % 16384) as u16,
+            dst: (rng.next() % 16384) as u16,
+            dport: (rng.next() % 64) as u8,
+            sport: (rng.next() % 64) as u8,
+        };
+        let sender = (rng.next() % 64) as u16;
+        let sender_count = rng.next() as u32 % 4;
+        let len = (rng.next() % 40) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+
+        let frames: Vec<_> =
+            csp_core::cfp::V2Fragmenter::new(id, sender, sender_count, &payload).collect();
+        assert!(
+            !frames.is_empty(),
+            "a fragmenter must emit at least one frame"
+        );
+        let last = frames.len() - 1;
+
+        for (i, f) in frames.iter().enumerate() {
+            let c = c_cfp2_parse(f.id);
+            assert_eq!(c.pri, id.pri as u16, "priority, frame {i}");
+            assert_eq!(c.dst, id.dst, "destination, frame {i}");
+            assert_eq!(c.sender, sender, "sender, frame {i}");
+            assert_eq!(c.sc, sender_count as u16, "sender count, frame {i}");
+            assert_eq!(c.begin, u16::from(i == 0), "begin bit, frame {i}");
+            assert_eq!(c.end, u16::from(i == last), "end bit, frame {i}");
+            // The fragment counter wraps at 3 bits, which is the whole point of it.
+            assert_eq!(c.fc, (i as u16) & 0x7, "fragment counter, frame {i}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 20_000, "only {checked} frames compared");
+}
+
+/// And the packing direction: an identifier the C builds from the same fields is the same
+/// number the fragmenter produced.
+#[test]
+fn cfp2_packing_agrees_bit_for_bit() {
+    let mut rng = Rng(0xC2F2_0002);
+    for _ in 0..200_000 {
+        let f = Cfp2Fields {
+            pri: (rng.next() % 4) as u16,
+            dst: (rng.next() % 16384) as u16,
+            sender: (rng.next() % 64) as u16,
+            sc: (rng.next() % 4) as u16,
+            fc: (rng.next() % 8) as u16,
+            begin: (rng.next() % 2) as u16,
+            end: (rng.next() % 2) as u16,
+        };
+        let packed = c_cfp2_make(f);
+        assert_eq!(
+            c_cfp2_parse(packed),
+            f,
+            "the C must round-trip its own layout"
+        );
+        assert_eq!(packed >> 29, 0, "a CAN id is 29 bits");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Route table -- the parser is a full rewrite, so this is the strongest test here
+// ---------------------------------------------------------------------------
+
+/// Interface names both sides know about.
+const IFACES: [&str; 3] = ["CAN", "KISS", "LOOP"];
+
+fn register_ifaces() {
+    for (i, n) in IFACES.iter().enumerate() {
+        c_add_iface(n, i as u16 + 1, 5);
+    }
+}
+
+/// Build a random route-table entry that both sides should accept.
+fn valid_entry(rng: &mut Rng, host_bits: u16, max_node: u16) -> String {
+    let addr = (rng.next() % (max_node as u64 + 1)) as u16;
+    let iface = IFACES[(rng.next() % IFACES.len() as u64) as usize];
+    match rng.next() % 4 {
+        0 => format!(
+            "{addr}/{} {iface} {}",
+            rng.next() % (host_bits as u64 + 1),
+            rng.next() % 16
+        ),
+        1 => format!("{addr}/{} {iface}", rng.next() % (host_bits as u64 + 1)),
+        2 => format!("{addr} {iface} {}", rng.next() % 16),
+        _ => format!("{addr} {iface}"),
+    }
+}
+
+/// A table both sides accept must route every address to the same interface and via.
+///
+/// The parser here is a rewrite -- no `sscanf`, no VLA -- so unlike the codecs there is no
+/// shared structure to make the two agree by construction. If the longest-prefix rule or
+/// the netmask default differs anywhere, a random table finds it.
+#[test]
+fn rtable_lookups_agree_for_tables_both_sides_accept() {
+    let _g = LOCK.lock().unwrap();
+    c_set_version(Version::V1);
+    register_ifaces();
+
+    let mut rng = Rng(0x2AB1_0001);
+    let mut compared = 0u32;
+    let mut accepted = 0u32;
+
+    for _ in 0..2_000 {
+        // Two or three entries, comfortably inside the C's 100-character limit.
+        let n = 2 + (rng.next() % 2) as usize;
+        let text: Vec<String> = (0..n).map(|_| valid_entry(&mut rng, 5, 31)).collect();
+        let text = text.join(",");
+        if text.len() >= 100 {
+            continue; // the C truncates at 100; that case has its own test
+        }
+
+        let c_res = c_rtable_load(&text).expect("no interior NULs");
+        let mut rust: Vec<(u16, u16, u8, u16)> = Vec::new();
+        let rust_res = csp_core::rtable::parse(&text, |r| {
+            rust.push((
+                r.address,
+                r.netmask.unwrap_or(5),
+                IFACES.iter().position(|&n| n == r.iface).unwrap_or(255) as u8,
+                r.via.unwrap_or(csp_core::rtable::NO_VIA),
+            ));
+            Ok(())
+        });
+
+        assert_eq!(
+            c_res >= 0,
+            rust_res.is_ok(),
+            "acceptance must agree for {text:?} (C {c_res}, Rust {rust_res:?})"
+        );
+        if c_res < 0 {
+            continue;
+        }
+        accepted += 1;
+        assert_eq!(c_res as usize, rust.len(), "entry count for {text:?}");
+
+        // Install the same entries in a Rust table and compare every lookup.
+        let mut table: csp_core::rtable::Table<16> = csp_core::rtable::Table::new(Version::V1);
+        for &(addr, mask, iface, via) in &rust {
+            table.set(addr, mask, iface, via).unwrap();
+        }
+        for addr in 0u16..=31 {
+            let c_route = c_rtable_lookup(addr);
+            let r_route = table.find(addr);
+            match (&c_route, r_route) {
+                (None, None) => {}
+                (Some(c), Some(r)) => {
+                    assert_eq!(
+                        c.iface,
+                        IFACES[r.iface as usize],
+                        "interface for {addr} in {text:?}"
+                    );
+                    assert_eq!(c.via, r.via, "via for {addr} in {text:?}");
+                }
+                _ => panic!("one side found a route for {addr} and the other did not: {text:?} -- C {c_route:?}, Rust {r_route:?}"),
+            }
+            compared += 1;
+        }
+    }
+    assert!(accepted > 1_000, "only {accepted} tables were accepted");
+    assert!(compared > 30_000, "only {compared} lookups compared");
+}
+
+/// A short token ends the C's parse, silently, and reports success.
+///
+/// `while (str && (strlen(str) > 1))` is the loop condition, not a skip: the first token
+/// of one character or fewer terminates parsing, every entry after it is dropped, and
+/// `csp_rtable_load` returns the count of what it managed before that -- a non-negative
+/// number, which callers read as success. This port parses the later entries.
+#[test]
+fn a_one_character_entry_ends_the_cs_parse_and_it_reports_success() {
+    let _g = LOCK.lock().unwrap();
+    c_set_version(Version::V1);
+    register_ifaces();
+
+    let text = "1 CAN,2,3 KISS";
+    let c_res = c_rtable_load(text).unwrap();
+    assert_eq!(
+        c_res, 1,
+        "the C stopped at \"2\" and kept only the first entry"
+    );
+    assert!(c_res >= 0, "and reported success while dropping 3 KISS");
+    assert!(
+        c_rtable_lookup(3).is_none(),
+        "the dropped entry is simply not there"
+    );
+
+    let mut seen = Vec::new();
+    let n = csp_core::rtable::parse(text, |r| {
+        seen.push((r.address, r.iface.to_string()));
+        Ok(())
+    })
+    .expect("the port skips the short entry rather than stopping");
+    assert_eq!(n, 2, "both real entries are parsed");
+    assert_eq!(seen[1], (3, "KISS".to_string()));
+}
+
+/// The C truncates the whole table at 100 characters, and what that costs depends on
+/// where the cut lands.
+///
+/// `strnlen(rtable, 100)` then a VLA of that size (`csp_rtable_stdio.c:17-20`). Two
+/// outcomes, both bad in different ways:
+///
+/// - the cut lands **mid-entry**: the fragment fails to parse and the whole load is
+///   rejected with `CSP_ERR_INVAL`, so a table that is entirely valid is refused for
+///   being long;
+/// - the cut lands **on a separator**: every surviving entry parses, the function returns
+///   a positive count, and the dropped tail is never mentioned. The caller sees success
+///   and a routing table missing routes.
+///
+/// The port parses the whole string either way.
+#[test]
+fn the_c_truncates_a_long_table_at_a_hundred_characters() {
+    let _g = LOCK.lock().unwrap();
+    c_set_version(Version::V1);
+    register_ifaces();
+
+    // Nine-character entries, so with separators every entry starts at a multiple of ten
+    // and the 100-character cut falls exactly on the comma after the tenth.
+    let aligned: Vec<String> = (0..15).map(|i| format!("{:02} CAN 11", i % 32)).collect();
+    let aligned = aligned.join(",");
+    assert_eq!(aligned.len(), 15 * 9 + 14);
+    assert_eq!(&aligned[99..100], ",", "the cut must land on a separator");
+
+    let c_res = c_rtable_load(&aligned).unwrap();
+    let rust_n = csp_core::rtable::parse(&aligned, |_| Ok(())).unwrap();
+    assert_eq!(rust_n, 15, "the port parses every entry");
+    assert_eq!(c_res, 10, "the C kept the ten that fit");
+    assert!(c_res > 0, "and reported success while dropping five routes");
+    assert!(
+        c_rtable_lookup(14).is_none(),
+        "the fifteenth entry is simply not in the table"
+    );
+
+    // Seven-character entries put the cut inside an entry instead.
+    let midway: Vec<String> = (0..20).map(|i| format!("{} CAN 1", i % 10)).collect();
+    let midway = midway.join(",");
+    assert!(midway.len() > 100);
+    assert_ne!(&midway[99..100], ",", "this cut must land mid-entry");
+
+    assert!(
+        c_rtable_load(&midway).unwrap() < 0,
+        "a mid-entry cut makes the C reject the whole table"
+    );
+    assert_eq!(
+        csp_core::rtable::parse(&midway, |_| Ok(())).unwrap(),
+        20,
+        "and the port still parses all twenty"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// KISS framing -- the real csp_kiss_rx state machine, byte for byte
+// ---------------------------------------------------------------------------
+
+/// A frame the port encodes must arrive at a C node as the same id and payload.
+///
+/// This is the direction interop depends on: our KISS output goes down a UART to a C
+/// node, and what comes out the other side has to be the packet we sent.
+///
+/// Note what the C's KISS layer does beyond framing — it drops the TNC command byte and
+/// runs `csp_id_strip`, so by the time the packet reaches the router the header is already
+/// consumed. The port keeps those apart: `kiss::Decoder` de-escapes and `Id::decode`
+/// parses, because a sans-io decoder that silently parsed headers could not be used for
+/// anything else. Both must still agree on the bytes.
+#[test]
+fn kiss_frames_we_encode_arrive_intact_at_a_c_node() {
+    let _g = LOCK.lock().unwrap();
+    let mut rng = Rng(0x4155_0001);
+
+    for version in versions() {
+        c_set_version(version);
+        let hdr = c_header_size();
+        let mut checked = 0u32;
+
+        for _ in 0..2_000 {
+            let id = random_valid_id(&mut rng, version);
+            // Bias hard toward the escape bytes: FEND and FESC are the whole protocol,
+            // and a uniform random payload almost never contains either.
+            let len = 1 + (rng.next() % 40) as usize;
+            let payload: Vec<u8> = (0..len)
+                .map(|_| match rng.next() % 4 {
+                    0 => 0xC0, // FEND
+                    1 => 0xDB, // FESC
+                    2 => (rng.next() % 4) as u8 + 0xDC,
+                    _ => rng.next() as u8,
+                })
+                .collect();
+
+            // The body is the CSP frame: encoded header, payload, then the CRC32 the
+            // C's KISS interface requires. CSP_ENABLE_KISS_CRC defaults ON, and a frame
+            // without one is rejected with nothing but iface->frame++ to show for it.
+            let crc = csp_core::crc32::checksum(&payload);
+            let mut body = vec![0u8; hdr + payload.len() + 4];
+            id.encode(version, &mut body).expect("header fits");
+            body[hdr..hdr + payload.len()].copy_from_slice(&payload);
+            body[hdr + payload.len()..].copy_from_slice(&crc.to_be_bytes());
+
+            let mut framed = vec![0u8; csp_core::kiss::max_encoded_len(body.len())];
+            let n = csp_core::kiss::encode(&body, &mut framed).expect("room was reserved");
+
+            let c = c_kiss_decode(&framed[..n]);
+            assert_eq!(
+                c.frames, 1,
+                "{version:?}: the C must see one frame for {id:?} (frame errors {})",
+                c.frame_errors
+            );
+            assert_eq!(
+                c.last.as_deref(),
+                Some(&payload[..]),
+                "{version:?}: payload must survive framing and escaping"
+            );
+            assert_eq!(
+                c.id.as_deref(),
+                Some(&body[..hdr]),
+                "{version:?}: and the header the C parsed must be the one we sent"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2_000, "{version:?}");
+    }
+}
+
+/// A corrupted frame must never reach the C's router carrying the wrong payload.
+///
+/// Random byte streams cannot test this decoder: `CSP_ENABLE_KISS_CRC` is ON by default,
+/// so acceptance is gated on a valid CRC32 and arbitrary bytes are rejected essentially
+/// always. Starting from a *valid* frame and corrupting one byte reaches the interesting
+/// states — a flipped escape, a truncated body, a broken checksum — which is where a
+/// framing decoder actually goes wrong.
+///
+/// The property is one-sided on purpose: the C may legitimately reject a frame the port
+/// would hand on, because the port's decoder stops at de-escaping and leaves header and
+/// CRC to the caller. What must never happen is the C accepting a frame and delivering a
+/// payload that is not the one that was sent — on a live link that is a corrupted command
+/// obeyed as if it were genuine.
+#[test]
+fn a_corrupted_kiss_frame_never_reaches_the_router_with_the_wrong_payload() {
+    let _g = LOCK.lock().unwrap();
+    c_set_version(Version::V1);
+    let hdr = c_header_size();
+    let mut rng = Rng(0x4155_0002);
+
+    let mut accepted = 0u32;
+    let mut rejected = 0u32;
+
+    for _ in 0..5_000 {
+        let id = random_valid_id(&mut rng, Version::V1);
+        let len = 1 + (rng.next() % 30) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let crc = csp_core::crc32::checksum(&payload);
+
+        let mut body = vec![0u8; hdr + payload.len() + 4];
+        id.encode(Version::V1, &mut body).unwrap();
+        body[hdr..hdr + payload.len()].copy_from_slice(&payload);
+        body[hdr + payload.len()..].copy_from_slice(&crc.to_be_bytes());
+
+        let mut framed = vec![0u8; csp_core::kiss::max_encoded_len(body.len())];
+        let n = csp_core::kiss::encode(&body, &mut framed).unwrap();
+        let mut framed = framed[..n].to_vec();
+
+        // Corrupt one byte -- including, deliberately, the delimiters.
+        match rng.next() % 4 {
+            0 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] ^= 1 << (rng.next() % 8);
+            }
+            1 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] = 0xC0; // a FEND where none belongs
+            }
+            2 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] = 0xDB; // a FESC where none belongs
+            }
+            _ => {
+                framed.truncate(1 + (rng.next() as usize) % framed.len());
+            }
+        }
+
+        let c = c_kiss_decode(&framed);
+        if c.frames == 0 {
+            rejected += 1;
+            continue;
+        }
+        accepted += 1;
+        // If it *was* accepted, the payload must be exactly what was sent -- a corruption
+        // that survives the CRC has to be one that changed nothing that matters.
+        assert_eq!(
+            c.last.as_deref(),
+            Some(&payload[..]),
+            "the C accepted a corrupted frame and delivered a different payload"
+        );
+    }
+
+    assert!(
+        rejected > 1_000,
+        "only {rejected} corruptions were rejected -- the CRC is not being exercised"
+    );
+    assert!(
+        accepted > 0,
+        "no corruption was survivable; the generator never hits a byte that does not matter"
+    );
 }

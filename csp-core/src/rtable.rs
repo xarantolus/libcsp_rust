@@ -256,7 +256,10 @@ where
     let mut count = 0usize;
     for entry in text.split(',') {
         let entry = entry.trim();
-        // The C skips tokens of length <= 1, which is how it tolerates trailing commas.
+        // `while (str && (strlen(str) > 1))` is the C's loop *condition*, not a skip: the
+        // first entry of one character or fewer ends the parse, every entry after it is
+        // dropped, and it still returns a non-negative count that reads as success. We
+        // skip and carry on.
         if entry.len() <= 1 {
             continue;
         }

@@ -314,3 +314,25 @@ whoever maintains the fork can see what was found and decide for themselves.
     in the node. In the port they are per-connection `SynOptions`; a test pins the default
     values to the C's compiled-in ones, because a Rust node and a C node that disagree here
     negotiate different windows.
+27. **A one-character route-table entry ends the C's parse and it reports success.**
+    `while (str && (strlen(str) > 1))` (`csp_rtable_stdio.c:25`) is the loop condition, so
+    the first short token terminates parsing. Every entry after it is dropped and
+    `csp_rtable_load` returns the count it managed before stopping — a non-negative number,
+    which every caller reads as success. `"1 CAN,2,3 KISS"` installs one route and reports
+    it worked. Confirmed by a differential test; the port skips the short entry and parses
+    the rest.
+28. **The route table is truncated at 100 characters, and what that costs depends on where
+    the cut lands.** `strnlen(rtable, 100)` into a VLA (`csp_rtable_stdio.c:17-20`). If the
+    cut falls mid-entry, the fragment fails to parse and the *whole* load is rejected — a
+    completely valid table refused for being long. If it falls on a separator, every
+    surviving entry parses, a positive count comes back, and the dropped tail is never
+    mentioned: the caller sees success and a routing table missing routes. Both cases are
+    pinned by differential tests. The port parses the whole string.
+29. **A KISS frame without a CRC32 is dropped silently by any stock C peer.**
+    `CSP_ENABLE_KISS_CRC` defaults to `ON` (`CMakeLists.txt:50`) and `csp_kiss_rx` runs
+    `csp_crc32_verify` on every completed frame; a frame that fails is dropped with
+    `iface->frame++` and nothing else — no log line, no error to any caller, nothing on the
+    wire. A node whose frames all vanish this way is indistinguishable from one with a dead
+    UART. Not a defect in the framing, but a deployment default sharp enough that
+    `kiss::encode`'s documentation now states it, backed by a differential test against the
+    real `csp_kiss_rx`.

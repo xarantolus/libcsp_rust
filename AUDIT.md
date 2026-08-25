@@ -683,3 +683,59 @@ destination, `route_from` keeps the one-destination convenience shape. Documente
   simulation of one.
 - RDP option defaults match the C's compiled-in values exactly, pinned by a test
   (deviation 26). They are per-connection here rather than six process-wide statics.
+
+## Differential fuzzing — extending it past the codecs
+
+**19 differential tests**, up from 12. The additions are the modules where the port is a
+*rewrite* rather than a transliteration, because those are the ones where nothing forces
+the two implementations to agree.
+
+### CFP 2 — the CSP v2 CAN identifier
+
+Two tests. The important one runs the real `V2Fragmenter` over random ids and payloads and
+reads every frame's CAN identifier back through the C's macros. Comparing constants would
+not have done: an offset or mask typo in `base_id` corrupts every v2 CAN frame the node
+sends, and a round-trip against our own reassembler would pass, because both sides would
+be wrong the same way.
+
+### Routing table — the strongest test here
+
+The parser is a full rewrite: no `sscanf`, no VLA. Two thousand random tables are parsed
+by both sides, and for every table both accept, all 32 addresses are looked up in both and
+compared — interface and via. That found nothing, which is the useful outcome for the piece
+of code with the least shared structure.
+
+It did find two things about the C, both now pinned by their own tests:
+
+- **A one-character entry ends the parse and it reports success** (deviation 27).
+  `while (str && (strlen(str) > 1))` is the loop condition, not a skip. `"1 CAN,2,3 KISS"`
+  installs one route and returns a positive count. **A comment in `rtable.rs` claimed the
+  C skipped such entries; it does not, and the comment is corrected.**
+- **The 100-character truncation costs different things depending on where it lands**
+  (deviation 28). Mid-entry, the fragment fails to parse and the whole table is rejected —
+  a valid table refused for being long. On a separator, everything that fits parses, a
+  positive count comes back, and the dropped tail is never mentioned.
+
+### KISS — driving the real `csp_kiss_rx`
+
+The shim replaces only `csp_qfifo_write`, so the actual state machine runs. This cost more
+than the others (the buffer pool and the POSIX queue shim come with it) and was worth it,
+because it surfaced something the unit tests could not:
+
+**`CSP_ENABLE_KISS_CRC` defaults to ON, so a KISS frame without a trailing CRC32 is
+dropped by any stock C peer** — with `iface->frame++` as the only trace. No log, no error,
+nothing on the wire. A node whose frames all disappear this way is indistinguishable from
+one with a dead UART. `kiss::encode`'s documentation said the CRC was used "if one is in
+use", which is true of the format and misleading about the deployment; it now says what
+the default actually requires.
+
+Two tests: frames the port encodes arrive at a C node with the same id and payload, both
+wire versions, payloads biased hard toward `FEND`/`FESC`; and a corruption test — take a
+valid frame, flip a bit or inject a delimiter or truncate it, and assert the C never
+delivers a payload other than the one that was sent.
+
+Random byte streams turned out to be the wrong tool for this decoder: with the CRC gate,
+arbitrary bytes are rejected essentially always, and a test that never reaches acceptance
+tests nothing. Two intermediate versions of that test asserted properties that held
+vacuously; the assertion counting how many streams reached the decoder is what caught it,
+and is why every generator here now carries one.

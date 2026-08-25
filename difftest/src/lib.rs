@@ -65,6 +65,196 @@ unsafe extern "C" {
         datalen: u32,
         out20: *mut u8,
     ) -> c_int;
+    fn shim_cfp2_make(
+        pri: u16,
+        dst: u16,
+        sender: u16,
+        sc: u16,
+        fc: u16,
+        begin: u16,
+        end: u16,
+    ) -> u32;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_cfp2_parse(
+        id: u32,
+        pri: *mut u16,
+        dst: *mut u16,
+        sender: *mut u16,
+        sc: *mut u16,
+        fc: *mut u16,
+        begin: *mut u16,
+        end: *mut u16,
+    );
+    fn shim_rtable_load(text: *const u8) -> c_int;
+    fn shim_rtable_check(text: *const u8) -> c_int;
+    fn shim_rtable_lookup(addr: u16, name: *mut u8, via: *mut u16) -> c_int;
+    fn shim_add_iface(name: *const u8, addr: u16, netmask: u16) -> c_int;
+    fn shim_iface_registered(name: *const u8) -> c_int;
+    fn shim_kiss_reset();
+    fn shim_kiss_feed(buf: *const u8, len: u32, out: *mut u8, out_len: *mut c_int) -> c_int;
+    fn shim_kiss_rx_errors() -> u32;
+    fn shim_kiss_last_id(out: *mut u8) -> c_int;
+    fn shim_kiss_drops() -> u32;
+    fn shim_kiss_frame_errors() -> u32;
+}
+
+/// What the C's KISS decoder made of a byte stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KissResult {
+    /// Complete frames produced.
+    pub frames: i32,
+    /// The last complete frame's **payload**, if any — the C's KISS layer strips the CSP
+    /// header before handing the packet on.
+    pub last: Option<Vec<u8>>,
+    /// The last frame's header, re-encoded from the id the C parsed.
+    pub id: Option<Vec<u8>>,
+    /// `iface->rx_error` after the feed.
+    pub rx_errors: u32,
+    /// `iface->drop` — a frame started with no buffer available.
+    pub drops: u32,
+    /// `iface->frame` — a completed frame the CSP header parser rejected.
+    pub frame_errors: u32,
+}
+
+/// Feed bytes to the C's KISS decoder, from a clean state.
+///
+/// Drives the real `csp_kiss_rx` state machine — the shim only replaces `csp_qfifo_write`
+/// so a finished frame is captured instead of routed.
+pub fn c_kiss_decode(bytes: &[u8]) -> KissResult {
+    let mut out = vec![0u8; 4096];
+    let mut out_len: c_int = -1;
+    // SAFETY: `out` is far larger than any frame the decoder can emit (it is bounded by
+    // the C buffer size), and `out_len` is a live slot. Callers hold `LOCK`, since the
+    // decoder state and the buffer pool are C globals.
+    let frames = unsafe {
+        shim_kiss_reset();
+        shim_kiss_feed(
+            bytes.as_ptr(),
+            bytes.len() as u32,
+            out.as_mut_ptr(),
+            &mut out_len,
+        )
+    };
+    // SAFETY: reads one u32 global.
+    let (rx_errors, drops, frame_errors) =
+        // SAFETY: three u32 reads from the shim's static interface struct.
+        unsafe { (shim_kiss_rx_errors(), shim_kiss_drops(), shim_kiss_frame_errors()) };
+    let mut idbuf = [0u8; 8];
+    // SAFETY: `idbuf` holds the largest header either version produces (6 bytes).
+    let id_len = unsafe { shim_kiss_last_id(idbuf.as_mut_ptr()) };
+    KissResult {
+        frames,
+        last: (out_len >= 0).then(|| out[..out_len as usize].to_vec()),
+        id: (id_len > 0).then(|| idbuf[..id_len as usize].to_vec()),
+        rx_errors,
+        drops,
+        frame_errors,
+    }
+}
+
+/// Register an interface with the C, so route tables have something to name.
+///
+/// Idempotent: registering a name that is already there is a no-op, because
+/// `csp_iflist_add` silently keeps the first (deviation 20).
+pub fn c_add_iface(name: &str, addr: u16, netmask: u16) {
+    let c = std::ffi::CString::new(name).expect("interface names have no NULs");
+    // SAFETY: `c` outlives the call; the shim copies the name into its own static
+    // storage, which is what `csp_iflist_add` requires since it keeps the pointer.
+    unsafe {
+        if shim_iface_registered(c.as_ptr() as *const u8) == 0 {
+            shim_add_iface(c.as_ptr() as *const u8, addr, netmask);
+        }
+    }
+}
+
+/// The seven fields of a CSP v2 CAN identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct Cfp2Fields {
+    pub pri: u16,
+    pub dst: u16,
+    pub sender: u16,
+    pub sc: u16,
+    pub fc: u16,
+    pub begin: u16,
+    pub end: u16,
+}
+
+/// Pack a CSP v2 CAN identifier with the C.
+pub fn c_cfp2_make(f: Cfp2Fields) -> u32 {
+    // SAFETY: pure arithmetic on the C side, no pointers.
+    unsafe { shim_cfp2_make(f.pri, f.dst, f.sender, f.sc, f.fc, f.begin, f.end) }
+}
+
+/// Unpack a CSP v2 CAN identifier with the C.
+pub fn c_cfp2_parse(id: u32) -> Cfp2Fields {
+    let (mut pri, mut dst, mut sender) = (0u16, 0u16, 0u16);
+    let (mut sc, mut fc, mut begin, mut end) = (0u16, 0u16, 0u16, 0u16);
+    // SAFETY: seven live stack slots, all written by the shim.
+    unsafe {
+        shim_cfp2_parse(
+            id,
+            &mut pri,
+            &mut dst,
+            &mut sender,
+            &mut sc,
+            &mut fc,
+            &mut begin,
+            &mut end,
+        )
+    }
+    Cfp2Fields {
+        pri,
+        dst,
+        sender,
+        sc,
+        fc,
+        begin,
+        end,
+    }
+}
+
+/// One route as the C reports it: interface name and via address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CRoute {
+    /// Interface name.
+    pub iface: String,
+    /// Next hop, or `0xFFFF` for none.
+    pub via: u16,
+}
+
+/// Parse a route table with the C, replacing whatever was loaded.
+///
+/// Returns the C's status: 0 on success, negative on failure, or `None` if the text has an
+/// interior NUL and so cannot be handed to C at all -- rejected rather than truncated.
+pub fn c_rtable_load(text: &str) -> Option<c_int> {
+    let c = std::ffi::CString::new(text).ok()?;
+    // SAFETY: `c` is NUL-terminated and outlives the call. Callers hold `LOCK`, since the
+    // routing table is a C global.
+    Some(unsafe { shim_rtable_load(c.as_ptr() as *const u8) })
+}
+
+/// Validate a route table with the C without installing it.
+pub fn c_rtable_check(text: &str) -> Option<c_int> {
+    let c = std::ffi::CString::new(text).ok()?;
+    // SAFETY: as above.
+    Some(unsafe { shim_rtable_check(c.as_ptr() as *const u8) })
+}
+
+/// Look an address up in the table the C most recently loaded.
+pub fn c_rtable_lookup(addr: u16) -> Option<CRoute> {
+    let mut name = [0u8; 16];
+    let mut via = 0u16;
+    // SAFETY: `name` is the 16 bytes the shim documents, `via` is a live slot.
+    let found = unsafe { shim_rtable_lookup(addr, name.as_mut_ptr(), &mut via) };
+    if found == 0 {
+        return None;
+    }
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    Some(CRoute {
+        iface: String::from_utf8_lossy(&name[..end]).into_owned(),
+        via,
+    })
 }
 
 /// Select the wire version the C side uses.

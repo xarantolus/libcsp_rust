@@ -36,7 +36,7 @@ use crate::{Error, Id, Result, Version};
 pub const CAN_FRAME_SIZE: usize = 8;
 
 /// A single CAN frame produced by fragmentation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Frame {
     /// 29-bit extended CAN identifier.
     pub id: u32,
@@ -664,16 +664,6 @@ mod tests {
                     v.len += 1;
                 }
                 v
-            }
-        }
-    }
-
-    impl Default for Frame {
-        fn default() -> Self {
-            Frame {
-                id: 0,
-                data: [0; 8],
-                len: 0,
             }
         }
     }

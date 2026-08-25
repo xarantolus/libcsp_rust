@@ -46,8 +46,20 @@ pub const fn max_encoded_len(body_len: usize) -> usize {
 
 /// KISS-encode `body` into `out`, returning the number of bytes written.
 ///
-/// `body` is the complete CSP frame — encoded header followed by payload (and the CRC, if
-/// one is in use).
+/// `body` is the complete CSP frame — encoded header, payload, and the CRC32.
+///
+/// # The CRC is not optional against a stock C peer
+///
+/// `CSP_ENABLE_KISS_CRC` defaults to **ON** (`libcsp/CMakeLists.txt:50`), and
+/// `csp_kiss_rx` runs `csp_crc32_verify` on every completed frame. A frame without a
+/// trailing CRC32 is dropped, and the only trace is `iface->frame++` — no log line, no
+/// error to a caller, nothing on the wire. A node whose frames all vanish this way looks
+/// exactly like a node with a dead UART.
+///
+/// The receiver tries the checksum over header+payload first and falls back to
+/// payload-only, so
+/// [`crc32::Coverage::PayloadOnly`](crate::crc32::Coverage::PayloadOnly) interoperates
+/// with both. A differential test drives the real `csp_kiss_rx` to keep this true.
 pub fn encode(body: &[u8], out: &mut [u8]) -> Result<usize> {
     let mut n = 0usize;
     let put = |b: u8, out: &mut [u8], n: &mut usize| -> Result<()> {
