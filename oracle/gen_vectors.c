@@ -42,6 +42,16 @@ static void emit(const char * kind, const char * desc, const uint8_t * data, siz
 	fprintf(out, "\n");
 }
 
+/* Payload lengths are ambiguous -- the table has two distinct 1-byte entries -- so the
+ * vectors record the payload bytes themselves and are self-describing. */
+static void hexify(char * dst, size_t dstsz, const uint8_t * data, size_t len) {
+	size_t o = 0;
+	for (size_t i = 0; i < len && o + 3 < dstsz; i++) {
+		o += (size_t)snprintf(dst + o, dstsz - o, "%02x", data[i]);
+	}
+	dst[o] = '\0';
+}
+
 static void emit_u32(const char * kind, const char * desc, uint32_t v) {
 	uint8_t b[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v};
 	emit(kind, desc, b, 4);
@@ -62,6 +72,10 @@ static void cap_reset(void) { cap_n = 0; }
 
 static int cap_tx(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
 	(void)iface; (void)via; (void)from_me;
+	/* A nexthop is handed an UNFRAMED packet: frame_begin/frame_length are only
+	 * valid after the interface prepends the header itself. csp_kiss_tx and
+	 * csp_can_tx both do this. Skipping it captures zero-length frames. */
+	csp_id_prepend(packet);
 	/* The nexthop owns the packet on success, so it must free it. */
 	if (cap_n < CAP_MAX) {
 		uint16_t n = packet->frame_length;
@@ -182,11 +196,12 @@ static void gen_id(int version) {
 			p->length = (uint16_t)PAYLOAD_LENS[pi];
 			memcpy(p->data, PAYLOADS[pi], PAYLOAD_LENS[pi]);
 			csp_id_prepend(p);
-			char desc[160];
+			char phex[64];
+			hexify(phex, sizeof(phex), PAYLOADS[pi], PAYLOAD_LENS[pi]);
+			char desc[200];
 			snprintf(desc, sizeof(desc),
-			         "v=%d,pri=%u,src=%u,dst=%u,sport=%u,dport=%u,flags=0x%02x,len=%zu",
-			         version, c->pri, c->src, c->dst, c->sport, c->dport, c->flags,
-			         PAYLOAD_LENS[pi]);
+			         "v=%d,pri=%u,src=%u,dst=%u,sport=%u,dport=%u,flags=0x%02x,payload=%s",
+			         version, c->pri, c->src, c->dst, c->sport, c->dport, c->flags, phex);
 			char kind[16];
 			snprintf(kind, sizeof(kind), "id_v%d", version);
 			emit(kind, desc, p->frame_begin, p->frame_length);
@@ -215,8 +230,10 @@ static void gen_id_params(int v) {
 /* ---- 3. CRC32-C ---- */
 static void gen_crc32(void) {
 	for (size_t pi = 0; pi < N_PAYLOADS; pi++) {
-		char desc[64];
-		snprintf(desc, sizeof(desc), "len=%zu", PAYLOAD_LENS[pi]);
+		char phex[64];
+		hexify(phex, sizeof(phex), PAYLOADS[pi], PAYLOAD_LENS[pi]);
+		char desc[96];
+		snprintf(desc, sizeof(desc), "payload=%s", phex);
 		emit_u32("crc32", desc, csp_crc32_memory(PAYLOADS[pi], (uint32_t)PAYLOAD_LENS[pi]));
 	}
 	static const char * strs[] = {"", "a", "abc", "message digest",
@@ -266,12 +283,26 @@ static void gen_hmac(void) {
 		{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123", "abc"},
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		uint8_t mac[CSP_HMAC_LENGTH];
-		csp_hmac_memory(cases[i].key, (uint32_t)strlen(cases[i].key),
-		                cases[i].data, (uint32_t)strlen(cases[i].data), mac);
+		/* csp_hmac_memory writes the FULL 20-byte SHA-1 digest, not CSP_HMAC_LENGTH
+		 * bytes -- its out parameter is an unsized uint8_t*, so passing a 4-byte
+		 * buffer (the obvious reading of CSP_HMAC_LENGTH) overflows the stack.
+		 * Only the first 4 bytes are what gets appended to a packet. */
+		uint8_t mac[CSP_SHA1_DIGESTSIZE];
+		memset(mac, 0, sizeof(mac));
+		int rc = csp_hmac_memory(cases[i].key, (uint32_t)strlen(cases[i].key),
+		                         cases[i].data, (uint32_t)strlen(cases[i].data), mac);
 		char desc[192];
 		snprintf(desc, sizeof(desc), "key=\"%s\",data=\"%s\"", cases[i].key, cases[i].data);
-		emit("hmac", desc, mac, sizeof(mac));
+		if (rc != CSP_ERR_NONE) {
+			/* An empty key is rejected (keylen < 1) and the out buffer is left
+			 * untouched -- record the refusal, not the uninitialised bytes. */
+			char d2[224];
+			snprintf(d2, sizeof(d2), "%s,rc=%d", desc, rc);
+			emit("hmac_err", d2, NULL, 0);
+			continue;
+		}
+		emit("hmac_full", desc, mac, CSP_SHA1_DIGESTSIZE);
+		emit("hmac", desc, mac, CSP_HMAC_LENGTH);
 	}
 }
 

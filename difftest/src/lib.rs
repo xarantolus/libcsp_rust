@@ -1,0 +1,216 @@
+//! Differential testing against the C libcsp.
+//!
+//! Links the real C library and exposes the same entry points as [`csp_core`], so a test
+//! can run both on identical bytes and compare. **Dev-only** — this crate is never a
+//! dependency of `csp-core` or `csp`, which is the whole point of the port.
+//!
+//! The 922 golden vectors check the inputs someone thought of. This checks the ones nobody
+//! did.
+//!
+//! # Where the two are *expected* to differ
+//!
+//! Several divergences are deliberate (see `SCOPE.md`). A differential test must assert
+//! the **divergence**, not equality, or a regression back toward C behaviour would pass:
+//!
+//! - `Id::encode` refuses an out-of-range field; the C shifts it into its neighbour.
+//! - `hmac::mac` refuses an empty key; the C returns an error and leaves the output
+//!   untouched, which a caller ignoring the return value reads as a MAC.
+//!
+//! Everything else must agree byte for byte.
+
+#![allow(clippy::missing_safety_doc)]
+
+use core::ffi::c_int;
+
+unsafe extern "C" {
+    fn shim_set_version(v: c_int);
+    fn shim_id_encode(
+        pri: u8,
+        flags: u8,
+        src: u16,
+        dst: u16,
+        dport: u8,
+        sport: u8,
+        out: *mut u8,
+    ) -> c_int;
+    fn shim_id_decode(
+        data: *const u8,
+        pri: *mut u8,
+        flags: *mut u8,
+        src: *mut u16,
+        dst: *mut u16,
+        dport: *mut u8,
+        sport: *mut u8,
+    );
+    fn shim_header_size() -> c_int;
+    fn shim_host_bits() -> u32;
+    fn shim_max_nodeid() -> u32;
+    fn shim_max_port() -> u32;
+    fn shim_is_broadcast(addr: u16, iface_addr: u16, iface_netmask: u16) -> c_int;
+    fn shim_crc32(data: *const u8, len: u32) -> u32;
+    fn shim_sha1(data: *const u8, len: u32, out20: *mut u8);
+    fn shim_hmac(
+        key: *const u8,
+        keylen: u32,
+        data: *const u8,
+        datalen: u32,
+        out20: *mut u8,
+    ) -> c_int;
+}
+
+/// Select the wire version the C side uses.
+///
+/// The C dispatches on a global. Not thread-safe, hence [`LOCK`].
+pub fn c_set_version(v: csp_core::Version) {
+    let n = match v {
+        csp_core::Version::V1 => 1,
+        csp_core::Version::V2 => 2,
+    };
+    // SAFETY: writes one `uint8_t` global in the C library. Callers hold `LOCK`.
+    unsafe { shim_set_version(n) }
+}
+
+/// Serialises access to the C library's globals.
+///
+/// `csp_conf.version` is process-wide state, so differential tests that select a version
+/// cannot run concurrently. This is exactly the property the port removes.
+pub static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Encode a header with the C, returning the header bytes.
+pub fn c_id_encode(id: &csp_core::Id) -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    // SAFETY: `buf` is larger than any header the C can write (max 6 bytes).
+    let n = unsafe {
+        shim_id_encode(
+            id.pri,
+            id.flags,
+            id.src,
+            id.dst,
+            id.dport,
+            id.sport,
+            buf.as_mut_ptr(),
+        )
+    };
+    assert!(n > 0 && (n as usize) <= buf.len());
+    buf[..n as usize].to_vec()
+}
+
+/// Decode a header with the C.
+pub fn c_id_decode(data: &[u8]) -> csp_core::Id {
+    assert!(data.len() >= c_header_size());
+    let (mut pri, mut flags, mut dport, mut sport) = (0u8, 0u8, 0u8, 0u8);
+    let (mut src, mut dst) = (0u16, 0u16);
+    // SAFETY: `data` is at least the header size, checked above; the out pointers are
+    // all to live locals.
+    unsafe {
+        shim_id_decode(
+            data.as_ptr(),
+            &mut pri,
+            &mut flags,
+            &mut src,
+            &mut dst,
+            &mut dport,
+            &mut sport,
+        )
+    }
+    csp_core::Id {
+        pri,
+        flags,
+        src,
+        dst,
+        dport,
+        sport,
+    }
+}
+
+/// The C's header size for the selected version.
+pub fn c_header_size() -> usize {
+    // SAFETY: reads a global.
+    unsafe { shim_header_size() as usize }
+}
+
+/// The C's address width for the selected version.
+pub fn c_host_bits() -> u32 {
+    // SAFETY: reads a global.
+    unsafe { shim_host_bits() }
+}
+
+/// The C's maximum node id.
+pub fn c_max_nodeid() -> u32 {
+    // SAFETY: reads a global.
+    unsafe { shim_max_nodeid() }
+}
+
+/// The C's maximum port.
+pub fn c_max_port() -> u32 {
+    // SAFETY: reads a global.
+    unsafe { shim_max_port() }
+}
+
+/// The C's broadcast test.
+pub fn c_is_broadcast(addr: u16, iface_addr: u16, iface_netmask: u16) -> bool {
+    // SAFETY: builds a `csp_iface_t` on the C stack from scalars.
+    unsafe { shim_is_broadcast(addr, iface_addr, iface_netmask) != 0 }
+}
+
+/// The C's CRC-32C.
+pub fn c_crc32(data: &[u8]) -> u32 {
+    // SAFETY: pointer and length describe `data`.
+    unsafe { shim_crc32(data.as_ptr(), data.len() as u32) }
+}
+
+/// The C's SHA-1.
+pub fn c_sha1(data: &[u8]) -> [u8; 20] {
+    let mut out = [0u8; 20];
+    // SAFETY: `out` is exactly the digest size the C writes.
+    unsafe { shim_sha1(data.as_ptr(), data.len() as u32, out.as_mut_ptr()) }
+    out
+}
+
+/// The C's HMAC-SHA1. `None` when the C refused the input.
+///
+/// The output buffer is 20 bytes, not `CSP_HMAC_LENGTH` — see the shim.
+pub fn c_hmac(key: &[u8], data: &[u8]) -> Option<[u8; 20]> {
+    let mut out = [0u8; 20];
+    // SAFETY: `out` is 20 bytes, which is what csp_hmac_memory writes regardless of
+    // CSP_HMAC_LENGTH. Passing a 4-byte buffer here would overflow by 16.
+    let rc = unsafe {
+        shim_hmac(
+            key.as_ptr(),
+            key.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
+            out.as_mut_ptr(),
+        )
+    };
+    if rc == 0 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Deterministic xorshift, so a failing run can be reproduced from its seed.
+pub struct Rng(pub u64);
+
+impl Rng {
+    /// Next 64 bits.
+    pub fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    /// Next value below `n`.
+    pub fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+    /// Fill `buf` with random bytes.
+    pub fn fill(&mut self, buf: &mut [u8]) {
+        for b in buf.iter_mut() {
+            *b = self.next() as u8;
+        }
+    }
+}
