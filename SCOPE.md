@@ -177,6 +177,60 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
+### PEEK/POKE: a write that did not happen, reported as success
+
+Found on 2026-08-25 by the second `suite_cmp.c` slice, which overrides libcsp's `__weak`
+`csp_cmp_memcpy` with a bounds-checked window — the default is a bare `memcpy`, so a node
+built with CMP and no override answers a peek from any address and a poke to any address.
+
+**The port answered a `POKE` the C refuses.** `csp_cmp_poke_handler` checks the length
+**twice**: once for the header, then again for `sizeof(*cmp) + cmp->len`, so a request that
+declares 64 bytes and carries none is refused outright. `csp_cmp_peek_handler` has no second
+check, because a `PEEK` request legitimately carries no body while declaring how much to
+read.
+
+`Peek::decode` is shared between the two codes and cannot tell them apart, and its own
+"a POKE must carry all of it" check was written as
+
+```rust
+if !body.is_empty() && body.len() < declared as usize {
+```
+
+— skipped exactly when the body is *empty*, which is the case that matters. So a `POKE` for
+64 bytes carrying none became a silent zero-byte write, answered as success. On a
+memory-write service, reporting a write that did not happen is worse than refusing. The
+check now lives in `parse_request`, where the code is known.
+
+### The peek reply's three-byte tail: right mechanism, missing condition
+
+`CMP_PEEK_SIZE(len)` is `10 + len` while the handler writes `len` bytes at packed offset 7,
+so the C declares a reply three bytes longer than the data it wrote. `csp-core::cmp` has
+documented that for a while as "those three bytes are whatever was already in the pooled
+buffer — a peek reply pads itself with unrelated memory".
+
+Measured, both branches:
+
+| `CSP_BUFFER_ZERO_CLEAR` | tail |
+|---|---|
+| `1` (upstream default, canonical build) | zeros — **no leak** |
+| `0` (`just ctest-noclear`) | the previous packet's bytes |
+
+So the claim was right about the mechanism and wrong to state without its condition: in the
+default configuration it simply does not happen. Reaching it also needs a request *shorter*
+than `10 + len`, which the C's own client never sends — `csp_cmp_peek` sends
+`CMP_PEEK_SIZE(peek->len)`, so an ordinary exchange just echoes the requester's own bytes
+back. It takes a hand-crafted request to turn the padding into a read of someone else's
+packet.
+
+Demonstrating it needed the pool *cycled*, not just one allocate-and-free: the free list is
+a queue, so the next `csp_buffer_get` returns a different, never-used buffer. The first
+version of the test asserted the leak, failed, and was nearly written off as "not
+reproducible" — which would have been the wrong conclusion from a test that was too weak
+rather than a claim that was false.
+
+`ctest/` now takes `CTEST_BUFFER_ZERO_CLEAR` as a build option, so both branches are
+reachable. The port zeroes the tail in every configuration.
+
 ### CMP: the request has to be as big as the reply, on both sides
 
 Found on 2026-08-25 by `ctest/suite_cmp.c`, the third oracle suite. It measures the

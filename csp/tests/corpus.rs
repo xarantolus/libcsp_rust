@@ -297,6 +297,27 @@ fn unhex(s: &str) -> Vec<u8> {
 /// This is the port's equivalent of `csp_cmp_handler`, and the comparison is whether it
 /// answers the same requests with the same shape. Nothing here inspects the port's
 /// internals; a peer sees exactly these four numbers.
+/// The same bounds-checked window `ctest/hooks.c` installs over the C's `__weak`
+/// `csp_cmp_memcpy`, and the same pattern in it. Returns the bytes at `addr`, or `None` if
+/// the request is outside the window — which is what makes the node answer nothing.
+///
+/// The C's default is a bare `memcpy`, so without an override a node answers a peek from
+/// *any* address. Modelling the override rather than the default is the point: it is what a
+/// node that intends to survive a hostile peek actually installs.
+fn peek_window(addr: u64, len: usize, wide: bool) -> Option<Vec<u8>> {
+    const BASE: u64 = 0x1000;
+    const REGION: usize = 256;
+
+    if wide {
+        return None; // the corpus only exercises the 32-bit form so far
+    }
+    let off = addr.checked_sub(BASE)? as usize;
+    if len > REGION || off > REGION - len {
+        return None;
+    }
+    Some((off..off + len).map(|i| 0xA0 + (i & 0x0f) as u8).collect())
+}
+
 fn replay_cmp(input: &CmpInput) -> CmpObserved {
     use csp_core::cmp;
 
@@ -350,6 +371,28 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
             tv_nsec: 0,
         }
         .encode(h, &mut out),
+        cmp::Query::Peek { addr, len, wide } => {
+            let Some(src) = peek_window(addr, len as usize, wide) else {
+                return none;
+            };
+            cmp::Peek {
+                addr: addr as u32,
+                len,
+                data: &src,
+            }
+            .encode(h, &mut out)
+        }
+        cmp::Query::Poke { addr, data, wide } => {
+            if peek_window(addr, data.len(), wide).is_none() {
+                return none;
+            }
+            cmp::Peek {
+                addr: addr as u32,
+                len: data.len() as u8,
+                data,
+            }
+            .encode(h, &mut out)
+        }
         // Not exercised by the corpus yet; a panic here is better than a silent 0.
         other => panic!("no reply encoder for {other:?}"),
     };
@@ -380,6 +423,59 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 "clock_min": csp_core::cmp::request_len(csp_core::cmp::code::CLOCK),
             });
             Some((got, "cmp::request_len".to_string()))
+        }
+        "cmp" if rec.case == "the_peek_tail_when_the_request_did_not_cover_it" => {
+            // The C declares a PEEK reply three bytes longer than the data it wrote. What
+            // is in them is a property of the *build*, which is why `buffer_zero_clear`
+            // rides along as an input: with the pool cleared they are zeros, without it
+            // they are the previous packet's bytes (`just ctest-noclear` shows that).
+            //
+            // The port zeroes them unconditionally, so it matches a cleared-pool C and
+            // deliberately does not match an uncleared one. Asserting that here means a
+            // corpus regenerated from the other build fails loudly instead of quietly
+            // comparing against the wrong condition.
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TailInput {
+                request: String,
+                buffer_zero_clear: u8,
+            }
+            let input: TailInput = serde_json::from_value(rec.input.clone()).unwrap();
+            assert_eq!(
+                input.buffer_zero_clear, 1,
+                "corpus was generated from an uncleared-pool build; the port zeroes the \
+                 tail unconditionally, so this record needs the `diverges` verdict"
+            );
+
+            let req = unhex(&input.request);
+            let len = req[6] as usize;
+            let mut out = [0u8; 64];
+            let src = peek_window(
+                u32::from_be_bytes([req[2], req[3], req[4], req[5]]) as u64,
+                len,
+                false,
+            )
+            .unwrap();
+            let n = csp_core::cmp::Peek {
+                addr: 0,
+                len: len as u8,
+                data: &src,
+            }
+            .encode(
+                csp_core::cmp::Header {
+                    kind: csp_core::cmp::REPLY,
+                    code: csp_core::cmp::code::PEEK,
+                },
+                &mut out,
+            )
+            .unwrap();
+
+            let tail: String = out[csp_core::cmp::Peek::HEADER_LEN + len..n]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let got = serde_json::json!({ "reply_len": n, "tail": tail });
+            Some((got, format!("peek len {len}")))
         }
         "cmp" => {
             let input: CmpInput = serde_json::from_value(rec.input.clone()).unwrap();

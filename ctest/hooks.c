@@ -1,6 +1,10 @@
 #include "hooks.h"
 
+#include <csp/csp.h>
 #include <csp/csp_hooks.h>
+
+#include <stdint.h>
+#include <string.h>
 
 #define CTEST_MEMFREE_DEFAULT 0x00100000u
 
@@ -62,6 +66,41 @@ uint32_t csp_memfree_hook(void) {
 unsigned int csp_ps_hook(csp_packet_t * packet) {
 	(void)packet;
 	return ps_entries;
+}
+
+static uint8_t peek_region[CTEST_PEEK_REGION_LEN];
+
+uint8_t * ctest_peek_region(void) {
+	return peek_region;
+}
+
+/* Overrides the `__weak` default in src/cmp/csp_cmp_mem.c, which is a bare memcpy — so a
+ * node built with CMP answers a PEEK from any address and a POKE to any address, with no
+ * validation at all.
+ *
+ * Here exactly one window is reachable. `addr` arrives already cast to a pointer by the
+ * handler, so the check is on the pointer value: anything inside
+ * [CTEST_PEEK_BASE, CTEST_PEEK_BASE + CTEST_PEEK_REGION_LEN) is an offset into the region,
+ * and everything else is refused. Refusing makes the handler return non-zero, which means
+ * the node sends no reply — which is itself a thing worth testing. */
+static bool in_window(uintptr_t p, size_t size) {
+	return (p >= CTEST_PEEK_BASE) && (size <= CTEST_PEEK_REGION_LEN) &&
+		   ((p - CTEST_PEEK_BASE) <= (CTEST_PEEK_REGION_LEN - size));
+}
+
+int csp_cmp_memcpy(csp_memptr_t to, csp_const_memptr_t from, size_t size) {
+	uintptr_t dst = (uintptr_t)to;
+	uintptr_t src = (uintptr_t)from;
+
+	if (in_window(src, size)) {
+		memcpy((void *)to, peek_region + (src - CTEST_PEEK_BASE), size);
+		return CSP_ERR_NONE;
+	}
+	if (in_window(dst, size)) {
+		memcpy(peek_region + (dst - CTEST_PEEK_BASE), (const void *)from, size);
+		return CSP_ERR_NONE;
+	}
+	return CSP_ERR_INVAL;
 }
 
 /* csp_if_kiss.c serialises its transmit path through these. There is one thread

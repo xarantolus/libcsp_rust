@@ -33,6 +33,7 @@
 #include "csp/csp_interface.h"
 
 #include "csp_qfifo.h"
+#include "hooks.h"
 
 #define LOCAL_ADDR 10
 #define PEER_ADDR 11
@@ -359,6 +360,247 @@ START_TEST(test_the_minimum_request_length_is_the_whole_reply)
 }
 END_TEST
 
+/* --- PEEK and POKE ---
+ *
+ * hooks.c overrides the __weak csp_cmp_memcpy with a bounds-checked stub, so the only
+ * memory these can touch is ctest_peek_region, addressed from CTEST_PEEK_BASE. The real
+ * default is a bare memcpy: a node built with CMP and no override answers a peek from any
+ * address and a poke to any address.
+ */
+
+#define PEEK_PATTERN_AT(i) ((uint8_t)(0xA0 + ((i) & 0x0f)))
+
+static void fill_region(void) {
+	uint8_t * region = ctest_peek_region();
+	for (int i = 0; i < CTEST_PEEK_REGION_LEN; i++) {
+		region[i] = PEEK_PATTERN_AT(i);
+	}
+}
+
+/* Build a PEEK/POKE request. `total` is the number of bytes actually sent, which is
+   deliberately separate from `len` — the C checks only that `total >= 7`, so a request can
+   declare more data than it carries. */
+static void peek_request(uint8_t code, uint32_t addr, uint8_t len, size_t total, uint8_t fill) {
+	uint8_t body[CSP_BUFFER_SIZE];
+	memset(body, fill, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = code;
+	body[2] = (uint8_t)(addr >> 24);
+	body[3] = (uint8_t)(addr >> 16);
+	body[4] = (uint8_t)(addr >> 8);
+	body[5] = (uint8_t)addr;
+	body[6] = len;
+	request(body, total);
+}
+
+START_TEST(test_peek_returns_the_bytes_at_the_address)
+{
+	setup_stack();
+	fill_region();
+
+	const uint8_t len = 4;
+	peek_request(CSP_CMP_PEEK, CTEST_PEEK_BASE + 16, len, CMP_PEEK_SIZE(len), 0x00);
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_int_eq(reply_len, (int)CMP_PEEK_SIZE(len));
+	/* The data sits at packed offset 7, right after type/code/addr/len. */
+	for (int i = 0; i < len; i++) {
+		ck_assert_uint_eq(reply[7 + i], PEEK_PATTERN_AT(16 + i));
+	}
+
+	record("peek_returns_the_bytes_at_the_address");
+}
+END_TEST
+
+/* The declared reply length is CMP_PEEK_SIZE(len) = 10 + len, but the handler writes only
+   `len` bytes at offset 7. Three bytes are therefore declared and never written by this
+   exchange.
+
+   What is in them depends entirely on what was already in the pooled buffer, and *that*
+   depends on CSP_BUFFER_ZERO_CLEAR — which is why this test asserts the condition rather
+   than the folklore. Here the request was sent full-size, so the tail holds the
+   requester's own bytes coming back. */
+START_TEST(test_the_peek_tail_echoes_the_requesters_own_bytes)
+{
+	setup_stack();
+	fill_region();
+
+	const uint8_t len = 4;
+	peek_request(CSP_CMP_PEEK, CTEST_PEEK_BASE, len, CMP_PEEK_SIZE(len), 0x5A);
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_int_eq(reply_len, (int)CMP_PEEK_SIZE(len));
+	for (int i = 7 + len; i < reply_len; i++) {
+		ck_assert_uint_eq(reply[i], 0x5A);
+	}
+
+	record("the_peek_tail_echoes_the_requesters_own_bytes");
+}
+END_TEST
+
+/* The interesting case: a request carrying only the seven bytes the length check demands,
+   declaring four bytes of data. The reply is still 14 bytes long, so bytes 11..14 were
+   never written by either side of this exchange — they are whatever the buffer held. */
+START_TEST(test_the_peek_tail_when_the_request_did_not_cover_it)
+{
+	setup_stack();
+	fill_region();
+
+	const uint8_t len = 4;
+	peek_request(CSP_CMP_PEEK, CTEST_PEEK_BASE, len, 7, 0x00);
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_int_eq(reply_len, (int)CMP_PEEK_SIZE(len));
+
+	/* Recorded, not predicted. With CSP_BUFFER_ZERO_CLEAR the pool hands out cleared
+	   buffers and these are zero; without it they are the previous user's bytes. */
+	if (ctest_tracing()) {
+		ctest_trace_begin("cmp", "the_peek_tail_when_the_request_did_not_cover_it", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_hex("request", sent, sent_len);
+		/* A build setting, so it belongs with the inputs: it is what the answer depends
+		   on, not part of the answer. */
+		ctest_trace_int("buffer_zero_clear", CSP_BUFFER_ZERO_CLEAR);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("reply_len", reply_len);
+		ctest_trace_hex("tail", &reply[7 + len], (size_t)reply_len - (7 + len));
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+#if !CSP_BUFFER_ZERO_CLEAR
+/* The other half of the tail question, reachable only when the pool does not clear what it
+   hands out. A previous packet's bytes are still in the buffer, and the three bytes the
+   reply declares but never writes hand them straight back to whoever asked.
+
+   Run with `just ctest-noclear`. In the canonical configuration this compiles out, because
+   there the tail is zeros and asserting otherwise would be asserting folklore. */
+START_TEST(test_the_peek_tail_leaks_the_previous_packet_when_the_pool_is_not_cleared)
+{
+	setup_stack();
+	fill_region();
+
+	/* Stamp every buffer in the pool, so whichever one the peek gets has been used before.
+	   One allocate-and-free is not enough: the free list is a queue, so the next get comes
+	   back with a different, never-used buffer. */
+	for (int round = 0; round < 3; round++) {
+		csp_packet_t * held[CSP_BUFFER_COUNT];
+		int n = 0;
+		for (; n < CSP_BUFFER_COUNT; n++) {
+			held[n] = csp_buffer_get(0);
+			if (held[n] == NULL) {
+				break;
+			}
+			memset(held[n]->data, 0xC7, CSP_BUFFER_SIZE - 16);
+		}
+		ck_assert_int_gt(n, 0);
+		for (int i = 0; i < n; i++) {
+			csp_buffer_free(held[i]);
+		}
+	}
+
+	/* Now the seven-byte minimum, declaring four bytes of data. */
+	reply_count = 0;
+	peek_request(CSP_CMP_PEEK, CTEST_PEEK_BASE, 4, 7, 0x00);
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_int_eq(reply_len, (int)CMP_PEEK_SIZE(4));
+
+	int leaked = 0;
+	for (int i = 7 + 4; i < reply_len; i++) {
+		if (reply[i] == 0xC7) {
+			leaked++;
+		}
+	}
+	ck_assert_int_gt(leaked, 0);
+}
+END_TEST
+#endif
+
+/* CSP_CMP_PEEK_MAX_LEN is 200 and the handler refuses above it — before calling memcpy,
+   which is the only thing keeping a 255-byte read inside the packet buffer. */
+START_TEST(test_peek_refuses_more_than_the_maximum)
+{
+	setup_stack();
+	fill_region();
+
+	peek_request(CSP_CMP_PEEK, CTEST_PEEK_BASE, CSP_CMP_PEEK_MAX_LEN + 1, 220, 0x00);
+
+	ck_assert_uint_eq(reply_count, 0);
+	record("peek_refuses_more_than_the_maximum");
+}
+END_TEST
+
+/* An address the override refuses. The handler propagates the error, so the node answers
+   nothing — a peek that fails is indistinguishable from a node that is not listening. */
+START_TEST(test_peek_outside_the_permitted_window_gets_no_reply)
+{
+	setup_stack();
+	fill_region();
+
+	peek_request(CSP_CMP_PEEK, 0xDEAD0000, 4, CMP_PEEK_SIZE(4), 0x00);
+
+	ck_assert_uint_eq(reply_count, 0);
+	record("peek_outside_the_permitted_window_gets_no_reply");
+}
+END_TEST
+
+START_TEST(test_poke_writes_the_bytes_at_the_address)
+{
+	setup_stack();
+	fill_region();
+
+	const uint8_t len = 4;
+	uint8_t body[CSP_BUFFER_SIZE];
+	memset(body, 0, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = CSP_CMP_POKE;
+	body[2] = 0;
+	body[3] = 0;
+	body[4] = (uint8_t)((CTEST_PEEK_BASE + 32) >> 8);
+	body[5] = (uint8_t)(CTEST_PEEK_BASE + 32);
+	body[6] = len;
+	for (int i = 0; i < len; i++) {
+		body[7 + i] = (uint8_t)(0xE0 + i);
+	}
+	request(body, CMP_POKE_SIZE(len));
+
+	ck_assert_uint_eq(reply_count, 1);
+	for (int i = 0; i < len; i++) {
+		ck_assert_uint_eq(ctest_peek_region()[32 + i], (uint8_t)(0xE0 + i));
+	}
+	/* Neighbours untouched. */
+	ck_assert_uint_eq(ctest_peek_region()[31], PEEK_PATTERN_AT(31));
+	ck_assert_uint_eq(ctest_peek_region()[32 + len], PEEK_PATTERN_AT(32 + len));
+
+	record("poke_writes_the_bytes_at_the_address");
+}
+END_TEST
+
+/* POKE has a second length check that PEEK does not: the request has to actually carry the
+   bytes it says it is writing. Without it the node would write whatever followed the packet
+   into the target address. */
+START_TEST(test_poke_refuses_to_write_bytes_the_request_did_not_carry)
+{
+	setup_stack();
+	fill_region();
+
+	/* Declares 64 bytes, sends the seven-byte minimum. */
+	peek_request(CSP_CMP_POKE, CTEST_PEEK_BASE, 64, 7, 0x00);
+
+	ck_assert_uint_eq(reply_count, 0);
+	/* And nothing was written. */
+	for (int i = 0; i < CTEST_PEEK_REGION_LEN; i++) {
+		ck_assert_uint_eq(ctest_peek_region()[i], PEEK_PATTERN_AT(i));
+	}
+
+	record("poke_refuses_to_write_bytes_the_request_did_not_carry");
+}
+END_TEST
+
 Suite * cmp_suite(void)
 {
 	Suite * s = suite_create("CMP");
@@ -379,6 +621,19 @@ Suite * cmp_suite(void)
 	tcase_add_test(tc_len, test_a_full_size_clock_request_is_answered);
 	tcase_add_test(tc_len, test_the_minimum_request_length_is_the_whole_reply);
 	suite_add_tcase(s, tc_len);
+
+	TCase * tc_mem = tcase_create("peek_poke");
+	tcase_add_test(tc_mem, test_peek_returns_the_bytes_at_the_address);
+	tcase_add_test(tc_mem, test_the_peek_tail_echoes_the_requesters_own_bytes);
+	tcase_add_test(tc_mem, test_the_peek_tail_when_the_request_did_not_cover_it);
+	tcase_add_test(tc_mem, test_peek_refuses_more_than_the_maximum);
+	tcase_add_test(tc_mem, test_peek_outside_the_permitted_window_gets_no_reply);
+	tcase_add_test(tc_mem, test_poke_writes_the_bytes_at_the_address);
+	tcase_add_test(tc_mem, test_poke_refuses_to_write_bytes_the_request_did_not_carry);
+#if !CSP_BUFFER_ZERO_CLEAR
+	tcase_add_test(tc_mem, test_the_peek_tail_leaks_the_previous_packet_when_the_pool_is_not_cleared);
+#endif
+	suite_add_tcase(s, tc_mem);
 
 	return s;
 }
