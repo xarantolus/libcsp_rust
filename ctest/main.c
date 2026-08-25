@@ -26,6 +26,7 @@ Suite * rdp_suite(void);
 Suite * promisc_suite(void);
 Suite * dedup_suite(void);
 Suite * security_suite(void);
+Suite * cmp_suite(void);
 
 static struct option long_options[] = {
 	{"verbose", no_argument, 0, 'V'},
@@ -77,6 +78,7 @@ int main(int argc, char * argv[]) {
 	srunner_add_suite(sr, promisc_suite());
 	srunner_add_suite(sr, dedup_suite());
 	srunner_add_suite(sr, security_suite());
+	srunner_add_suite(sr, cmp_suite());
 
 	srunner_run_all(sr, verbosity);
 	int failed = srunner_ntests_failed(sr);
