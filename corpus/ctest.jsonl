@@ -1,4 +1,7 @@
 {"suite":"rdp","case":"isn_is_a_function_of_the_clock","verdict":"c_only","observed":{"clock_ms":1234567,"snd_iss":17867,"snd_nxt":17868,"snd_una":17867}}
+{"suite":"rdp","case":"without_delayed_acks_every_packet_is_acknowledged","verdict":"must_match","input":{"delayed_acks":0,"ack_delay_count":2,"packets":3},"observed":{"acks":3}}
+{"suite":"rdp","case":"the_delay_count_fires_one_packet_after_it","verdict":"must_match","input":{"delayed_acks":1,"ack_delay_count":2},"observed":{"acks_after_n_packets":[0,0,1,1,1]}}
+{"suite":"rdp","case":"an_ack_is_sent_even_with_nothing_to_acknowledge","verdict":"diverges","input":{"delayed_acks":0,"packets_since_last_ack":0},"observed":{"acks":1}}
 {"suite":"dedup","case":"off_suppresses_nothing","verdict":"must_match","input":{"mode":0,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":2}}
 {"suite":"dedup","case":"fwd_suppresses_only_forwarded","verdict":"must_match","input":{"mode":1,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":1}}
 {"suite":"dedup","case":"incoming_suppresses_only_local","verdict":"must_match","input":{"mode":2,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":2}}

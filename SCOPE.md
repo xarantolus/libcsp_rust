@@ -177,6 +177,39 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
+### The RDP acknowledgement policy: one gratuitous difference, one deliberate
+
+Three divergences in `csp_rdp_should_ack` were predicted from reading in the plan for this
+suite. `ctest/suite_rdp.c` settles two of them by measuring what reaches the wire — the
+sequence numbers are how the decision is computed, not the behaviour, so what is counted is
+acknowledgement *frames*.
+
+**Measured, with `ack_delay_count = 2` and five in-order packets:** the C sends
+acknowledgements `[0, 0, 1, 1, 1]` — nothing until the third packet.
+
+**1. The off-by-one was real, and the port was wrong.** `csp_rdp_should_ack` tests
+`csp_rdp_seq_after(rcv_cur, rcv_lsa + ack_delay_count)`, which is *strictly* after, so the
+acknowledgement fires once the outstanding count **exceeds** the delay — at count + 1. The
+port used `>=` and fired one packet early: 50% more acknowledgements at the default count of
+2. Not a correctness difference, and not worth having, so it now matches. A `>=` here is the
+kind of difference that looks like nothing and costs power on the one link that has none to
+spare.
+
+**2. The "nothing to acknowledge" guard stays, as a recorded divergence.** With delayed acks
+off, the C's first condition returns `true` unconditionally, so `csp_rdp_check_ack` transmits
+an acknowledgement for a sequence number the peer already has. Measured: one frame, for
+nothing. The port returns `false` when `rcv_cur == rcv_lsa`. A peer that does not receive a
+redundant acknowledgement loses nothing, and the frame is not free.
+
+This is the **first record in the corpus carrying the `diverges` verdict**, so the machinery
+that has been in `csp/tests/corpus.rs` since the security suite is now exercised: the arm
+asserts `assert_ne!`, and removing the port's guard makes the run fail with *"recorded as a
+deliberate divergence but now matches the C"*. Verified by mutation, not by inspection.
+
+The third prediction — that `csp_rdp_check_ack` gates on receive-queue occupancy while the
+port's `poll_ack` does not — is not yet measured. It needs a connection whose receive queue
+is nearly full, which is a longer setup than the three above.
+
 ### Ethernet reassembly was missing three of the C's nine guards
 
 Found on 2026-08-25 by `ctest/suite_eth.c`, which drives `csp_eth_rx` directly and asserts,
