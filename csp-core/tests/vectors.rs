@@ -285,3 +285,49 @@ fn hmac_matches_the_c() {
     assert!(full >= 4 && short >= 4, "only checked {full}/{short} hmac vectors");
     println!("checked {full} full + {short} truncated hmac vectors");
 }
+
+/// End-to-end: the KISS vectors exercise header encoding, the CRC-32C append and the
+/// framing together, so they are the strongest single check in the set.
+#[test]
+fn kiss_framing_matches_the_c() {
+    use csp_core::{crc32, kiss};
+
+    let vectors = load();
+    let mut checked = 0;
+    for v in vectors.iter().filter(|v| v.kind.starts_with("kiss_v")) {
+        let version = version_of(v);
+        // gen_vectors.c uses a fixed id for the KISS cases.
+        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let payload: Vec<u8> = match v.get("payload").unwrap() {
+            "empty" => vec![],
+            "abc" => vec![0x41, 0x42, 0x43],
+            "escapes" => vec![0xc0, 0xdb, 0xc0, 0xdb],
+            other => panic!("unknown payload {other}"),
+        };
+
+        // CSP_ENABLE_KISS_CRC appends a CRC before the header is prepended, and the
+        // coverage is payload-only because CSP_21 is never defined.
+        let mut with_crc = [0u8; 64];
+        let crc_len =
+            crc32::append(&[], &payload, crc32::Coverage::PayloadOnly, &mut with_crc).unwrap();
+
+        let mut body = [0u8; 96];
+        let hdr = id.encode(version, &mut body).unwrap();
+        body[hdr..hdr + crc_len].copy_from_slice(&with_crc[..crc_len]);
+
+        let mut framed = [0u8; 256];
+        let n = kiss::encode(&body[..hdr + crc_len], &mut framed).unwrap();
+
+        assert_eq!(
+            &framed[..n],
+            &v.out[..],
+            "{}: kiss frame mismatch\n  rust: {:02x?}\n  c:    {:02x?}",
+            v.desc,
+            &framed[..n],
+            &v.out
+        );
+        checked += 1;
+    }
+    assert!(checked >= 6, "only checked {checked} kiss vectors");
+    println!("checked {checked} kiss vectors");
+}

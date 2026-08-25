@@ -32,6 +32,9 @@ pub mod sha1;
 #[cfg(feature = "hmac")]
 pub mod hmac;
 
+#[cfg(feature = "if-kiss")]
+pub mod kiss;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
