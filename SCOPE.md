@@ -104,6 +104,39 @@ global and becomes a `loopback_to_self()` call.
 | `src/bindings/python/pycsp.c` | Out of scope by definition |
 | `examples/`, `samples/` | Rewritten as Rust examples where useful |
 
+## Implementation status
+
+Everything the goal enumerates is implemented and tested:
+
+| Area | Where | Status |
+|---|---|---|
+| Core (io, conn, route, qfifo, port, buffer, id) | `csp/{pool,conn,qfifo,router,iface}.rs`, `csp-core/id.rs` | done |
+| RDP | `csp-core/rdp.rs` + `csp/conn.rs` (per-connection state, timers driven by `Router::tick`) | done |
+| SFP | `csp-core/sfp.rs` + `csp/delivery.rs` | done |
+| CMP | `csp-core/cmp.rs` — client **and** decoder | done |
+| Crypto | `csp-core/{crc32,sha1,hmac}.rs` | done |
+| Promisc | `csp/router.rs` tap | done |
+| Dedup | `csp/dedup.rs` | done |
+| Bridge | `csp/router.rs::bridge_work` | done |
+| Routing | `csp-core/rtable.rs` + `csp/router.rs` | done |
+| CAN / CFP | `csp-core/cfp.rs` (CFP1 + CFP2) | done |
+| KISS | `csp-core/kiss.rs` | done |
+| Ethernet / EFP | `csp-core/eth.rs` | done |
+| I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
+| Built-in services | `csp/service.rs` | done |
+
+Three items listed in the feature table above are **not implemented**, and none is in
+scope for the goal:
+
+- **`yaml`** — configuration file loading. Off by default in the C too, meaningless on a
+  `no_std` flight target, and libyaml is not installed here so there is no oracle. Routes
+  are configured programmatically or through `rtable::parse`.
+- **`if-tun`** — the tunnel interface, which exists to carry the two `csp_crypto_*` hooks.
+  No flight relevance.
+- **`print`** — the debug printer. Its C form is a variadic function plus ten `uint8_t`
+  counters written from two contexts without synchronisation; the replacement is the
+  typed counters already on `Router` and `Interface`.
+
 ## Deviations from the C that are intentional
 
 These are places the port deliberately does **not** reproduce C behaviour. Each one is a
