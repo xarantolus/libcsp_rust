@@ -26,7 +26,11 @@
 pub mod crc32;
 pub mod id;
 
-// modules added below as they are written
+#[cfg(feature = "sha1")]
+pub mod sha1;
+
+#[cfg(feature = "hmac")]
+pub mod hmac;
 
 pub use id::{Id, Version};
 

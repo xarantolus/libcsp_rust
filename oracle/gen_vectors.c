@@ -279,12 +279,26 @@ static void gen_hmac(void) {
 		{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123", "abc"},
 	};
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-		uint8_t mac[CSP_HMAC_LENGTH];
-		csp_hmac_memory(cases[i].key, (uint32_t)strlen(cases[i].key),
-		                cases[i].data, (uint32_t)strlen(cases[i].data), mac);
+		/* csp_hmac_memory writes the FULL 20-byte SHA-1 digest, not CSP_HMAC_LENGTH
+		 * bytes -- its out parameter is an unsized uint8_t*, so passing a 4-byte
+		 * buffer (the obvious reading of CSP_HMAC_LENGTH) overflows the stack.
+		 * Only the first 4 bytes are what gets appended to a packet. */
+		uint8_t mac[CSP_SHA1_DIGESTSIZE];
+		memset(mac, 0, sizeof(mac));
+		int rc = csp_hmac_memory(cases[i].key, (uint32_t)strlen(cases[i].key),
+		                         cases[i].data, (uint32_t)strlen(cases[i].data), mac);
 		char desc[192];
 		snprintf(desc, sizeof(desc), "key=\"%s\",data=\"%s\"", cases[i].key, cases[i].data);
-		emit("hmac", desc, mac, sizeof(mac));
+		if (rc != CSP_ERR_NONE) {
+			/* An empty key is rejected (keylen < 1) and the out buffer is left
+			 * untouched -- record the refusal, not the uninitialised bytes. */
+			char d2[224];
+			snprintf(d2, sizeof(d2), "%s,rc=%d", desc, rc);
+			emit("hmac_err", d2, NULL, 0);
+			continue;
+		}
+		emit("hmac_full", desc, mac, CSP_SHA1_DIGESTSIZE);
+		emit("hmac", desc, mac, CSP_HMAC_LENGTH);
 	}
 }
 

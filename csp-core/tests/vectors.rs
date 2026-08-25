@@ -216,3 +216,72 @@ fn crc32_matches_the_c() {
     assert!(checked >= 10, "only checked {checked} crc32 vectors");
     println!("checked {checked} crc32 vectors");
 }
+
+#[test]
+fn sha1_matches_the_c() {
+    let vectors = load();
+    let mut checked = 0;
+    for v in vectors.iter().filter(|v| v.kind == "sha1") {
+        let data: Vec<u8> = if let Some(s) = v.get("str") {
+            s.trim_matches('"').as_bytes().to_vec()
+        } else {
+            // "x*N" -- N repetitions of 'x', used to straddle the padding boundaries
+            let d = v.desc.trim();
+            let n: usize = d.strip_prefix("x*").expect("unknown sha1 input").parse().unwrap();
+            vec![b'x'; n]
+        };
+        assert_eq!(
+            csp_core::sha1::digest(&data).to_vec(),
+            v.out,
+            "{}: sha1 mismatch",
+            v.desc
+        );
+        checked += 1;
+    }
+    assert!(checked >= 15, "only checked {checked} sha1 vectors");
+    println!("checked {checked} sha1 vectors");
+}
+
+#[test]
+fn hmac_matches_the_c() {
+    let vectors = load();
+    let mut full = 0;
+    let mut short = 0;
+    for v in &vectors {
+        let key = v.get("key").map(|s| s.trim_matches('"').as_bytes().to_vec());
+        let data = v.get("data").map(|s| s.trim_matches('"').as_bytes().to_vec());
+        let (Some(key), Some(data)) = (key, data) else { continue };
+        match v.kind.as_str() {
+            "hmac_full" => {
+                assert_eq!(
+                    csp_core::hmac::mac_full(&key, &data).unwrap().to_vec(),
+                    v.out,
+                    "{}: full hmac mismatch",
+                    v.desc
+                );
+                full += 1;
+            }
+            "hmac" => {
+                assert_eq!(
+                    csp_core::hmac::mac(&key, &data).unwrap().to_vec(),
+                    v.out,
+                    "{}: truncated hmac mismatch",
+                    v.desc
+                );
+                short += 1;
+            }
+            "hmac_err" => {
+                // The C refuses an empty key; so must we, rather than returning a MAC
+                // over an uninitialised buffer.
+                assert!(
+                    csp_core::hmac::mac(&key, &data).is_err(),
+                    "{}: C refused this but we accepted it",
+                    v.desc
+                );
+            }
+            _ => continue,
+        }
+    }
+    assert!(full >= 4 && short >= 4, "only checked {full}/{short} hmac vectors");
+    println!("checked {full} full + {short} truncated hmac vectors");
+}

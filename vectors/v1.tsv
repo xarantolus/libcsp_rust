@@ -101,10 +101,14 @@ sha1	x*65	78c741ddc482e4cdf8c474a0876347a0905b6233
 sha1	x*119	4300320394f7ee239bcdce7d3b8bcee173a0cd5c
 sha1	x*120	ceb2821639c4b6dcb10bce0e522ca2e608ce056d
 sha1	x*128	150fa3fbdc899bd0b8f95a9fb6027f564d953762
-hmac	key="",data=""	b6027f56
+hmac_err	key="",data="",rc=-2	
+hmac_full	key="key",data="The quick brown fox jumps over the lazy dog"	de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9
 hmac	key="key",data="The quick brown fox jumps over the lazy dog"	de7c9b85
+hmac_full	key="secret",data="abc"	694abd10842d161ddbc54df8a0d57cf64d0dbcc9
 hmac	key="secret",data="abc"	694abd10
+hmac_full	key="0123456789abcdef",data="hello world"	bbdf92a80a80cbed721df06c10f43aa79de67f7d
 hmac	key="0123456789abcdef",data="hello world"	bbdf92a8
+hmac_full	key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",data="abc"	a7fe1ddcbb4492e784e43a5474f45315f10171f9
 hmac	key="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123",data="abc"	a7fe1ddc
 cfp_v1	v=1,len=0,frame=0/1	014000000682850a0000000000
 cfp_v1	v=1,len=1,frame=0/1	014000000782850a0000010000
