@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["csp-core", "csp"]
+members = ["csp-core", "csp", "difftest"]
 
 [workspace.package]
 version = "0.1.0"
