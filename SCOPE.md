@@ -210,9 +210,32 @@ that has been in `csp/tests/corpus.rs` since the security suite is now exercised
 asserts `assert_ne!`, and removing the port's guard makes the run fail with *"recorded as a
 deliberate divergence but now matches the C"*. Verified by mutation, not by inspection.
 
-The third prediction — that `csp_rdp_check_ack` gates on receive-queue occupancy while the
-port's `poll_ack` does not — is not yet measured. It needs a connection whose receive queue
-is nearly full, which is a longer setup than the three above.
+**3. The receive-queue gate is real, and unreachable at the test sizes.**
+`csp_rdp_check_ack` opens with
+
+```c
+if (abs(CSP_CONN_RXQUEUE_LEN - csp_queue_size(conn->rx_queue)) < window_size) return;
+```
+
+— acknowledge only while there is room for a full window still to arrive. That is
+receiver-side flow control: an unread connection stops *inviting* data rather than accepting
+it and dropping it. `poll_ack` has no equivalent.
+
+Measured with the application never reading: **12 delivered, 12 acknowledged, the gate never
+fired.** It suppresses at a queue depth above `16 − 4 = 12`, and the node exhausts its
+**15** buffers at 12 delivered. So at the canonical sizes the flow control cannot trigger —
+the pool runs out first — and the port's missing gate is not a behavioural difference at
+all.
+
+At the flight sizes it is. `CSP_BUFFER_COUNT` 64 with `CSP_CONN_RXQUEUE_LEN` 32 and a
+window of 4 gates at a depth above 28, reachable long before 64 buffers are gone. So this is
+a divergence that is invisible in every test build and present in the one that flies, which
+is a good reason it has never been observed.
+
+The replay says so out loud rather than passing quietly: it asserts that the recorded depth
+stayed below the gate, and fails with *"the oracle reached a queue depth where the gate
+fires … so this replay is no longer a no-op"* if the oracle is ever built with the flight
+sizes. Closing the gap in the port is [task #126]'s neighbour, not this suite's job.
 
 ### Ethernet reassembly was missing three of the C's nine guards
 
