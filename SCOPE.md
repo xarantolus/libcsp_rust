@@ -401,6 +401,39 @@ biased above 31 so the cases could not have been carried by a v1 header.
    leaves by. It only failed once strengthened to compare which interface the frame went
    out of. Every forwarding test now asserts the interface, not just the frame.
 
+4. **"Is this packet for me?" was one condition where the C has three.** `csp_route.c`:
+
+   ```c
+   int is_to_me = (csp_iflist_get_by_addr(packet->id.dst) != NULL
+                || csp_id_is_broadcast(packet->id.dst, input.iface)
+                || csp_addr_is_alias(packet->id.dst));
+   ```
+
+   — **any** interface's address, the broadcast address of the interface it **arrived on**,
+   or a bound alias. The port had
+   `id.dst == self.address || is_broadcast(id.dst, self.address, 0)`. Three defects in one
+   line:
+
+   - *A packet for the node's other interface was forwarded back onto the wire.* A node
+     with a CAN interface and a KISS interface answers to both addresses in the C; the port
+     recognised only one, so a command addressed to the radio-side address was bounced onto
+     the bus instead of delivered. Measured against the C: it delivers, the port emitted a
+     frame.
+   - *Every subnet broadcast was missed.* The hardcoded netmask `0` makes the host mask the
+     whole address space, so the subnet test degenerates to `addr == max_node_id()` — the
+     global broadcast — and a packet to an interface's own subnet broadcast was forwarded
+     rather than delivered. `Version::is_broadcast` itself was correct, including the global
+     case; only its arguments were wrong.
+   - *Aliases were never consulted*, though `IfList` implements them.
+
+   `IfList::find_by_addr` covers the interface addresses and the aliases together, and
+   `is_broadcast_for` takes the ingress interface. Verified by temporarily restoring the
+   old line: all three new tests fail without the fix.
+
+**Still open:** the alias branch is fixed but **not** covered by a differential test — the
+C shim would need `csp_alias_add` wired up. It rides on `find_by_addr`, which the
+interface-address test does exercise.
+
 **Still open:** `Routed::Forwarded` carries one destination, so the fan-out — a clone to
 every tied route, or to every default interface — is still single-path even though
 `find_all` and the default scan now both run. Closing it needs `Routed` to carry a set,
