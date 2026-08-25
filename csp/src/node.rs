@@ -353,6 +353,14 @@ impl<
     }
 
     /// Open a connection to `dst`.
+    ///
+    /// `opts` is a mask of [`csp_core::security::opts`]. The protections it asks for are
+    /// carried in the header of every packet on the connection, and expected in the header
+    /// of every reply — this is what tells the peer to verify a checksum or a MAC, so an
+    /// option that does not reach the header is a protection the caller asked for and
+    /// silently did not get.
+    ///
+    /// `RDP_REQ` is refused. See [`Node::rdp_unsupported`].
     pub fn connect(
         &mut self,
         pri: u8,
@@ -361,10 +369,11 @@ impl<
         opts: u32,
         now_ms: u32,
     ) -> Result<Handle> {
+        let flags = Self::conn_flags(opts)?;
         let sport = self.next_sport();
         let idout = Id {
             pri,
-            flags: 0,
+            flags,
             src: self.address,
             dst,
             dport,
@@ -379,10 +388,12 @@ impl<
             .router
             .conns
             .alloc_kind(idout, opts, now_ms, crate::conn::Kind::Client)?;
-        // The reply we expect: their source is our destination and vice versa.
+        // The reply we expect: their source is our destination and vice versa. The C sets
+        // the same flags on both ids, so a reply that drops the protection no longer
+        // matches the connection.
         let idin = Id {
             pri,
-            flags: 0,
+            flags,
             src: dst,
             dst: self.address,
             dport: sport,
@@ -390,6 +401,42 @@ impl<
         };
         self.router.conns.set_id_in(h, idin)?;
         Ok(h)
+    }
+
+    /// The header flags a connection with these options puts on the wire.
+    ///
+    /// Mirrors `csp_connect` (`csp_conn.c:279-306`), including the rule that an explicit
+    /// `CRC32_PROHIB` wins over `CRC32_REQ` rather than being a contradiction.
+    fn conn_flags(opts: u32) -> Result<u8> {
+        use csp_core::security::opts as o;
+
+        if opts & o::RDP_REQ != 0 {
+            return Err(Self::rdp_unsupported());
+        }
+
+        let mut flags = 0u8;
+        if opts & o::HMAC_REQ != 0 {
+            flags |= csp_core::flags::HMAC;
+        }
+        if (opts & o::CRC32_REQ != 0) && (opts & o::CRC32_PROHIB == 0) {
+            flags |= csp_core::flags::CRC32;
+        }
+        Ok(flags)
+    }
+
+    /// Why `RDP_REQ` is refused.
+    ///
+    /// The RDP state machine in `csp_core::rdp` is complete, but nothing in this crate
+    /// drives it: no `SYN` is sent, no received packet is fed to it, and there is no
+    /// retransmission queue. Setting `flags::RDP` anyway would be worse than refusing —
+    /// the peer would read the first five bytes of payload as an RDP header.
+    ///
+    /// This mirrors what the C does when built without `CSP_USE_RDP`: `csp_connect`
+    /// records `CSP_DBG_ERR_UNSUPPORTED` and returns no connection.
+    fn rdp_unsupported() -> Error {
+        Error::Unsupported {
+            feature: csp_core::Feature::Rdp,
+        }
     }
 
     /// Send a packet on a connection.
@@ -1050,10 +1097,64 @@ mod tests {
         let s = S::new();
         let mut n = node(&s);
         let plain = n.connect(2, 8, 20, 0, 0).unwrap();
-        let rdp = n.connect(2, 8, 20, csp_core::sfp::opts::RDP, 0).unwrap();
+        let signed = n
+            .connect(2, 8, 20, csp_core::security::opts::HMAC_REQ, 0)
+            .unwrap();
         assert!(
-            n.conn_sfp_mtu(rdp).unwrap() < n.conn_sfp_mtu(plain).unwrap(),
-            "RDP overhead must reduce the usable MTU"
+            n.conn_sfp_mtu(signed).unwrap() < n.conn_sfp_mtu(plain).unwrap(),
+            "the MAC has to come out of the usable MTU"
+        );
+    }
+
+    /// The options a connection is opened with have to reach the header of what it sends,
+    /// or the caller asked for a protection and silently did not get it: the peer only
+    /// knows to verify a checksum or a MAC because the flag says so.
+    ///
+    /// Asserted on the emitted packet rather than on the connection, because the header is
+    /// the only part the peer can see.
+    #[test]
+    fn connect_options_reach_the_header() {
+        use csp_core::security::opts as o;
+
+        fn flags_on_the_wire(n: &mut N<'_>, opts: u32) -> u8 {
+            let c = n.connect(2, 8, 20, opts, 0).unwrap();
+            let p = n.packet().unwrap();
+            match n.send(c, p, 0).unwrap() {
+                Outbound::Transmit { packet, .. } => packet.id().flags,
+                _ => panic!("expected a transmit"),
+            }
+        }
+
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+
+        assert_eq!(flags_on_the_wire(&mut n, 0), 0);
+        assert_eq!(
+            flags_on_the_wire(&mut n, o::CRC32_REQ),
+            csp_core::flags::CRC32,
+            "CSP_O_CRC32 sets CSP_FCRC32 in csp_connect"
+        );
+        assert_eq!(
+            flags_on_the_wire(&mut n, o::HMAC_REQ),
+            csp_core::flags::HMAC
+        );
+        // csp_conn.c:279 — an explicit prohibition clears the request rather than being a
+        // contradiction that stops the connection.
+        assert_eq!(flags_on_the_wire(&mut n, o::CRC32_REQ | o::CRC32_PROHIB), 0);
+    }
+
+    /// A connection that flags RDP and does not speak it is worse than no connection: the
+    /// peer reads the first five payload bytes as an RDP header.
+    #[test]
+    fn connect_refuses_rdp_rather_than_flagging_it() {
+        let s = S::new();
+        let mut n = node(&s);
+        assert_eq!(
+            n.connect(2, 8, 20, csp_core::security::opts::RDP_REQ, 0),
+            Err(Error::Unsupported {
+                feature: csp_core::Feature::Rdp
+            })
         );
     }
 

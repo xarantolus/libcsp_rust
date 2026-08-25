@@ -67,15 +67,14 @@ match Delivery::classify(first_packet, &mut connection) {
 }
 ```
 
-Two independent axes decide this, both self-describing on the wire:
+The `FRAG` bit decides it, and it is a **per-packet** header flag, so it is known from the
+first packet. It becomes the `Delivery` you match on.
 
-| Axis | Signal | Known at | Affects |
-|---|---|---|---|
-| **RDP** | `RDP` bit, a connection option negotiated in the handshake | accept | *how* you read |
-| **SFP** | `FRAG` bit, a **per-packet** header flag | first packet | *what the payload is* |
-
-RDP is absorbed by the library and never reaches the handler, so all four combinations
-behave identically from a handler's point of view. SFP becomes the `Delivery` you match on.
+> **RDP is not available.** `csp-core::rdp` is a complete state machine, but the node does
+> not drive it — see *RDP is implemented in the core and not reached by the node* in
+> `SCOPE.md`. `Node::connect` refuses `RDP_REQ` with `Error::Unsupported` rather than
+> setting a flag it will not honour. When it lands, it will be the second axis here:
+> reliability changes *how* you read, and is known at accept.
 
 Classifying costs one packet peek and **consumes nothing**. A narrow handler that gets the
 wrong shape gets the delivery *back*:
@@ -188,8 +187,9 @@ covers different bytes than it believes. (For the record, `CSP_21` is defined by
 system in the tree, so the header is never covered. The KISS golden vectors only match
 byte-for-byte under `Coverage::PayloadOnly`, which settles it empirically.)
 
-RDP options are **per connection**. The C keeps its six RDP tunables in file statics shared
-by every connection, so two connections with different timeouts are not expressible there.
+RDP options are **per connection** in `csp-core::rdp`. The C keeps its six RDP tunables in
+file statics shared by every connection, so two connections with different timeouts are not
+expressible there. (This is a property of the core type; the node does not run RDP yet.)
 
 ## The router
 
@@ -198,13 +198,17 @@ let mut router: Router<CONNS, RXQ, PORTS, QFIFO> = Router::new(address, version)
 router.bind(20)?;
 
 loop {
-    match router.work(&pool, now_ms()) {
+    match router.work(&pool, &ifaces, now_ms()) {
         Routed::Idle => { /* ordinary — csp_route_work returns an ERROR here */ }
         Routed::Delivered { port, conn } => dispatch(port, conn),
-        Routed::Forwarded { iface, via } => send_on(iface, via),
+        // `packet` is the pool slot holding the frame, and it is now yours: claim it with
+        // `Node::take_forwarded` and put it on the wire. An earlier version of this enum
+        // carried only `iface` and `via`, which left the router no way to hand the packet
+        // over — so it dropped it, and the node forwarded nothing at all.
+        Routed::Forwarded { iface, via, packet } => send_on(iface, via, packet),
         Routed::Dropped(why) => log(why),
     }
-    router.tick(&pool, now_ms(), conn_timeout);   // drives RDP timers and idle expiry
+    router.tick(&pool, now_ms(), conn_timeout);   // idle connection expiry
 }
 ```
 
@@ -213,9 +217,9 @@ loop {
 through one `uint8_t` counter that wraps at 256 and is written from ISR and task context
 without synchronisation.
 
-`Router::tick` is not optional. The RDP state machine reads no clock on purpose, so
-nothing else advances its timers or reclaims idle connections — and connection slots are
-the scarcest resource on a node (8 by default, 16 in flight).
+`Router::tick` is not optional: nothing else reclaims idle connections, and connection
+slots are the scarcest resource on a node (8 by default, 16 in flight). It is also where
+RDP's timers will be advanced, since the state machine reads no clock on purpose.
 
 `Router::bridge_work(pool, a, b, now)` is the transparent bridge. A frame arriving on an
 interface that is neither side is **refused**; the C's `if/else` has no third branch and
