@@ -739,3 +739,42 @@ arbitrary bytes are rejected essentially always, and a test that never reaches a
 tests nothing. Two intermediate versions of that test asserted properties that held
 vacuously; the assertion counting how many streams reached the decoder is what caught it,
 and is why every generator here now carries one.
+
+## API shape review
+
+Held until last on purpose: the shape of an API that does the wrong thing is not worth
+arguing about. With all fifteen modules audited and the differential suite green, two
+problems were left, both of the kind that only shows up when you read the surface as a
+whole rather than one function at a time.
+
+**`Destinations` handed back `&[(u8, u16)]`.** Interface index and next hop, both small
+unsigned integers, in an unnamed pair — so `for (via, iface) in d.as_slice()` compiles and
+routes every packet to the wrong place. Now a named `Destination { iface, via }`. This is
+in the hottest path in the crate and was introduced by the routing fix in this same audit
+round, which is a fair illustration of how quickly the shape degrades when you are
+concentrating on behaviour.
+
+**Five accessors to describe one connection.** `conn_src`, `conn_dst`, `conn_dport`,
+`conn_sport`, `conn_opts` — the C's five calls, transliterated. Each is separately
+fallible, so a caller logging a connection makes five lookups and unwraps five results,
+and a connection that closes between the first and the fifth yields a description that
+never existed. `conn_info` returns all of it from one lookup with one error; the
+individual accessors stay for callers that want a single field. A test pins the two
+against each other so they cannot drift.
+
+Everything else survived the review. In particular the decisions that looked most
+questionable when they were made held up:
+
+- **`accept` does not block.** The C takes a timeout and sleeps. Non-blocking is what lets
+  the crate run from a bare interrupt loop, and a caller that wants blocking has a clock.
+- **`transmit` borrows the packet.** The C's conditional ownership — nexthop owns it on
+  success, must not free it on failure — is uncheckable and every driver has to get it
+  right. Borrowing makes the question not arise.
+- **`Delivery::{Datagram, Stream}` decided per packet rather than per port.** The wire
+  carries `CSP_FFRAG` on every packet; making the registrant choose in advance is what
+  makes the C free a perfectly good packet and report an SFP error.
+- **Errors carry their context.** `BufferTooSmall { needed }`, `DuplicateName { name }`,
+  `NoSuchInterface { index }`, `AddressRefused { addr }`. Two of those replaced codes this
+  audit found being reused for unrelated conditions — `TableFull` for a duplicate name and
+  `NoTransferInProgress` for an unknown index — which had survived because nothing tested
+  the failure path.

@@ -56,13 +56,41 @@ pub enum Unroutable {
 /// returns a single destination silently makes both single-path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Destinations {
-    entries: [(u8, u16); 4],
+    entries: [Destination; 4],
     n: usize,
 }
 
+/// A connection's endpoints and options, from a single lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnInfo {
+    /// Peer address packets arrive from.
+    pub src: u16,
+    /// Address packets are sent to.
+    pub dst: u16,
+    /// Port on this node.
+    pub dport: u8,
+    /// Port on the peer.
+    pub sport: u8,
+    /// Socket options (`sfp::opts`).
+    pub opts: u32,
+}
+
+/// One place a packet goes: which interface, and the next hop on it.
+///
+/// A named struct rather than a `(u8, u16)` pair, because the two are both small unsigned
+/// integers and a destructuring that swaps them compiles and routes every packet to the
+/// wrong place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Destination {
+    /// Interface index, as returned by [`IfList::add`](crate::IfList::add).
+    pub iface: u8,
+    /// Next hop, or [`rtable::NO_VIA`] to send straight to the destination address.
+    pub via: u16,
+}
+
 impl Destinations {
-    /// Interface index and next hop for each destination.
-    pub fn as_slice(&self) -> &[(u8, u16)] {
+    /// Every destination this packet goes to.
+    pub fn as_slice(&self) -> &[Destination] {
         &self.entries[..self.n]
     }
     /// How many interfaces this packet goes out on.
@@ -264,6 +292,26 @@ impl<
     /// Connection options.
     pub fn conn_opts(&self, conn: Handle) -> Result<u32> {
         self.router.conns.opts(conn)
+    }
+
+    /// Everything about a connection, in one lookup.
+    ///
+    /// The C exposes `csp_conn_dst`, `csp_conn_src`, `csp_conn_dport`, `csp_conn_sport`
+    /// and `csp_conn_flags` as five separate calls, and the port mirrored them. That means
+    /// five fallible lookups to describe one connection, each able to fail differently —
+    /// and in practice a caller logging a connection makes all five and unwraps all five.
+    /// This is one lookup and one error.
+    ///
+    /// The individual accessors remain, for the cases that genuinely want one field.
+    pub fn conn_info(&self, conn: Handle) -> Result<ConnInfo> {
+        let idin = self.router.conns.id_in(conn)?;
+        Ok(ConnInfo {
+            src: idin.src,
+            dst: self.router.conns.id_out(conn)?.dst,
+            dport: idin.dport,
+            sport: idin.sport,
+            opts: self.router.conns.opts(conn)?,
+        })
     }
 
     /// True if the handle still refers to a live connection.
@@ -489,7 +537,7 @@ impl<
         routed_from: Option<u8>,
     ) -> core::result::Result<Destinations, Unroutable> {
         let mut out = Destinations {
-            entries: [(0, 0); 4],
+            entries: [Destination { iface: 0, via: 0 }; 4],
             n: 0,
         };
         let mut skipped_self = false;
@@ -510,7 +558,10 @@ impl<
                     continue;
                 }
                 if out.n < out.entries.len() {
-                    out.entries[out.n] = (r.iface, r.via);
+                    out.entries[out.n] = Destination {
+                        iface: r.iface,
+                        via: r.via,
+                    };
                     out.n += 1;
                 }
             }
@@ -545,7 +596,7 @@ impl<
                 let via = rtable::NO_VIA;
                 #[cfg(not(feature = "rtable"))]
                 let via = 0xFFFFu16;
-                out.entries[out.n] = (idx, via);
+                out.entries[out.n] = Destination { iface: idx, via };
                 out.n += 1;
             }
         }
@@ -580,8 +631,12 @@ impl<
         }
         match self.resolve(id.dst, routed_from) {
             Ok(d) => {
-                let (iface, via) = d.as_slice()[0];
-                Outbound::Transmit { iface, via, packet }
+                let first = d.as_slice()[0];
+                Outbound::Transmit {
+                    iface: first.iface,
+                    via: first.via,
+                    packet,
+                }
             }
             Err(why) => Outbound::NoRoute(packet, why),
         }
@@ -805,6 +860,46 @@ mod tests {
             n.accept().is_none(),
             "a closed connection must not still be acceptable"
         );
+    }
+
+    #[test]
+    fn conn_info_agrees_with_the_individual_accessors() {
+        // Five accessors and one struct must not drift apart, or a caller that switches
+        // between them sees a different connection.
+        let s = S::new();
+        let mut n = node(&s);
+        n.bind(20).unwrap();
+
+        let mut p = n.packet().unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"x").unwrap();
+        n.router.receive(p, 0);
+        assert!(matches!(n.work(0), Routed::Delivered { .. }));
+        let c = n.accept().unwrap();
+
+        let i = n.conn_info(c).unwrap();
+        assert_eq!(i.src, n.conn_src(c).unwrap());
+        assert_eq!(i.dst, n.conn_dst(c).unwrap());
+        assert_eq!(i.dport, n.conn_dport(c).unwrap());
+        assert_eq!(i.sport, n.conn_sport(c).unwrap());
+        assert_eq!(i.opts, n.conn_opts(c).unwrap());
+        assert_eq!((i.src, i.dport, i.sport), (8, 20, 10));
+    }
+
+    #[test]
+    fn conn_info_on_a_closed_connection_fails_once_rather_than_five_times() {
+        let s = S::new();
+        let mut n = node(&s);
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+        n.close(c).unwrap();
+        assert!(n.conn_info(c).is_err());
     }
 
     #[test]
@@ -1137,7 +1232,7 @@ mod tests {
             .resolve(25, None)
             .expect("the default interface must be used");
         assert_eq!(d.len(), 1);
-        assert_eq!(d.as_slice()[0].0, 0, "only the default-marked one");
+        assert_eq!(d.as_slice()[0].iface, 0, "only the default-marked one");
     }
 
     #[test]
@@ -1177,7 +1272,7 @@ mod tests {
 
         let d = n.resolve(8, None).unwrap();
         assert_eq!(d.len(), 1);
-        assert_eq!(d.as_slice()[0].0, 3, "the route, not the default");
+        assert_eq!(d.as_slice()[0].iface, 3, "the route, not the default");
     }
 
     #[test]
