@@ -52,6 +52,22 @@ canonical:
         -DCSP_USE_RDP=ON -DCSP_USE_HMAC=ON -DCSP_USE_PROMISC=ON -DCSP_USE_RTABLE=ON
     cmake --build build/canonical
 
+# The size of the C API, four ways, so the denominator in SCOPE.md is reproducible
+# rather than remembered. Needs `just canonical` first.
+api-surface:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lib=build/canonical/libcsp.so.2.2
+    [ -f "$lib" ] || { echo "run 'just canonical' first"; exit 1; }
+    nm -D --defined-only "$lib" | awk '$2=="T" && $3 ~ /^csp_/ {print $3}' | sort -u > /tmp/api-exported
+    grep -rhoE '^[a-zA-Z_][a-zA-Z0-9_ *]*\b(csp_[a-z0-9_]+)\s*\(' libcsp/include/csp/ --include=*.h \
+        | grep -oE 'csp_[a-z0-9_]+\s*\($' | tr -d ' (' | sort -u > /tmp/api-declared
+    printf 'exported from the canonical build   %s\n' "$(wc -l < /tmp/api-exported)"
+    printf 'declared in include/csp/**.h        %s\n' "$(wc -l < /tmp/api-declared)"
+    printf '  both                              %s\n' "$(comm -12 /tmp/api-declared /tmp/api-exported | wc -l)"
+    printf '  declared, not in this build       %s\n' "$(comm -23 /tmp/api-declared /tmp/api-exported | wc -l)"
+    printf '  exported, not a public header     %s\n' "$(comm -13 /tmp/api-declared /tmp/api-exported | wc -l)"
+
 # ---------------------------------------------------------------------------
 # Rust
 # ---------------------------------------------------------------------------

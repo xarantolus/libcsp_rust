@@ -107,25 +107,39 @@ global and becomes a `loopback_to_self()` call.
 
 ## Implementation status
 
-**Measured, not asserted.** `nm -D` on the built C library plus a header scan gives **186
-public functions**. An earlier version of this section claimed full coverage by comparing
-*module names* against the goal's list, which is not the same thing and was wrong: the
-count was 91 without a counterpart, ~35 of them genuinely missing — including the whole
-application-facing socket API.
+An early version of this section claimed full coverage by comparing *module names* against
+the goal's list, which is not the same thing and was wrong: 91 had no counterpart, ~35 of
+them genuinely missing — including the whole application-facing socket API. Those 35 were
+built, and then every module was audited against its original function by function (see
+`AUDIT.md`), which found more: the default-interface routing fan-out, the three CMP memory
+hooks, `csp_socket_close`, `csp_ping_noreply`, and four interface counters that had no way
+to be incremented.
 
-Those 35 were built, and then every module was audited against its original function by
-function (see `AUDIT.md`), which found more: the default-interface routing fan-out, the
-three CMP memory hooks, `csp_socket_close`, `csp_ping_noreply`, and four interface
-counters that had no way to be incremented.
+### The denominator
 
-The current position:
+`just api-surface` prints it. On the canonical configuration pinned above:
 
-| | Count | |
-|---|---|---|
-| Covered | 140 | including everything in the goal's scope list |
-| Out of scope by design | ~40 | ZMQ (8), USART drivers (5), the 16-function arch shim replaced by the caller's `Platform`, plus `yaml` and `if-tun` |
-| Replaced by a different mechanism | 6 | `csp_cmp_set_memcpy`/`memread64`/`memwrite64` (no-ops in the C) → the `Hooks` trait; `csp_panic` → Rust's `#[panic_handler]`; `csp_listen`'s backlog → a const generic |
-| Absent by explicit decision | ~5 | the `print` feature (`csp_debug.c`, `csp_hex_dump.c`), `csp_bind_callback`, `csp_conn_print_table` |
+```
+exported from the canonical build   229
+declared in include/csp/**.h        201
+  both                              171
+  declared, not in this build        30   ZMQ, yaml, drivers this build leaves out
+  exported, not a public header      58   internal to src/ — csp_qfifo_*, csp_conn_*, csp_rdp_*
+```
+
+**This section previously said 186, and that number is not reproducible by either method.**
+It was recorded as "`nm -D` on the built C library plus a header scan" with no command, so
+there is no way to recompute it or to find out which of the two it meant. It also carried a
+four-row split — 140 covered, ~40 out of scope, 6 replaced, ~5 absent — summing to 191
+against a stated total of 186, with two of the four rows approximate. A table that does not
+add up and cannot be recomputed is worse than no table: it reads as a measurement and
+behaves as a memory.
+
+So it is gone rather than corrected. What replaces it is the reproducible denominator above
+and the per-area status table below, which names *where* each area lives and can be checked
+by opening the file. Coverage of the 229 is not currently measured function by function;
+saying so is the honest position, and re-establishing it is a piece of work in its own
+right rather than a number to assert here.
 
 ### Absent by decision
 
@@ -138,7 +152,8 @@ The current position:
 
 ### Implemented
 
-What follows *is* done and tested:
+Where each area lives, and whether it is reached from the node. Two rows are not plain
+"done" and say so; treat any row here as a claim to check rather than a result.
 
 | Area | Where | Status |
 |---|---|---|
@@ -504,3 +519,11 @@ interface-address test does exercise.
 every tied route, or to every default interface — is still single-path even though
 `find_all` and the default scan now both run. Closing it needs `Routed` to carry a set,
 which is a design change rather than a patch.
+
+A smaller thing inside it, noticed on 2026-08-25: when several destinations tie,
+`Router::forward` keeps the **last** one its loop saw, while `Node::resolve` returns them
+in interface-index order for the caller to pick from — normally the first. So a node with
+two tied routes can forward a packet out one interface and send an identical one out the
+other, depending on which path it took. Neither is wrong against the C, which sends to
+both; they should at least agree with each other, and the test that would catch it is a
+node-level one with two tied routes, which does not exist yet.
