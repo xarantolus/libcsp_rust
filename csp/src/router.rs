@@ -483,8 +483,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
 
-        let handle = match self.conns.find(&id) {
-            Some(h) => h,
+        // `is_new` decides whether the application is told about this connection. The C
+        // posts a connection to its socket once and immediately nulls `dest_socket`, with
+        // the comment "Ensure that this connection will not be posted to this socket
+        // again" — so a second packet joins a connection the application already holds
+        // without announcing it a second time.
+        let (handle, is_new) = match self.conns.find(&id) {
+            Some(h) => (h, false),
             None => {
                 let reply = Id {
                     pri: id.pri,
@@ -497,7 +502,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 match self.conns.alloc(reply, 0, now_ms) {
                     Ok(h) => {
                         let _ = self.conns.set_id_in(h, id);
-                        h
+                        (h, true)
                     }
                     Err(_) => {
                         self.counters.conn_table_full += 1;
@@ -511,7 +516,15 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         match self.conns.enqueue_rx(handle, packet.into_index()) {
             Ok(true) => {
                 self.counters.delivered += 1;
-                self.queue_accept(handle);
+                // Only on the first packet. This fired on *every* delivery, so an
+                // application looping on `accept` was handed the same connection once per
+                // packet — and since the backlog is a fixed array, one chatty peer filled
+                // it with copies of itself and left every other peer's new connection with
+                // nowhere to be announced. Measured against the C in
+                // `ctest/suite_conn.c::a_connection_is_offered_to_the_application_only_once`.
+                if is_new {
+                    self.queue_accept(handle);
+                }
                 Routed::Delivered {
                     port: id.dport,
                     conn: handle,
