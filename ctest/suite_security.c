@@ -46,6 +46,10 @@ static csp_socket_t sock;
 /* What one packet's journey through the policy looked like. */
 struct outcome {
 	unsigned int delivered;
+	/* Bytes the application actually got. Without this the accepting cases cannot tell a
+	   verified packet from an unchecked one: both deliver, and only the *length* shows
+	   whether the trailer was verified and removed. */
+	unsigned int delivered_bytes;
 	uint32_t rx_error;
 	uint32_t autherr;
 };
@@ -124,9 +128,10 @@ static struct outcome route_packet(uint8_t flags, int trailer, bool corrupt) {
 	csp_qfifo_write(packet, &ingress_if, NULL);
 	csp_route_work();
 
-	struct outcome out = {0, ingress_if.rx_error, ingress_if.autherr};
+	struct outcome out = {0, 0, ingress_if.rx_error, ingress_if.autherr};
 	csp_packet_t * p;
 	while ((p = csp_recvfrom(&sock, 0)) != NULL) {
+		out.delivered_bytes += p->length;
 		csp_buffer_free(p);
 		out.delivered++;
 	}
@@ -149,6 +154,7 @@ static void record(const char * name, const char * verdict, struct outcome o) {
 	ctest_trace_obj_end();
 	ctest_trace_obj_begin("observed");
 	ctest_trace_int("delivered", (int64_t)o.delivered);
+	ctest_trace_int("delivered_bytes", (int64_t)o.delivered_bytes);
 	ctest_trace_int("rx_error", (int64_t)o.rx_error);
 	ctest_trace_int("autherr", (int64_t)o.autherr);
 	ctest_trace_obj_end();
