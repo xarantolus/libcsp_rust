@@ -386,6 +386,36 @@ application calls `csp_service_handler` from its own receive loop
 `Router` never calls them. Worth stating because the opposite would mean a node answering
 `CSP_REBOOT` that its author never opted into.
 
+### Mutation testing the corpus: what the records could not see
+
+On 2026-08-25, after a `diverges` verdict was found passing vacuously, the whole corpus was
+mutation-tested rather than reasoned about: break the port, count which records notice.
+
+**One replay arm was a tautology.** `sfp::a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape`
+returned a hardcoded `json!` of the C's own answer and never called into the port at all. It
+passed whatever the port did, while counting itself in "N records replayed". It was written
+in the same session that fixed a different instance of the same class, and commented as
+though it were deliberate. It now runs both cases through `Delivery::classify` and reports
+`indistinguishable: false` where the C reports `true` — a real divergence rather than an
+echo.
+
+**Nine of seventeen security records could not tell a verified packet from an unchecked
+one.** Disabling `security::check` entirely — returning `Ok` before any verification — left
+them green, because they recorded only `delivered: 1`, which is the same either way. The
+missing observation was the one an application actually cares about: *how many bytes did it
+get*. A CRC32 packet accepted-and-stripped delivers 7; accepted-unchecked delivers 11.
+
+Adding `delivered_bytes` to both sides took the mutation from 9 to **15 of 17**. The two
+that still do not notice are correct not to: a plain packet with no policy, and a plain
+packet carrying an option the C ignores, have nothing for the policy to do. It also means
+the trailer stripping is now pinned across every accepting case — `both_protections_together`
+turns 15 wire bytes into 7 — where before it was tested only by a C-side case that had no
+corpus record at all.
+
+The general rule, now stated at the top of `csp/tests/corpus.rs`: **a replay that does not
+call into `csp` or `csp_core` is measuring nothing**, and the check for it is a mutation, not
+a reading.
+
 ### The security policy verified the trailers in the wrong order
 
 Found on 2026-08-25, on the **first run** of the corpus replay (`csp/tests/corpus.rs`)
@@ -524,7 +554,10 @@ whoever maintains the fork can see what was found and decide for themselves.
    in both cases the data is gone. Which shape arrived is a per-packet flag any peer
    controls, so a narrow handler is one flag away from silently losing a message.
    `Delivery::classify` returns `Datagram(packet)` with the payload intact.
-   Corpus case: `sfp::a_plain_datagram_given_to_the_stream_reader_is_destroyed`.
+   Corpus cases: `sfp::a_plain_datagram_given_to_the_stream_reader_is_destroyed` and
+   `sfp::a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape` — the second compares
+   the pair directly, and the port answers `indistinguishable: false` where the C answers
+   `true`.
 4. **`csp_buffer_free` sets an error code on the success path** — `csp_buffer.c` flags
    `CSP_DBG_ERR_REFCOUNT` on the perfectly normal "still referenced" branch.
 5. **`csp_buffer_copy` copies stale `next`/`conn` pointers** into the clone

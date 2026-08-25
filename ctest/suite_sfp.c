@@ -226,8 +226,9 @@ START_TEST(test_a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape)
 	ck_assert_int_eq(corrupt_ret, wrong_shape_ret);
 
 	if (ctest_tracing()) {
+		/* The port distinguishes these two; SCOPE deviation 3 says why. */
 		ctest_trace_begin("sfp", "a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape",
-						  "must_match");
+						  "diverges");
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("corrupt_ret", corrupt_ret);
 		ctest_trace_int("wrong_shape_ret", wrong_shape_ret);
