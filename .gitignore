@@ -6,3 +6,9 @@ Cargo.lock
 compile_commands.json
 *.o
 *.a
+
+# c2rust-analyze leaves these next to the crate it analysed
+/transpiled/target
+/transpiled/polonius_cache
+/transpiled/Cargo.lock
+/stamp
