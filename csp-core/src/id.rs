@@ -434,6 +434,71 @@ mod tests {
     }
 
     #[test]
+    fn encoding_into_a_larger_buffer_writes_only_the_header() {
+        // A caller with a packet-sized buffer must not have the rest of it clobbered.
+        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        for v in BOTH {
+            let mut buf = [0xAAu8; 16];
+            let n = id.encode(v, &mut buf).unwrap();
+            assert_eq!(n, v.header_size());
+            assert!(
+                buf[n..].iter().all(|&b| b == 0xAA),
+                "{v:?}: bytes past the header must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn decoding_ignores_bytes_past_the_header() {
+        // A frame is header followed by payload; decode must read only the header.
+        let id = Id { pri: 1, flags: 0x02, src: 3, dst: 9, dport: 7, sport: 11 };
+        for v in BOTH {
+            let mut buf = [0u8; 32];
+            let n = id.encode(v, &mut buf).unwrap();
+            for b in buf[n..].iter_mut() {
+                *b = 0xFF;
+            }
+            assert_eq!(Id::decode(v, &buf).unwrap(), id, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn flags_width_differs_between_the_versions() {
+        assert_eq!(Version::V1.flags_bits(), 8);
+        assert_eq!(Version::V2.flags_bits(), 6);
+    }
+
+    #[test]
+    fn broadcast_across_every_netmask() {
+        // The rule: an address is broadcast when its host bits are all ones AND its
+        // network matches the interface's, or when it is the all-nodes address.
+        let v = Version::V1; // 5 host bits
+        // netmask 0: the whole space is one subnet, so only 31 is broadcast.
+        assert!(v.is_broadcast(31, 1, 0));
+        assert!(!v.is_broadcast(30, 1, 0));
+
+        // netmask 3: top 3 bits are network, low 2 are host. For iface addr 0b01000,
+        // the subnet broadcast is 0b01011.
+        assert!(v.is_broadcast(0b01011, 0b01000, 3));
+        assert!(!v.is_broadcast(0b01010, 0b01000, 3), "host bits not all ones");
+        assert!(!v.is_broadcast(0b10011, 0b01000, 3), "different network");
+
+        // The all-nodes address is broadcast regardless of interface.
+        for mask in 0..=5u16 {
+            assert!(v.is_broadcast(31, 7, mask), "netmask {mask}");
+        }
+    }
+
+    #[test]
+    fn a_netmask_wider_than_the_address_space_does_not_shift_out_of_range() {
+        // The C computes (host_bits - netmask) as unsigned with no guard.
+        for v in BOTH {
+            let _ = v.is_broadcast(1, 1, 99);
+            let _ = v.is_broadcast(0xFFFF, 0xFFFF, u16::MAX);
+        }
+    }
+
+    #[test]
     fn all_nodes_address_is_always_broadcast() {
         for v in BOTH {
             assert!(v.is_broadcast(v.max_node_id(), 1, v.host_bits() as u16));
