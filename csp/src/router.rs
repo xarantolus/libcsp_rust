@@ -209,9 +209,43 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     }
 
     /// Release a port.
-    pub fn unbind(&mut self, port: u8) {
-        if (port as usize) < PORTS {
-            self.bound[port as usize] = false;
+    /// Stop accepting on a port, closing every server connection still open on it.
+    ///
+    /// Returns how many connections were closed and the slot indices to release.
+    ///
+    /// `csp_socket_close` drains the socket's queue for the same reason: without it a
+    /// connection created before the unbind stays acceptable, and `accept` keeps handing
+    /// out connections for a port nothing is serving any more.
+    ///
+    /// The C also stops after unbinding the **first** port that names the socket
+    /// (`csp_port.c:145`, `break`), even though `csp_bind` happily binds one socket to
+    /// several ports — it only checks that the *port* is free. So closing a socket bound
+    /// to ports 10 and 11 leaves port 11 pointing at a socket whose queue has just been
+    /// drained. Here a port is unbound by number, so the situation cannot arise.
+    pub fn unbind(&mut self, port: u8, drained: &mut [u16]) -> (usize, usize) {
+        if (port as usize) >= PORTS {
+            return (0, 0);
+        }
+        self.bound[port as usize] = false;
+        let r = self.conns.close_port(port, drained);
+        self.purge_dead_accepts();
+        r
+    }
+
+    /// Drop backlog entries whose connection is no longer open.
+    ///
+    /// The accept backlog holds handles, and a connection can be closed underneath one —
+    /// by [`unbind`](Self::unbind) or by the idle sweep in [`tick`](Self::tick). Without
+    /// this, `accept` hands out a handle that every later call rejects, and the caller has
+    /// to learn the connection is dead by being told so three times.
+    fn purge_dead_accepts(&mut self) {
+        for slot in self.accept.iter_mut() {
+            if let Some(h) = *slot {
+                if !self.conns.is_live(h) {
+                    *slot = None;
+                    self.accept_len -= 1;
+                }
+            }
         }
     }
 
@@ -500,6 +534,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
 
         #[cfg(feature = "rdp")]
         let closed = closed + self.conns.tick_rdp(now_ms, 5);
+
+        if closed > 0 {
+            self.purge_dead_accepts();
+        }
 
         closed
     }

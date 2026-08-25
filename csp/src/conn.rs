@@ -280,19 +280,54 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// Draining is not optional: the queue holds indices, so anything left behind leaks.
     pub fn close(&mut self, h: Handle, drained: &mut [u16]) -> Result<usize> {
         let c = self.entry_mut(h)?;
+        // Checked before anything is taken out of the queue. A slot removed but not
+        // reported is a slot nobody releases, and the pool never gets it back.
+        if drained.len() < c.rx_len {
+            return Err(Error::BufferTooSmall { needed: c.rx_len });
+        }
         let mut n = 0;
         while c.rx_len > 0 {
             if let Some(idx) = c.rx[c.rx_head].take() {
-                if n < drained.len() {
-                    drained[n] = idx;
-                    n += 1;
-                }
+                drained[n] = idx;
+                n += 1;
             }
             c.rx_head = (c.rx_head + 1) % RXQ;
             c.rx_len -= 1;
         }
         c.reset();
         Ok(n)
+    }
+
+    /// Close every server connection bound to `port`, draining their queues.
+    ///
+    /// `csp_socket_close` does this, and it must: without it a connection created before
+    /// the port was unbound stays acceptable, so `accept` keeps handing out connections
+    /// for a port the application has stopped serving.
+    ///
+    /// Stops as soon as `drained` cannot hold another connection's queue, returning how
+    /// many were closed and how many slots need releasing. Call again to continue.
+    pub fn close_port(&mut self, port: u8, drained: &mut [u16]) -> (usize, usize) {
+        let mut closed = 0;
+        let mut n = 0;
+        for c in self.conns.iter_mut() {
+            if c.state != State::Open || c.kind != Kind::Server || c.idin.dport != port {
+                continue;
+            }
+            if drained.len() - n < c.rx_len {
+                break;
+            }
+            while c.rx_len > 0 {
+                if let Some(idx) = c.rx[c.rx_head].take() {
+                    drained[n] = idx;
+                    n += 1;
+                }
+                c.rx_head = (c.rx_head + 1) % RXQ;
+                c.rx_len -= 1;
+            }
+            c.reset();
+            closed += 1;
+        }
+        (closed, n)
     }
 
     /// Close every connection idle for longer than `timeout_ms`, returning how many.
@@ -314,12 +349,16 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
             if now_ms.wrapping_sub(c.last_activity) <= timeout_ms {
                 continue;
             }
+            // Same rule as `close`: never take a slot we cannot report. Leaving the
+            // connection open for the next sweep costs one slot for one tick; dropping
+            // the index costs it permanently.
+            if drained.len() - n < c.rx_len {
+                break;
+            }
             while c.rx_len > 0 {
                 if let Some(idx) = c.rx[c.rx_head].take() {
-                    if n < drained.len() {
-                        drained[n] = idx;
-                        n += 1;
-                    }
+                    drained[n] = idx;
+                    n += 1;
                 }
                 c.rx_head = (c.rx_head + 1) % RXQ;
                 c.rx_len -= 1;
@@ -681,5 +720,100 @@ mod tests {
         t.rdp_mut(b).unwrap().opts.packet_timeout = 5_000;
         assert_eq!(t.rdp(a).unwrap().opts.packet_timeout, 100);
         assert_eq!(t.rdp(b).unwrap().opts.packet_timeout, 5_000);
+    }
+
+    /// A server connection listening on `dport`.
+    fn server(t: &mut Table<4, 4>, dport: u8, sport: u8) -> Handle {
+        let h = t.alloc(id(sport), 0, 0).unwrap();
+        let mut idin = id(sport);
+        idin.dport = dport;
+        t.set_id_in(h, idin).unwrap();
+        h
+    }
+
+    #[test]
+    fn closing_with_too_small_a_report_buffer_refuses_rather_than_losing_slots() {
+        // A slot taken out of the queue but not reported is a slot nobody releases: the
+        // pool never gets it back. Refuse up front, before anything is taken.
+        let mut t: Table<4, 4> = Table::new();
+        let h = t.alloc(id(10), 0, 0).unwrap();
+        for i in 0..3u16 {
+            t.enqueue_rx(h, i).unwrap();
+        }
+
+        let mut small = [0u16; 2];
+        assert_eq!(
+            t.close(h, &mut small),
+            Err(Error::BufferTooSmall { needed: 3 }),
+            "three queued, room for two"
+        );
+        // Nothing was consumed, so a correctly sized call still gets all three.
+        let mut ok = [0u16; 4];
+        assert_eq!(t.close(h, &mut ok).unwrap(), 3);
+        assert_eq!(&ok[..3], &[0, 1, 2]);
+    }
+
+    #[test]
+    fn expiring_idle_connections_skips_one_it_cannot_report_rather_than_dropping_it() {
+        // Leaving the connection open for the next sweep costs one slot for one tick.
+        // Dropping the index costs it permanently.
+        let mut t: Table<4, 4> = Table::new();
+        let a = t.alloc(id(10), 0, 0).unwrap();
+        let b = t.alloc(id(11), 0, 0).unwrap();
+        for i in 0..3u16 {
+            t.enqueue_rx(a, i).unwrap();
+        }
+        for i in 3..6u16 {
+            t.enqueue_rx(b, i).unwrap();
+        }
+
+        let mut room_for_one = [0u16; 3];
+        let (closed, n) = t.expire_idle(100_000, 1_000, &mut room_for_one);
+        assert_eq!(closed, 1, "only the one whose queue fits");
+        assert_eq!(n, 3);
+
+        // The other is still open and still holds its slots, so a second sweep gets them.
+        let mut rest = [0u16; 4];
+        let (closed2, n2) = t.expire_idle(100_000, 1_000, &mut rest);
+        assert_eq!((closed2, n2), (1, 3));
+        let mut all = [0u16; 6];
+        all[..3].copy_from_slice(&room_for_one);
+        all[3..].copy_from_slice(&rest[..3]);
+        all.sort_unstable();
+        assert_eq!(all, [0, 1, 2, 3, 4, 5], "every slot accounted for");
+    }
+
+    #[test]
+    fn closing_a_port_takes_its_server_connections_and_leaves_the_others() {
+        // csp_socket_close drains the socket's queue. Without it, a connection created
+        // before the unbind stays acceptable and accept keeps handing out connections
+        // for a port nothing serves any more.
+        let mut t: Table<4, 4> = Table::new();
+        let on_20 = server(&mut t, 20, 10);
+        let on_21 = server(&mut t, 21, 11);
+        t.enqueue_rx(on_20, 0).unwrap();
+        t.enqueue_rx(on_21, 1).unwrap();
+
+        let mut drained = [0u16; 4];
+        let (closed, n) = t.close_port(20, &mut drained);
+        assert_eq!((closed, n), (1, 1));
+        assert_eq!(drained[0], 0, "the packet queued on port 20 comes back");
+        assert!(t.entry(on_20).is_err(), "the port 20 connection is gone");
+        assert!(t.entry(on_21).is_ok(), "port 21 is untouched");
+    }
+
+    #[test]
+    fn closing_a_port_leaves_client_connections_alone() {
+        // A client connection whose incoming dport happens to match is our own outbound
+        // conversation, not something that port was serving.
+        let mut t: Table<4, 4> = Table::new();
+        let client = t.alloc_kind(id(10), 0, 0, Kind::Client).unwrap();
+        let mut idin = id(10);
+        idin.dport = 20;
+        t.set_id_in(client, idin).unwrap();
+
+        let mut drained = [0u16; 4];
+        assert_eq!(t.close_port(20, &mut drained), (0, 0));
+        assert!(t.entry(client).is_ok());
     }
 }

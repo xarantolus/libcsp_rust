@@ -296,3 +296,21 @@ whoever maintains the fork can see what was found and decide for themselves.
     early exit for a missing socket. `csp_send_direct_iface` therefore increments `tx` and
     `txbytes` for every packet, and `tx_error` on a UDP interface is structurally zero. A
     node whose UDP peer is unreachable reports a perfectly healthy link.
+24. **`csp_listen`'s backlog parameter is ignored.** `(void)backlog;` — the RX queue is
+    always `CSP_CONN_RXQUEUE_LEN`, a compile-time constant. An application asking for a
+    backlog of 1 to bound its memory, or 100 to absorb a burst, gets neither and is told
+    nothing. The port has no separate listen step: `bind` is the whole operation, and the
+    backlog is a const generic on the node, so the number is where the storage is.
+25. **`csp_socket_close` unbinds only the first port that names the socket.** It `break`s
+    out of the scan (`csp_port.c:145`), but `csp_bind` never checks whether the socket is
+    already bound elsewhere — it only checks that the *port* is free. So one socket bound
+    to ports 10 and 11, then closed, leaves port 11 pointing at a socket whose receive
+    queue has just been drained and whose storage the caller is about to reuse. In the
+    port a port is unbound by number, so the situation cannot arise.
+26. **RDP options are process-wide.** `csp_rdp_set_opt` writes six file-scope statics that
+    every subsequent connection copies from (`csp_rdp.c:801-804`, `920-921`). They are read
+    at connection setup, not per packet, so already-open connections keep their negotiated
+    values — but any component calling it changes the defaults for every other component
+    in the node. In the port they are per-connection `SynOptions`; a test pins the default
+    values to the C's compiled-in ones, because a Rust node and a C node that disagree here
+    negotiate different windows.

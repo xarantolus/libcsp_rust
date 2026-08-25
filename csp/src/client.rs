@@ -58,6 +58,25 @@ pub fn check_ping(sent: &[u8], reply: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The single byte `csp_ping_noreply` sends.
+pub const PING_NOREPLY_PAYLOAD: [u8; 1] = [0x55];
+
+/// Build a fire-and-forget ping.
+///
+/// `csp_ping_noreply`: one 0x55 byte to the ping port, with no reply expected and no
+/// connection kept open. Used to poke a node whose reply path may not work — after a
+/// radio reconfiguration, say — where the useful signal is whether the *node* reacts, not
+/// whether the packet comes back.
+///
+/// The C opens the connection with `CSP_O_CRC32` while `csp_ping` takes its options from
+/// the caller, so the no-reply variant is the more strongly protected of the two.
+pub const fn ping_noreply() -> Request<'static> {
+    Request {
+        port: ports::PING,
+        payload: &PING_NOREPLY_PAYLOAD,
+    }
+}
+
 /// Build a request for free memory.
 pub const fn memfree() -> Request<'static> {
     Request {
@@ -230,6 +249,30 @@ mod tests {
         // And a longer-than-expected reply is refused too.
         let long = [0u8, 1, 2, 3, 4, 5, 6, 7, 8];
         assert!(check_ping(&sent, &long).is_err());
+    }
+
+    #[test]
+    fn a_no_reply_ping_is_one_byte_to_the_ping_port() {
+        // csp_ping_noreply: poke the node, do not wait. Useful when the reply path may
+        // not work -- after a radio reconfiguration -- and the signal is whether the node
+        // reacts at all.
+        let r = ping_noreply();
+        assert_eq!(r.port, ports::PING);
+        assert_eq!(r.payload, &[0x55]);
+    }
+
+    #[test]
+    fn a_no_reply_ping_is_still_a_ping_the_server_answers() {
+        // It expects no reply, but it is not a different message: a node that does answer
+        // must produce a valid echo, or the two halves have drifted apart.
+        use crate::service::{respond, NodeStatus, Request as SvcRequest};
+        let r = ping_noreply();
+        let svc = SvcRequest::decode(r.port, r.payload).unwrap();
+        let mut out = [0u8; 8];
+        let n = respond(svc, r.payload, &NodeStatus::default(), &mut out)
+            .unwrap()
+            .unwrap();
+        assert!(check_ping(r.payload, &out[..n]).is_ok());
     }
 
     #[test]

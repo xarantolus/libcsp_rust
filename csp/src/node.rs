@@ -199,9 +199,18 @@ impl<
         self.router.bind(port)
     }
 
-    /// Stop accepting on a port.
-    pub fn unbind(&mut self, port: u8) {
-        self.router.unbind(port)
+    /// Stop accepting on a port, closing every connection still open on it.
+    ///
+    /// Returns how many connections were closed. Their queued packets are released back
+    /// to the pool here, so nothing is left holding a buffer for a port that has stopped
+    /// being served.
+    pub fn unbind(&mut self, port: u8) -> usize {
+        let mut drained = [0u16; 32];
+        let (closed, n) = self.router.unbind(port, &mut drained);
+        for &idx in &drained[..n] {
+            drop(self.pool().from_index(idx));
+        }
+        closed
     }
 
     /// Take the next connection with data waiting.
@@ -718,6 +727,84 @@ mod tests {
             assert!(sport <= Version::V1.max_port());
             n.close(c).unwrap();
         }
+    }
+
+    #[test]
+    fn unbinding_a_port_returns_its_queued_buffers_to_the_pool() {
+        // Clearing the bound flag is not enough: a connection created before the unbind
+        // stays acceptable, so accept keeps handing out connections for a port nothing
+        // serves -- and each one holds a pool buffer until it times out.
+        let s = S::new();
+        let mut n = node(&s);
+        n.bind(20).unwrap();
+        let free = n.buffers_free();
+
+        let mut p = n.packet().unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"request").unwrap();
+        n.router.receive(p, 0);
+        assert!(matches!(n.work(0), Routed::Delivered { .. }));
+        assert_eq!(
+            n.buffers_free(),
+            free - 1,
+            "the packet is queued on a connection"
+        );
+
+        assert_eq!(n.unbind(20), 1, "one connection was still open on it");
+        assert_eq!(n.buffers_free(), free, "and its buffer came back");
+        assert!(
+            n.accept().is_none(),
+            "nothing is acceptable on an unbound port"
+        );
+    }
+
+    #[test]
+    fn unbinding_a_port_nothing_is_using_is_not_an_error() {
+        let s = S::new();
+        let mut n = node(&s);
+        assert_eq!(n.unbind(20), 0);
+        n.bind(20).unwrap();
+        assert_eq!(n.unbind(20), 0, "bound but idle");
+        // And it can be bound again afterwards.
+        assert!(n.bind(20).is_ok());
+    }
+
+    #[test]
+    fn a_connection_that_times_out_before_being_accepted_is_not_handed_out_dead() {
+        // The accept backlog holds handles, and the idle sweep can close a connection
+        // underneath one. Without purging, accept returns a handle that every later call
+        // rejects -- the caller learns the connection is dead by being told so three
+        // times, once per method.
+        let s = S::new();
+        let mut n = node(&s);
+        n.bind(20).unwrap();
+
+        let mut p = n.packet().unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"request").unwrap();
+        n.router.receive(p, 0);
+        assert!(matches!(n.work(0), Routed::Delivered { .. }));
+
+        // Nobody accepted it, and the connection times out.
+        assert_eq!(n.tick(60_000, 10_000), 1, "the idle sweep closed it");
+        assert!(
+            n.accept().is_none(),
+            "a closed connection must not still be acceptable"
+        );
     }
 
     #[test]

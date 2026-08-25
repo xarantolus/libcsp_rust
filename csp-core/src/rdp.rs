@@ -1591,4 +1591,20 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_defaults_are_the_cs_compiled_in_values() {
+        // libcsp keeps these in six file-scope statics (csp_rdp.c:37-42) that
+        // csp_rdp_set_opt overwrites process-wide -- so one library changing the window
+        // size changes it for every connection in the node, including ones already open.
+        // Here they are per-connection defaults, and these numbers must still match or a
+        // Rust node and a C node negotiate differently.
+        let d = SynOptions::default();
+        assert_eq!(d.window_size, 4);
+        assert_eq!(d.conn_timeout, 10_000);
+        assert_eq!(d.packet_timeout, 1_000);
+        assert!(d.delayed_acks);
+        assert_eq!(d.ack_timeout, 250, "csp_rdp_ack_timeout = 1000 / 4");
+        assert_eq!(d.ack_delay_count, 2, "csp_rdp_ack_delay_count = 4 / 2");
+    }
 }

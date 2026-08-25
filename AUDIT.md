@@ -622,3 +622,64 @@ Fourteen of libcsp's fifteen hooks now have a counterpart. The four that were mi
 The duplicate `__weak csp_input_hook` (`csp_route.c:106` and `csp_bridge.c:19`,
 byte-identical, link-order dependent) remains unrepresentable: a trait method cannot be
 defined twice.
+
+## `csp::node` — the application API
+
+**Rating: faithful, and rusty where the C's shape was the problem.** 46 tests.
+
+All 46 public functions in `csp.h` are now accounted for: 40 have a counterpart, three
+(`csp_cmp_set_memcpy` and friends) are no-ops in the C replaced by the `Hooks` trait, and
+three (`csp_bind_callback`, `csp_conn_print_table`, `csp_hex_dump`) are deferred by
+decision. Four were genuinely missing and this pass closed three of them.
+
+### What was missing
+
+- **`csp_ping_noreply`** — one 0x55 byte to the ping port, fire and forget. Not a
+  degenerate ping: it is what you send when the *reply* path may not work, after a radio
+  reconfiguration say, and the useful signal is whether the node reacts at all. Added, with
+  a test that the server still answers it correctly so the two halves cannot drift.
+- **`csp_listen`** — no counterpart, and none needed: the backlog is a const generic, so
+  the number lives where the storage does rather than being accepted and discarded
+  (deviation 24).
+- **`csp_socket_close`** — this one mattered. `unbind` cleared a flag and stopped.
+
+### The bug `unbind` was hiding
+
+Clearing the bound flag stops *new* connections. It does nothing about connections created
+before the unbind, which stay in the accept backlog holding pool buffers. Following that
+led to a worse one, in code that had nothing to do with unbinding:
+
+**The accept backlog holds handles, and the idle sweep closes connections underneath
+them.** A connection that timed out before anyone accepted it left a stale handle in the
+backlog, so `accept()` returned a handle that every subsequent call rejected — the caller
+learns the connection is dead by being told so once per method. `purge_dead_accepts` now
+runs after any sweep that closed something, and after `unbind`. Two tests cover it.
+
+### Two slot leaks in my own code
+
+`Table::close` and `Table::expire_idle` both took a packet index out of a connection's
+receive queue and **discarded it when the report buffer was full** — `if n < drained.len()`
+guarded the write but not the `take()`. A slot removed from the queue and not reported is
+a slot nobody releases; the pool never gets it back. This is the same shape as the
+`TxQueue::poll` defect the RDP audit found, which is the argument for auditing every
+module rather than the ones that look risky.
+
+`close` now refuses up front with `BufferTooSmall { needed }`, before anything is taken.
+`expire_idle` and `close_port` stop at the connection they cannot report and leave it for
+the next sweep — one slot held for one tick, rather than one slot lost permanently.
+
+### Route resolution
+
+The fan-out fix from the interface audit lands here: `Node::resolve` returns every
+destination, `route_from` keeps the one-destination convenience shape. Documented in the
+`iface` section above.
+
+### Still faithful, deliberately
+
+- `accept` does not block. `csp_accept` takes a timeout and sleeps; here the caller owns
+  the thread, which is what makes the crate usable from a bare interrupt loop.
+- `transaction` takes a clock closure rather than a fixed `now`. An earlier version took a
+  timestamp and advanced it by one per iteration, which is not a transaction but a
+  simulation of one.
+- RDP option defaults match the C's compiled-in values exactly, pinned by a test
+  (deviation 26). They are per-connection here rather than six process-wide statics.
