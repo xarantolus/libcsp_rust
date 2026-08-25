@@ -480,6 +480,107 @@ impl<'a> PeekV2<'a> {
     }
 }
 
+/// What a CMP request asks the node to do.
+///
+/// The C dispatches inside `csp_cmp_dispatch.c` and each handler mutates the packet in
+/// place into its own reply — so a handler that returns early leaves a half-built reply in
+/// the buffer, and the caller cannot tell it apart from a real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Query<'a> {
+    /// Identify yourself.
+    Ident,
+    /// Report counters for this interface.
+    IfStats {
+        /// Interface name.
+        interface: &'a str,
+    },
+    /// Read or set the clock. `None` in `set` means "report only".
+    Clock {
+        /// The time to set, or `None` to only report.
+        set: Option<Timestamp>,
+    },
+    /// Install a route.
+    RouteSet(RouteSetV2<'a>),
+    /// Read memory.
+    Peek {
+        /// Address.
+        addr: u64,
+        /// Bytes requested.
+        len: u8,
+        /// True when the 64-bit address form was used.
+        wide: bool,
+    },
+    /// Write memory.
+    Poke {
+        /// Address.
+        addr: u64,
+        /// Bytes to write.
+        data: &'a [u8],
+        /// True when the 64-bit address form was used.
+        wide: bool,
+    },
+}
+
+/// Classify an incoming CMP request.
+///
+/// Returns [`Error::NotAReply`] inverted — that is, refuses a message marked as a *reply*,
+/// because answering one turns two nodes into a loop.
+pub fn parse_request(data: &[u8]) -> Result<Query<'_>> {
+    let h = Header::decode(data)?;
+    if h.is_reply() {
+        return Err(Error::NotAReply { got: h.kind });
+    }
+    match h.code {
+        code::IDENT => Ok(Query::Ident),
+        code::IF_STATS => Ok(Query::IfStats {
+            interface: IfStatsMsg::decode(data)?.interface,
+        }),
+        code::CLOCK => {
+            let t = Timestamp::decode(data)?;
+            Ok(Query::Clock {
+                set: if t.is_query() { None } else { Some(t) },
+            })
+        }
+        code::ROUTE_SET_V2 => Ok(Query::RouteSet(RouteSetV2::decode(data)?)),
+        code::PEEK => {
+            let p = Peek::decode(data)?;
+            Ok(Query::Peek {
+                addr: p.addr as u64,
+                len: p.len,
+                wide: false,
+            })
+        }
+        code::PEEK_V2 => {
+            let p = PeekV2::decode(data)?;
+            Ok(Query::Peek {
+                addr: p.vaddr,
+                len: p.len,
+                wide: true,
+            })
+        }
+        code::POKE => {
+            let p = Peek::decode(data)?;
+            Ok(Query::Poke {
+                addr: p.addr as u64,
+                data: p.data,
+                wide: false,
+            })
+        }
+        code::POKE_V2 => {
+            let p = PeekV2::decode(data)?;
+            Ok(Query::Poke {
+                addr: p.vaddr,
+                data: p.data,
+                wide: true,
+            })
+        }
+        other => Err(Error::LengthExceedsMaximum {
+            got: other as usize,
+            max: code::POKE_V2 as usize,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,6 +830,116 @@ mod tests {
         assert_eq!(IfStatsMsg::decode(&[0u8; 12]), Err(Error::Truncated));
         assert_eq!(Peek::decode(&[0u8; 6]), Err(Error::Truncated));
         assert_eq!(PeekV2::decode(&[0u8; 10]), Err(Error::Truncated));
+    }
+
+    // --- request dispatch ---
+
+    fn req(code: u8, body: &[u8], out: &mut [u8]) -> usize {
+        out[0] = REQUEST;
+        out[1] = code;
+        out[Header::LEN..Header::LEN + body.len()].copy_from_slice(body);
+        Header::LEN + body.len()
+    }
+
+    #[test]
+    fn every_message_type_dispatches_to_its_query() {
+        let mut buf = [0u8; 128];
+
+        let n = req(code::IDENT, &[], &mut buf);
+        assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Ident);
+
+        let mut stats = [0u8; 64];
+        let n = IfStatsMsg { interface: "CAN1", stats: IfStats::default() }
+            .encode(Header { kind: REQUEST, code: code::IF_STATS }, &mut stats)
+            .unwrap();
+        assert_eq!(
+            parse_request(&stats[..n]).unwrap(),
+            Query::IfStats { interface: "CAN1" }
+        );
+
+        let ts = Timestamp { tv_sec: 1_700_000_000, tv_nsec: 5 };
+        let n = ts
+            .encode(Header { kind: REQUEST, code: code::CLOCK }, &mut buf)
+            .unwrap();
+        assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Clock { set: Some(ts) });
+    }
+
+    #[test]
+    fn a_zero_clock_is_a_read_not_a_set_to_the_epoch() {
+        // csp_cmp_clock_handler treats tv_sec == 0 as "report only". Getting this wrong
+        // sets a spacecraft's clock to 1970 whenever anyone asks it the time.
+        let mut buf = [0u8; 32];
+        let n = Timestamp::default()
+            .encode(Header { kind: REQUEST, code: code::CLOCK }, &mut buf)
+            .unwrap();
+        assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Clock { set: None });
+    }
+
+    #[test]
+    fn peek_and_poke_report_which_address_width_was_used() {
+        let mut buf = [0u8; 64];
+        let n = Peek { addr: 0x2000_0000, len: 8, data: &[] }
+            .encode(Header { kind: REQUEST, code: code::PEEK }, &mut buf)
+            .unwrap();
+        assert_eq!(
+            parse_request(&buf[..n]).unwrap(),
+            Query::Peek { addr: 0x2000_0000, len: 8, wide: false }
+        );
+
+        let n = PeekV2 { vaddr: 0x8000_1234_5678, len: 8, data: &[] }
+            .encode(Header { kind: REQUEST, code: code::PEEK_V2 }, &mut buf)
+            .unwrap();
+        assert_eq!(
+            parse_request(&buf[..n]).unwrap(),
+            Query::Peek { addr: 0x8000_1234_5678, len: 8, wide: true }
+        );
+    }
+
+    #[test]
+    fn a_message_marked_as_a_reply_is_not_answered() {
+        // Answering a reply turns two nodes into a loop.
+        let mut buf = [0u8; 32];
+        buf[0] = REPLY;
+        buf[1] = code::IDENT;
+        assert_eq!(
+            parse_request(&buf[..2]),
+            Err(Error::NotAReply { got: REPLY })
+        );
+    }
+
+    #[test]
+    fn an_unknown_code_is_refused_rather_than_guessed() {
+        let mut buf = [0u8; 32];
+        let n = req(200, &[], &mut buf);
+        assert!(parse_request(&buf[..n]).is_err());
+    }
+
+    #[test]
+    fn a_truncated_request_is_refused_per_type() {
+        // Each type has its own minimum; a short IF_STATS must not be read as an IDENT.
+        let mut buf = [0u8; 32];
+        buf[0] = REQUEST;
+        buf[1] = code::IF_STATS;
+        assert_eq!(parse_request(&buf[..4]), Err(Error::Truncated));
+        buf[1] = code::CLOCK;
+        assert_eq!(parse_request(&buf[..6]), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn dispatching_arbitrary_bytes_never_panics() {
+        let mut buf = [0u8; 128];
+        let mut x: u32 = 0xC0DE_0001;
+        for _ in 0..40_000 {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = (x >> (i % 24)) as u8;
+            }
+            for n in [0usize, 2, 7, 11, 19, 53, 93, 128] {
+                let _ = parse_request(&buf[..n]);
+            }
+        }
     }
 
     #[test]

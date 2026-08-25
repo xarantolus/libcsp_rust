@@ -265,6 +265,195 @@ pub enum Event<'a> {
     Tick,
 }
 
+/// How many retransmissions of the same data before a peer is given up on.
+pub const MAX_RETRANSMITS: u32 = 10;
+
+/// What to do with a queued packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxAction {
+    /// The peer acknowledged it. Release the buffer.
+    Release {
+        /// Caller's handle for the buffer.
+        token: u16,
+    },
+    /// Its timeout expired. Send it again.
+    Retransmit {
+        /// Caller's handle for the buffer.
+        token: u16,
+        /// Sequence number, for logging and for updating the piggybacked ack.
+        seq_nr: u16,
+    },
+    /// The peer has not acknowledged anything after [`MAX_RETRANSMITS`] tries.
+    ///
+    /// Without this a connection retransmits for as long as it happens to live, holding a
+    /// buffer per unacknowledged packet out of a pool of 15.
+    GiveUp,
+}
+
+/// One unacknowledged packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TxEntry {
+    seq_nr: u16,
+    sent_at: u32,
+    token: u16,
+}
+
+/// Packets sent but not yet acknowledged, held for retransmission.
+///
+/// `token` is whatever handle the caller uses for a buffer — this module never touches
+/// packet memory, which is what keeps it allocation-free and testable without a pool.
+///
+/// The C keeps **one** TX queue and one RX queue as file statics shared by every
+/// connection, scans them linearly and tells entries apart by comparing `packet->conn`.
+/// One queue per connection here, so a busy connection cannot crowd out a quiet one.
+#[derive(Debug)]
+pub struct TxQueue<const N: usize> {
+    entries: [Option<TxEntry>; N],
+    retransmits: u32,
+}
+
+impl<const N: usize> Default for TxQueue<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> TxQueue<N> {
+    /// Compile-time invariant: a zero-length queue would silently discard every packet
+    /// the moment it was sent, and the connection would look reliable while losing
+    /// everything.
+    const SANITY: () = assert!(N > 0, "the RDP transmit queue needs at least one slot");
+
+    /// An empty queue.
+    pub const fn new() -> Self {
+        let () = Self::SANITY;
+        TxQueue {
+            entries: [None; N],
+            retransmits: 0,
+        }
+    }
+
+    /// Packets awaiting acknowledgement.
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    /// True if everything has been acknowledged.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Consecutive retransmissions without progress.
+    pub const fn retransmits(&self) -> u32 {
+        self.retransmits
+    }
+
+    /// Record a packet as sent and awaiting acknowledgement.
+    ///
+    /// Returns [`Error::TableFull`] when the window is full — the caller must not send
+    /// more than the negotiated window, and silently dropping the record would make the
+    /// packet unretransmittable while the peer still expects it.
+    pub fn push(&mut self, seq_nr: u16, token: u16, now_ms: u32) -> Result<()> {
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(TxEntry {
+                    seq_nr,
+                    sent_at: now_ms,
+                    token,
+                });
+                return Ok(());
+            }
+        }
+        Err(Error::TableFull)
+    }
+
+    /// Decide what to do with every queued packet.
+    ///
+    /// `snd_una` is the oldest unacknowledged sequence number: anything before it has been
+    /// acknowledged and is released. Anything older than `packet_timeout_ms` is
+    /// retransmitted, and its timer restarts.
+    ///
+    /// Writes into `out` and returns how many actions were produced.
+    pub fn poll(
+        &mut self,
+        now_ms: u32,
+        packet_timeout_ms: u32,
+        snd_una: u16,
+        out: &mut [TxAction],
+    ) -> usize {
+        let mut n = 0;
+        let mut retransmitted = false;
+
+        for slot in self.entries.iter_mut() {
+            let Some(e) = slot.as_mut() else { continue };
+
+            // No room to report? Leave the entry alone and come back to it next call.
+            // Releasing it here would hand the caller no token and leak the buffer;
+            // restarting its timer here would silently skip a retransmission.
+            if n >= out.len() {
+                break;
+            }
+
+            // Acknowledged? seq strictly before snd_una, in wrapping space.
+            if seq_before(e.seq_nr, snd_una) {
+                out[n] = TxAction::Release { token: e.token };
+                n += 1;
+                *slot = None;
+                continue;
+            }
+
+            // Wrapping subtraction: a free-running millisecond clock wraps every 49 days,
+            // and `now > sent_at + timeout` would retransmit everything at the wrap.
+            if now_ms.wrapping_sub(e.sent_at) > packet_timeout_ms {
+                out[n] = TxAction::Retransmit {
+                    token: e.token,
+                    seq_nr: e.seq_nr,
+                };
+                n += 1;
+                e.sent_at = now_ms;
+                retransmitted = true;
+            }
+        }
+
+        if retransmitted {
+            self.retransmits += 1;
+            if self.retransmits > MAX_RETRANSMITS && n < out.len() {
+                out[n] = TxAction::GiveUp;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Note that the peer made progress, resetting the give-up counter.
+    pub fn note_progress(&mut self) {
+        self.retransmits = 0;
+    }
+
+    /// Abandon everything, returning the tokens so the caller can release them.
+    ///
+    /// Not optional: the queue holds tokens, so anything left behind leaks.
+    pub fn flush(&mut self, out: &mut [u16]) -> usize {
+        let mut n = 0;
+        for slot in self.entries.iter_mut() {
+            if let Some(e) = slot.take() {
+                if n < out.len() {
+                    out[n] = e.token;
+                    n += 1;
+                }
+            }
+        }
+        self.retransmits = 0;
+        n
+    }
+}
+
+/// Is `a` strictly before `b` in wrapping 16-bit sequence space?
+pub const fn seq_before(a: u16, b: u16) -> bool {
+    // Half the space is "before"; this is the standard wrapping comparison.
+    (b.wrapping_sub(a)) != 0 && (b.wrapping_sub(a)) < 0x8000
+}
+
 /// One end of an RDP connection.
 ///
 /// Holds no buffers and reads no clock: `now_ms` is passed in. Two of these can run in one
@@ -745,6 +934,161 @@ mod tests {
         let b = Connection::new(2, slow);
         assert_eq!(a.opts.packet_timeout, 100);
         assert_eq!(b.opts.packet_timeout, 5_000);
+    }
+
+    // --- retransmission queue ---
+
+    fn drain(q: &mut TxQueue<4>, now: u32, timeout: u32, una: u16) -> ([TxAction; 8], usize) {
+        let mut out = [TxAction::GiveUp; 8];
+        let n = q.poll(now, timeout, una, &mut out);
+        (out, n)
+    }
+
+    #[test]
+    fn seq_before_survives_the_wrap() {
+        assert!(seq_before(1, 2));
+        assert!(!seq_before(2, 1));
+        assert!(!seq_before(5, 5), "not strictly before itself");
+        assert!(seq_before(0xFFFF, 0), "across the wrap");
+        assert!(!seq_before(0, 0xFFFF));
+    }
+
+    #[test]
+    fn nothing_happens_before_the_timeout() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        let (_, n) = drain(&mut q, 500, 1_000, 10);
+        assert_eq!(n, 0, "still within the packet timeout");
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn an_unacknowledged_packet_is_retransmitted_after_its_timeout() {
+        // Without this the "Reliable" in Reliable Datagram Protocol is false.
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        let (out, n) = drain(&mut q, 1_500, 1_000, 10);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], TxAction::Retransmit { token: 100, seq_nr: 10 });
+        assert_eq!(q.len(), 1, "still queued until acknowledged");
+    }
+
+    #[test]
+    fn the_retransmit_timer_restarts_so_it_does_not_fire_every_poll() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        let (_, n) = drain(&mut q, 1_500, 1_000, 10);
+        assert_eq!(n, 1);
+        let (_, n) = drain(&mut q, 1_600, 1_000, 10);
+        assert_eq!(n, 0, "must wait a full timeout again, not spin");
+        let (_, n) = drain(&mut q, 2_600, 1_000, 10);
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn an_acknowledged_packet_is_released() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        q.push(11, 101, 0).unwrap();
+        // snd_una = 11 means 10 is acknowledged, 11 is not.
+        let (out, n) = drain(&mut q, 0, 1_000, 11);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], TxAction::Release { token: 100 });
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn acknowledgement_wins_over_retransmission() {
+        // A packet acknowledged and overdue must be released, not sent again -- otherwise
+        // every ack that arrives late costs a duplicate on the link.
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        let (out, n) = drain(&mut q, 99_999, 1_000, 11);
+        assert_eq!(n, 1);
+        assert_eq!(out[0], TxAction::Release { token: 100 });
+    }
+
+    #[test]
+    fn a_peer_that_never_acknowledges_is_given_up_on() {
+        // The C closes after CSP_RDP_MAX_RETRANSMITS; without it a connection retransmits
+        // for as long as it lives, holding a buffer per unacknowledged packet.
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        let mut gave_up = false;
+        for i in 1..=(MAX_RETRANSMITS + 2) {
+            let (out, n) = drain(&mut q, i * 2_000, 1_000, 10);
+            if out[..n].contains(&TxAction::GiveUp) {
+                gave_up = true;
+                break;
+            }
+        }
+        assert!(gave_up, "must stop retransmitting eventually");
+    }
+
+    #[test]
+    fn progress_resets_the_give_up_counter() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        q.push(10, 100, 0).unwrap();
+        for i in 1..=5 {
+            drain(&mut q, i * 2_000, 1_000, 10);
+        }
+        assert!(q.retransmits() > 0);
+        q.note_progress();
+        assert_eq!(q.retransmits(), 0, "an ack means the peer is alive");
+    }
+
+    #[test]
+    fn retransmission_survives_the_clock_wrap() {
+        // `now > sent_at + timeout` would retransmit the whole window at the wrap.
+        let mut q: TxQueue<4> = TxQueue::new();
+        let sent = u32::MAX - 500;
+        q.push(10, 100, sent).unwrap();
+        // 100 ms later, having wrapped through zero. Well inside a 1000 ms timeout.
+        let (_, n) = drain(&mut q, sent.wrapping_add(100), 1_000, 10);
+        assert_eq!(n, 0, "must not retransmit merely because the clock wrapped");
+    }
+
+    #[test]
+    fn a_full_window_is_reported_rather_than_dropped() {
+        // Silently discarding the record leaves the packet unretransmittable while the
+        // peer still expects it.
+        let mut q: TxQueue<4> = TxQueue::new();
+        for i in 0..4u16 {
+            q.push(i, i, 0).unwrap();
+        }
+        assert_eq!(q.push(9, 9, 0), Err(Error::TableFull));
+    }
+
+    #[test]
+    fn flush_returns_every_token_so_nothing_leaks() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        for i in 0..3u16 {
+            q.push(i, 100 + i, 0).unwrap();
+        }
+        let mut out = [0u16; 8];
+        let n = q.flush(&mut out);
+        assert_eq!(n, 3);
+        assert!(out[..n].contains(&100) && out[..n].contains(&101) && out[..n].contains(&102));
+        assert!(q.is_empty());
+        assert_eq!(q.retransmits(), 0);
+    }
+
+    #[test]
+    fn a_short_action_buffer_does_not_lose_the_queue() {
+        // poll writes what fits; the entries it could not report are still queued and
+        // come back on the next call, rather than being silently dropped.
+        let mut q: TxQueue<4> = TxQueue::new();
+        for i in 0..4u16 {
+            q.push(i, i, 0).unwrap();
+        }
+        let mut tiny = [TxAction::GiveUp; 1];
+        let n = q.poll(0, 1_000, 4, &mut tiny);
+        assert_eq!(n, 1);
+        assert_eq!(q.len(), 3, "only the reported one was released");
+        let mut rest = [TxAction::GiveUp; 8];
+        let n2 = q.poll(0, 1_000, 4, &mut rest);
+        assert_eq!(n2, 3, "the remainder comes back rather than being lost");
+        assert!(q.is_empty());
     }
 
     #[test]

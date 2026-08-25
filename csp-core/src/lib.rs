@@ -160,6 +160,14 @@ pub enum Error {
         /// The largest the format permits.
         max: usize,
     },
+    /// A management-protocol message that should have been a reply was not.
+    ///
+    /// Distinct from a code mismatch: this one says the peer sent a *request* where an
+    /// answer was expected, which usually means a loop or a crossed connection.
+    NotAReply {
+        /// The message kind byte that was seen.
+        got: u8,
+    },
     /// An Ethernet frame did not carry the CSP ethertype.
     UnexpectedEtherType {
         /// The ethertype seen.

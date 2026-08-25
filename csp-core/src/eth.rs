@@ -297,6 +297,117 @@ impl Reassembler {
     }
 }
 
+/// Maps CSP addresses to MAC addresses, learned from received frames.
+///
+/// Until a peer has been heard from, frames to it go to [`BROADCAST_MAC`] — so a node that
+/// never learns is a node that broadcasts every packet forever, which on a shared segment
+/// means every other node processes traffic that is not theirs.
+///
+/// The C's version (`csp_if_eth.c`) is a bump allocator over a fixed array with an
+/// intrusive list and **no eviction**: `arp_used` only ever increases, so once
+/// `ARP_MAX_ENTRIES` addresses have been seen, no new peer is ever learned again for the
+/// lifetime of the process. This one replaces the least recently used entry.
+#[derive(Debug)]
+pub struct ArpTable<const N: usize> {
+    entries: [Option<(u16, [u8; MAC_LEN], u32)>; N],
+    clock: u32,
+}
+
+impl<const N: usize> Default for ArpTable<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> ArpTable<N> {
+    /// Compile-time invariant: a zero-capacity table can learn nothing, so every frame
+    /// broadcasts and the cause is invisible.
+    const SANITY: () = assert!(N > 0, "the ARP table needs at least one entry");
+
+    /// An empty table.
+    pub const fn new() -> Self {
+        let () = Self::SANITY;
+        ArpTable {
+            entries: [None; N],
+            clock: 0,
+        }
+    }
+
+    /// Addresses currently known.
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    /// True if nothing has been learned.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Record that `addr` lives at `mac`.
+    ///
+    /// Updates an existing entry, fills a free slot, or replaces the least recently used
+    /// one. The C stops learning entirely once its array is full.
+    pub fn learn(&mut self, addr: u16, mac: [u8; MAC_LEN]) {
+        self.clock = self.clock.wrapping_add(1);
+        let now = self.clock;
+
+        if let Some(e) = self
+            .entries
+            .iter_mut()
+            .flatten()
+            .find(|(a, _, _)| *a == addr)
+        {
+            e.1 = mac;
+            e.2 = now;
+            return;
+        }
+        if let Some(slot) = self.entries.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((addr, mac, now));
+            return;
+        }
+        // Replace the least recently used. Comparison is by wrapping distance from now,
+        // so the counter wrapping does not make an old entry look fresh.
+        let mut oldest = 0usize;
+        let mut oldest_age = 0u32;
+        for (i, s) in self.entries.iter().enumerate() {
+            if let Some((_, _, used)) = s {
+                let age = now.wrapping_sub(*used);
+                if age >= oldest_age {
+                    oldest_age = age;
+                    oldest = i;
+                }
+            }
+        }
+        self.entries[oldest] = Some((addr, mac, now));
+    }
+
+    /// The MAC for `addr`, or [`BROADCAST_MAC`] if it has not been learned.
+    ///
+    /// Never fails: broadcasting is the correct fallback, and returning an error would
+    /// make a caller choose between dropping the packet and reimplementing this.
+    pub fn lookup(&mut self, addr: u16) -> [u8; MAC_LEN] {
+        self.clock = self.clock.wrapping_add(1);
+        let now = self.clock;
+        for e in self.entries.iter_mut().flatten() {
+            if e.0 == addr {
+                e.2 = now;
+                return e.1;
+            }
+        }
+        BROADCAST_MAC
+    }
+
+    /// Whether `addr` is known, without touching its recency.
+    pub fn knows(&self, addr: u16) -> bool {
+        self.entries.iter().flatten().any(|(a, _, _)| *a == addr)
+    }
+
+    /// Forget everything.
+    pub fn clear(&mut self) {
+        *self = ArpTable::new();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +670,74 @@ mod tests {
             r.push(&h, 8, &[0u8; 4], &mut out),
             Err(Error::OffsetBeyondTotal { .. })
         ));
+    }
+
+    // --- ARP ---
+
+    #[test]
+    fn an_unknown_address_broadcasts() {
+        let mut t: ArpTable<4> = ArpTable::new();
+        assert_eq!(t.lookup(11), BROADCAST_MAC);
+        assert!(!t.knows(11));
+    }
+
+    #[test]
+    fn a_learned_address_is_unicast() {
+        let mut t: ArpTable<4> = ArpTable::new();
+        t.learn(11, A);
+        assert_eq!(t.lookup(11), A);
+        assert!(t.knows(11));
+        assert_eq!(t.lookup(12), BROADCAST_MAC, "others still broadcast");
+    }
+
+    #[test]
+    fn relearning_updates_the_mac() {
+        // A node that changes its MAC -- a redundant interface failing over -- must not
+        // keep receiving traffic at the old address.
+        let mut t: ArpTable<4> = ArpTable::new();
+        t.learn(11, A);
+        t.learn(11, B);
+        assert_eq!(t.lookup(11), B);
+        assert_eq!(t.len(), 1, "an update must not consume a second slot");
+    }
+
+    #[test]
+    fn a_full_table_keeps_learning_by_replacing_the_least_recently_used() {
+        // The C's arp_used only ever increases, so once ARP_MAX_ENTRIES addresses have
+        // been seen it never learns another peer for the life of the process.
+        let mut t: ArpTable<2> = ArpTable::new();
+        t.learn(1, A);
+        t.learn(2, B);
+        // Touch 1 so 2 becomes the least recently used.
+        assert_eq!(t.lookup(1), A);
+        t.learn(3, [3u8; 6]);
+
+        assert!(t.knows(3), "a new peer must still be learnable when full");
+        assert!(t.knows(1), "the recently used entry survives");
+        assert!(!t.knows(2), "the least recently used was replaced");
+    }
+
+    #[test]
+    fn eviction_is_correct_across_the_recency_counter_wrap() {
+        let mut t: ArpTable<2> = ArpTable::new();
+        t.learn(1, A);
+        t.learn(2, B);
+        // Drive the internal counter a long way, touching only address 1.
+        for _ in 0..1000 {
+            t.lookup(1);
+        }
+        t.learn(3, [3u8; 6]);
+        assert!(t.knows(1), "the frequently used entry must survive");
+        assert!(t.knows(3));
+    }
+
+    #[test]
+    fn clear_forgets_everything() {
+        let mut t: ArpTable<4> = ArpTable::new();
+        t.learn(11, A);
+        t.clear();
+        assert!(t.is_empty());
+        assert_eq!(t.lookup(11), BROADCAST_MAC);
     }
 
     #[test]
