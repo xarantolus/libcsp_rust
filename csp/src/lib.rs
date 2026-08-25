@@ -56,7 +56,7 @@ pub use delivery::{Delivery, Handler, PortTable};
 pub use conn::Table as ConnTable;
 pub use node::{Node, Outbound};
 pub use hooks::{Hooks, NoHooks, PowerAction, Timestamp};
-pub use iface::{Interface, Transmit};
+pub use iface::{Interface, Sent, Transmit};
 pub use iflist::IfList;
 pub use qfifo::Qfifo;
 pub use router::{Bridged, DropReason, Routed, Router};

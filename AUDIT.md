@@ -187,3 +187,48 @@ sends a fragment-flagged packet and then a plain one on the same connection and 
 second is not marked.
 
 **Deviations:** `SCOPE.md` 3 (non-destructive wrong-shape delivery), 15 (non-sticky flag).
+
+---
+
+## `csp-core::cfp` — CAN fragmentation
+
+Against `src/interfaces/csp_if_can.c` and `csp_if_can_pbuf.c`.
+
+| C | Rust | |
+|---|---|---|
+| CFP1 identifier build/parse | `v1_id` / `v1_parse` | ✅ differentially fuzzed both ways |
+| CFP1 begin/more framing, `remain` | `V1Fragmenter` | ✅ 101 golden frames |
+| CFP1 reassembly | `V1Reassembler` | ✅ |
+| CFP2 framing, begin/end, 3-bit `fc` | `V2Fragmenter` | ✅ |
+| CFP2 reassembly, split header | `V2Reassembler` | ✅ added earlier in this work |
+| `csp_can_pbuf_*` — concurrent transfers | `Pbufs` | ✅ added earlier in this work |
+| **loopback shortcut** | `Interface::send` → `Sent::Loopback` | ✅ **added during this audit** |
+
+**Found during the audit.** `csp_can1_tx` and `csp_can2_tx` both open with
+
+```c
+if (packet->id.dst == iface->addr) { csp_qfifo_write(packet, iface, NULL); return CSP_ERR_NONE; }
+```
+
+The port checked only the **node** address in `Node::route`, and a node's address and an
+*interface's* address are not the same thing — a node can hold several interfaces on
+different subnets. A packet addressed to an interface would have gone out on the wire
+instead of looping back. `Interface::send` now returns `Sent::Loopback` for it, which the
+caller must feed back in; making it a returned value rather than a silent branch means a
+caller cannot forget to handle it.
+
+CFP2 additionally consults `csp_addr_is_alias`; aliases live in [`IfList`], which is where
+that check belongs.
+
+**Faithful:** yes. Identifiers, DLCs and data match the C byte-for-byte across 16 transfers
+and 101 frames, and the identifier packing/parsing is differentially fuzzed over every
+29-bit pattern.
+
+**Rusty:** yes. Iterators rather than a callback-driven send loop, and `Pbufs` is generic
+over the reassembler so CFP1, CFP2 and Ethernet share one implementation.
+
+**Note, not a defect:** CFP2's fragment counter is 3 bits, so losing exactly 8 consecutive
+fragments is undetectable. That is the wire format, and it is documented rather than
+papered over.
+
+**Tests:** 158 in `csp`, and the `cfp` module's own suite covers both versions.

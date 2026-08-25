@@ -20,6 +20,22 @@
 use crate::pool::Packet;
 use csp_core::Result;
 
+/// What happened to a packet handed to [`Interface::send`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// It went out on the link.
+    Transmitted,
+    /// It is addressed to this interface itself and must be fed back in with
+    /// [`Router::receive`](crate::Router::receive) instead.
+    ///
+    /// `csp_can1_tx` and `csp_can2_tx` both open with this check, and it is easy to miss
+    /// because the *node* address and an *interface* address are not the same thing — a
+    /// node can hold several interfaces on different subnets. Without it, a packet
+    /// addressed to an interface goes out on the wire and comes back, or does not come
+    /// back at all.
+    Loopback,
+}
+
 // I2C, UDP and LOOP need no module of their own. Each is a *datagram* interface: one CSP
 // frame per link-layer frame, no segmentation, so the entire protocol logic is
 // `Interface::send` (prepend the header, hand over the frame) on transmit and
@@ -110,28 +126,42 @@ impl<T> Interface<T> {
         self
     }
 
+    /// True if `dst` is this interface's own address.
+    ///
+    /// Aliases are resolved through [`IfList`](crate::IfList), which is where they live;
+    /// `csp_can2_tx` additionally consults `csp_addr_is_alias` here.
+    pub const fn is_self(&self, dst: u16) -> bool {
+        dst == self.addr
+    }
+
     /// Frame and send a packet, updating the counters.
     ///
     /// Prepending the header is done here rather than left to the driver. In the C it is
     /// the interface's job and it is easy to forget — a `nexthop` that reads
     /// `frame_begin`/`frame_length` without calling `csp_id_prepend` first sees a
     /// zero-length frame and cheerfully transmits nothing.
+    ///
+    /// Returns [`Sent::Loopback`] for a packet addressed to this interface, which the
+    /// caller must feed back in rather than transmit.
     pub fn send<'p, const N: usize, const SZ: usize>(
         &mut self,
         version: csp_core::Version,
         via: u16,
         packet: &mut Packet<'p, N, SZ>,
-    ) -> Result<()>
+    ) -> Result<Sent>
     where
         T: Transmit<'p, N, SZ>,
     {
+        if self.is_self(packet.id().dst) {
+            return Ok(Sent::Loopback);
+        }
         packet.prepend_header(version)?;
         let len = packet.with_frame(|f| f.len());
         match self.driver.transmit(via, packet) {
             Ok(()) => {
                 self.stats.tx += 1;
                 self.stats.txbytes += len as u32;
-                Ok(())
+                Ok(Sent::Transmitted)
             }
             Err(e) => {
                 self.stats.tx_error += 1;
@@ -211,7 +241,7 @@ mod tests {
         let pool = P::new();
         let mut iface = Interface::new("TEST", 1, 5, Recorder::new());
         let mut p = packet(&pool);
-        iface.send(Version::V1, 8, &mut p).unwrap();
+        assert_eq!(iface.send(Version::V1, 8, &mut p).unwrap(), Sent::Transmitted);
 
         assert_eq!(iface.driver.n, 1);
         let len = iface.driver.lens[0];
@@ -307,6 +337,30 @@ mod tests {
             assert_eq!(back.id(), id, "{version:?}: header must survive");
             back.with_payload(|d| assert_eq!(d, b"round trip", "{version:?}: payload"));
         }
+    }
+
+    #[test]
+    fn a_packet_addressed_to_the_interface_loops_back_instead_of_transmitting() {
+        // csp_can1_tx and csp_can2_tx both open with this check. Easy to miss, because
+        // the NODE address and an INTERFACE address are not the same thing.
+        let pool = P::new();
+        let mut iface = Interface::new("CAN", 7, 5, Recorder::new());
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id { pri: 2, flags: 0, src: 1, dst: 7, dport: 20, sport: 10 });
+        p.set_payload(b"to myself").unwrap();
+
+        assert_eq!(iface.send(Version::V1, 7, &mut p).unwrap(), Sent::Loopback);
+        assert_eq!(iface.driver.n, 0, "nothing may go out on the link");
+        assert_eq!(iface.stats.tx, 0);
+    }
+
+    #[test]
+    fn a_packet_for_anyone_else_still_transmits() {
+        let pool = P::new();
+        let mut iface = Interface::new("CAN", 7, 5, Recorder::new());
+        let mut p = packet(&pool);
+        assert_eq!(iface.send(Version::V1, 8, &mut p).unwrap(), Sent::Transmitted);
+        assert_eq!(iface.driver.n, 1);
     }
 
     #[test]
