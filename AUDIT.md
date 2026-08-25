@@ -484,7 +484,13 @@ it authenticates the bytes the checksum then covers.
 defect (`SCOPE.md` 10), the tap counting what it could not hold, and the bridge refusing a
 frame from neither side (`SCOPE.md` 12).
 
-**Still open:** wiring `security::check` into `Router::deliver_local`, and the
-default-interface fallback. Both tracked in the `csp::node` audit.
+**Now wired.** `Router::deliver_local` runs `security::check` before a packet reaches a
+connection, strips what it verified so the application sees only the payload, and counts
+authentication failures on `auth_error` separately from `rx_error`.
+`DropReason::Refused(Refusal)` says which policy turned the packet away — distinct from
+every other drop reason, because it means the packet arrived intact and was refused on
+policy, which is an operational signal rather than a fault.
+
+**Still open:** the default-interface fallback, tracked in the `csp::node` audit.
 
 **Tests:** 13 in `security`; 410 in total.
