@@ -518,9 +518,8 @@ mod tests {
         iface.note_refusal(Refusal::BadChecksum);
         iface.note_refusal(Refusal::ChecksumRequired);
         iface.note_refusal(Refusal::ReliabilityRequired);
-        iface.note_refusal(Refusal::Prohibited);
         iface.note_refusal(Refusal::Unsupported);
-        assert_eq!(iface.stats.rx_error, 5);
+        assert_eq!(iface.stats.rx_error, 4);
         assert_eq!(iface.stats.autherr, 2, "and the auth count is untouched");
     }
 

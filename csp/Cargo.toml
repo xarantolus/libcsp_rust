@@ -21,3 +21,7 @@ if-i2c = ["csp-core/if-i2c"]
 
 [dependencies]
 csp-core = { path = "../csp-core", default-features = false }
+
+[dev-dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
