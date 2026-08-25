@@ -134,6 +134,10 @@ static void measure(unsigned int mode, const char * mode_name,
 
 	if (ctest_tracing()) {
 		ctest_trace_begin("dedup", mode_name, "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("mode", (int64_t)mode);
+		ctest_trace_int("pairs", 2);
+		ctest_trace_obj_end();
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("delivered_of_two", (int64_t)*delivered);
 		ctest_trace_int("forwarded_of_two", (int64_t)*forwarded);
