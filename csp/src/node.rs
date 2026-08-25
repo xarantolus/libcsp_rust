@@ -241,6 +241,16 @@ impl<
         closed
     }
 
+    /// Reclaim a packet that [`Router::work`] reported as
+    /// [`Routed::Forwarded`](crate::Routed::Forwarded).
+    ///
+    /// The router hands back a pool slot index rather than the packet, because `Routed`
+    /// carries no lifetime. Call this with that index to get the packet and send it on the
+    /// reported interface. Not calling it leaks the buffer.
+    pub fn take_forwarded(&self, packet: u16) -> Option<Packet<'a, BUFS, BUFSZ>> {
+        self.pool().from_index(packet)
+    }
+
     /// Take the next connection with data waiting.
     ///
     /// Non-blocking: returns `None` rather than sleeping, because the caller owns the

@@ -96,6 +96,149 @@ unsafe extern "C" {
     fn shim_kiss_last_id(out: *mut u8) -> c_int;
     fn shim_kiss_drops() -> u32;
     fn shim_kiss_frame_errors() -> u32;
+    fn shim_node_init(version: c_int, address: u16) -> c_int;
+    fn shim_node_bind(port: u8) -> c_int;
+    fn shim_node_inject(frame: *const u8, len: u32) -> c_int;
+    fn shim_node_pump() -> c_int;
+    fn shim_node_clear_tx();
+    fn shim_node_tx_count() -> c_int;
+    fn shim_node_tx_get(i: c_int, out: *mut u8) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_node_recv(
+        port: u8,
+        src: *mut u16,
+        dst: *mut u16,
+        dport: *mut u8,
+        sport: *mut u8,
+        out: *mut u8,
+        out_len: *mut c_int,
+    ) -> c_int;
+    fn shim_node_buf_free() -> c_int;
+    fn shim_node_counters(
+        rx: *mut u32,
+        tx: *mut u32,
+        drop: *mut u32,
+        rx_error: *mut u32,
+        tx_error: *mut u32,
+        autherr: *mut u32,
+    );
+    fn shim_node_iface_registered() -> c_int;
+}
+
+/// Capture-interface counters: (rx, tx, drop, rx_error, tx_error, autherr).
+pub fn c_node_counters() -> (u32, u32, u32, u32, u32, u32) {
+    let (mut a, mut b, mut c, mut d, mut e, mut f) = (0, 0, 0, 0, 0, 0);
+    // SAFETY: six live stack slots, all written by the shim.
+    unsafe { shim_node_counters(&mut a, &mut b, &mut c, &mut d, &mut e, &mut f) }
+    (a, b, c, d, e, f)
+}
+
+/// Whether the C node's own address resolves through the interface list.
+pub fn c_node_iface_registered() -> bool {
+    // SAFETY: one lookup, no arguments.
+    unsafe { shim_node_iface_registered() != 0 }
+}
+
+/// What a CSP node did with a frame, described only in terms an application or a peer
+/// could observe.
+///
+/// Deliberately no internal state: no queue depths, no connection-table indices, no
+/// refcounts. If a test needs one of those to pass it is pinning an implementation, and
+/// the port is entitled to differ.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NodeOutcome {
+    /// Frames the node put on the wire, in order, as complete framed bytes.
+    pub tx: Vec<Vec<u8>>,
+    /// Messages the application received: (port, src, dst, dport, sport, payload).
+    pub delivered: Vec<Delivered>,
+}
+
+/// One message an application received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub struct Delivered {
+    pub port: u8,
+    pub src: u16,
+    pub dst: u16,
+    pub dport: u8,
+    pub sport: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Bring the C node up. Idempotent; the first call fixes version and address.
+pub fn c_node_init(version: csp_core::Version, address: u16) -> bool {
+    let v = match version {
+        csp_core::Version::V1 => 1,
+        csp_core::Version::V2 => 2,
+    };
+    // SAFETY: calls csp_init once behind an internal guard; callers hold `LOCK`.
+    unsafe { shim_node_init(v, address) == 0 }
+}
+
+/// Bind a port on the C node.
+pub fn c_node_bind(port: u8) -> i32 {
+    // SAFETY: bounded by SHIM_PORTS on the C side, which returns -1 rather than indexing.
+    unsafe { shim_node_bind(port) }
+}
+
+/// Feed `frame` to the C node, run its router to quiescence, and report only what an
+/// application or a peer could see.
+pub fn c_node_exchange(frame: &[u8], watch_ports: &[u8]) -> NodeOutcome {
+    let mut out = NodeOutcome::default();
+    // SAFETY: every buffer below is sized for the largest frame the C can emit, and the
+    // shim bounds-checks its own indices. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        shim_node_inject(frame.as_ptr(), frame.len() as u32);
+        shim_node_pump();
+
+        for &port in watch_ports {
+            loop {
+                let (mut src, mut dst) = (0u16, 0u16);
+                let (mut dport, mut sport) = (0u8, 0u8);
+                let mut payload = vec![0u8; 512];
+                let mut n: c_int = 0;
+                let got = shim_node_recv(
+                    port,
+                    &mut src,
+                    &mut dst,
+                    &mut dport,
+                    &mut sport,
+                    payload.as_mut_ptr(),
+                    &mut n,
+                );
+                if got == 0 {
+                    break;
+                }
+                payload.truncate(n as usize);
+                out.delivered.push(Delivered {
+                    port,
+                    src,
+                    dst,
+                    dport,
+                    sport,
+                    payload,
+                });
+            }
+        }
+
+        let n = shim_node_tx_count();
+        for i in 0..n {
+            let mut buf = vec![0u8; 512];
+            let len = shim_node_tx_get(i, buf.as_mut_ptr());
+            if len >= 0 {
+                buf.truncate(len as usize);
+                out.tx.push(buf);
+            }
+        }
+    }
+    out
+}
+
+/// Buffers free in the C pool — for asserting a node leaked nothing.
+pub fn c_node_buf_free() -> i32 {
+    // SAFETY: reads one counter.
+    unsafe { shim_node_buf_free() }
 }
 
 /// What the C's KISS decoder made of a byte stream.
