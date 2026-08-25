@@ -20,6 +20,7 @@
  */
 #include <check.h>
 #include <stddef.h>
+#include <endian.h>
 #include <string.h>
 
 #include "clock.h"
@@ -44,6 +45,9 @@
 #define TEST_REVISION "rev-1"
 
 static csp_iface_t ingress_if;
+/* A second interface that is not the default, so "the route CMP installed was used" is
+   distinguishable from "the packet fell through to the default". */
+static csp_iface_t routed_if;
 static csp_socket_t sock;
 
 /* The request the last helper actually sent, so the replay drives from it. */
@@ -54,12 +58,18 @@ static size_t sent_len;
 static uint8_t reply[CSP_BUFFER_SIZE];
 static int reply_len;
 static unsigned int reply_count;
+/* Which interface the last frame left by — the only way to tell a route apart from a
+   default without reading the routing table. */
+static char left_by[CSP_IFLIST_NAME_MAX + 1];
 
 static int capture_tx(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
-	(void)iface;
 	(void)via;
 	(void)from_me;
 	reply_count++;
+	if (iface != NULL && iface->name != NULL) {
+		strncpy(left_by, iface->name, sizeof(left_by) - 1);
+		left_by[sizeof(left_by) - 1] = '\0';
+	}
 	reply_len = packet->length;
 	if (reply_len > (int)sizeof(reply)) {
 		reply_len = (int)sizeof(reply);
@@ -86,6 +96,13 @@ static void setup_stack(void) {
 	ingress_if.is_default = 1;
 	csp_iflist_add(&ingress_if);
 
+	memset(&routed_if, 0, sizeof(routed_if));
+	routed_if.addr = 40;
+	routed_if.netmask = NETMASK;
+	routed_if.name = "ROUTED";
+	routed_if.nexthop = capture_tx;
+	csp_iflist_add(&routed_if);
+
 	/* libcsp does not serve CMP by itself: csp_service_handler is called by the
 	   application from its own receive loop (examples/csp_server.c:77). Binding port 0 and
 	   handing it what arrives is what a server does. */
@@ -96,6 +113,7 @@ static void setup_stack(void) {
 
 	reply_len = 0;
 	reply_count = 0;
+	left_by[0] = '\0';
 	ctest_clock_set(CTEST_CLOCK_EPOCH_MS);
 }
 
@@ -264,6 +282,12 @@ END_TEST
 START_TEST(test_if_stats_answers_a_name_only_request)
 {
 	setup_stack();
+
+	/* Snapshotted before the request, because the handler fills the block before the reply
+	   is transmitted -- so the tx it reports is the count as of *asking*, not as of the
+	   answer arriving. A node can never report the packet carrying its own report. */
+	const uint32_t tx_at_ask = ingress_if.tx;
+	const uint32_t txbytes_at_ask = ingress_if.txbytes;
 
 	uint8_t body[offsetof(struct csp_cmp_if_stats_msg, tx)];
 	memset(body, 0, sizeof(body));
@@ -601,6 +625,185 @@ START_TEST(test_poke_refuses_to_write_bytes_the_request_did_not_carry)
 }
 END_TEST
 
+/* --- ROUTE_SET ---
+ *
+ * The question a test should ask is not "is there a table entry" but "does a packet for
+ * that destination now leave by the named interface". These send a packet afterwards and
+ * look at which wire it came out of.
+ */
+
+#define ROUTE_TARGET 200
+
+/* Send a packet to ROUTE_TARGET and report the interface it left by, or "" for nothing. */
+static const char * where_does_it_go(void) {
+	left_by[0] = '\0';
+	reply_count = 0;
+
+	csp_packet_t * packet = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(packet);
+	packet->id.pri = 2;
+	packet->id.src = PEER_ADDR;
+	packet->id.dst = ROUTE_TARGET;
+	packet->id.dport = 20;
+	packet->id.sport = 40;
+	packet->id.flags = 0;
+	memcpy(packet->data, "onward", 6);
+	packet->length = 6;
+
+	/* Injected as if from INGRESS. With no matching route the default (INGRESS) is where
+	   it goes, so a route pointing at ROUTED is visibly different from no route at all —
+	   which is the whole point of using a non-default interface as the target. */
+	csp_qfifo_write(packet, &ingress_if, NULL);
+	csp_route_work();
+	return left_by;
+}
+
+static void route_set_v2(uint16_t dest, uint16_t via, uint16_t netmask, const char * iface) {
+	uint8_t body[sizeof(struct csp_cmp_route_set_v2_msg)];
+	memset(body, 0, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = CSP_CMP_ROUTE_SET_V2;
+	body[2] = (uint8_t)(dest >> 8);
+	body[3] = (uint8_t)dest;
+	body[4] = (uint8_t)(via >> 8);
+	body[5] = (uint8_t)via;
+	body[6] = (uint8_t)(netmask >> 8);
+	body[7] = (uint8_t)netmask;
+	strncpy((char *)&body[8], iface, CSP_CMP_ROUTE_IFACE_LEN - 1);
+	request(body, sizeof(body));
+}
+
+START_TEST(test_route_set_v2_installs_a_route_that_is_used)
+{
+	setup_stack();
+
+	/* Before: no route matches, so it falls through to the default -- which is the
+	   interface it arrived on, and split horizon refuses to send it straight back. So
+	   nothing goes anywhere, and "somewhere" afterwards is unambiguous. */
+	ck_assert_str_eq(where_does_it_go(), "");
+
+	route_set_v2(ROUTE_TARGET, 0, 14, "ROUTED");
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_uint_eq(reply[0], CSP_CMP_REPLY);
+	ck_assert_uint_eq(reply[1], CSP_CMP_ROUTE_SET_V2);
+	/* Recorded here, not at the end: where_does_it_go() sends another frame and the
+	   capture holds only the last one. Recording afterwards put "onward" in the corpus as
+	   though it were the CMP reply. */
+	record("route_set_v2_installs_a_route_that_is_used");
+
+	/* After: the packet leaves by the interface the request named, not the default. */
+	ck_assert_str_eq(where_does_it_go(), "ROUTED");
+}
+END_TEST
+
+/* An interface the node does not have. The handler looks it up before touching the table,
+   so nothing is installed and nothing is answered. */
+START_TEST(test_route_set_v2_for_an_unknown_interface_changes_nothing)
+{
+	setup_stack();
+
+	route_set_v2(ROUTE_TARGET, 0, 14, "NOSUCHIF");
+
+	ck_assert_uint_eq(reply_count, 0);
+	record("route_set_v2_for_an_unknown_interface_changes_nothing");
+
+	/* Still nowhere, so no route was installed. */
+	ck_assert_str_eq(where_does_it_go(), "");
+}
+END_TEST
+
+START_TEST(test_route_set_v2_one_byte_short_changes_nothing)
+{
+	setup_stack();
+
+	uint8_t body[sizeof(struct csp_cmp_route_set_v2_msg) - 1];
+	memset(body, 0, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = CSP_CMP_ROUTE_SET_V2;
+	body[2] = (uint8_t)(ROUTE_TARGET >> 8);
+	body[3] = (uint8_t)ROUTE_TARGET;
+	body[7] = 14;
+	strncpy((char *)&body[8], "ROUTED", 6);
+	request(body, sizeof(body));
+
+	ck_assert_uint_eq(reply_count, 0);
+	record("route_set_v2_one_byte_short_changes_nothing");
+
+	ck_assert_str_eq(where_does_it_go(), "");
+}
+END_TEST
+
+/* The v1 form: single-byte addresses, and the netmask is not on the wire at all — the
+   handler uses csp_id_get_host_bits() for it. */
+START_TEST(test_route_set_v1_installs_a_route_that_is_used)
+{
+	setup_stack();
+
+	uint8_t body[sizeof(struct csp_cmp_route_set_v1_msg)];
+	memset(body, 0, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = CSP_CMP_ROUTE_SET_V1;
+	body[2] = ROUTE_TARGET;
+	body[3] = 0;
+	strncpy((char *)&body[4], "ROUTED", CSP_CMP_ROUTE_IFACE_LEN - 1);
+	request(body, sizeof(body));
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_uint_eq(reply[1], CSP_CMP_ROUTE_SET_V1);
+	record("route_set_v1_installs_a_route_that_is_used");
+
+	ck_assert_str_eq(where_does_it_go(), "ROUTED");
+}
+END_TEST
+
+/* --- IF_STATS values --- */
+
+/* The reply has to carry the counters, not just be the right shape. Traffic is driven
+   first so they are non-zero: a test against an all-zero block would pass on an
+   implementation that never filled it in. */
+START_TEST(test_if_stats_reports_counters_that_moved)
+{
+	setup_stack();
+
+	/* Three packets in on INGRESS, so rx and rxbytes are both non-zero. */
+	for (int i = 0; i < 3; i++) {
+		(void)where_does_it_go();
+	}
+	ck_assert_uint_gt(ingress_if.rx, 0);
+
+	/* Snapshotted before the request, because the handler fills the block before the reply
+	   is transmitted -- so the tx it reports is the count as of *asking*, not as of the
+	   answer arriving. A node can never report the packet carrying its own report. */
+	const uint32_t tx_at_ask = ingress_if.tx;
+	const uint32_t txbytes_at_ask = ingress_if.txbytes;
+
+	uint8_t body[offsetof(struct csp_cmp_if_stats_msg, tx)];
+	memset(body, 0, sizeof(body));
+	body[0] = CSP_CMP_REQUEST;
+	body[1] = CSP_CMP_IF_STATS;
+	strncpy((char *)&body[2], "INGRESS", CSP_CMP_ROUTE_IFACE_LEN - 1);
+	request(body, sizeof(body));
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_int_eq(reply_len, (int)sizeof(struct csp_cmp_if_stats_msg));
+
+	const struct csp_cmp_if_stats_msg * msg = (const struct csp_cmp_if_stats_msg *)reply;
+	ck_assert_str_eq(msg->interface, "INGRESS");
+	/* Compared against the interface itself rather than a hardcoded number, so the test
+	   does not have to know how libcsp counts -- only that the reply carries what the
+	   interface holds, and that it is not zero. */
+	ck_assert_uint_gt(be32toh(msg->rx), 0);
+	ck_assert_uint_eq(be32toh(msg->rx), ingress_if.rx);
+	ck_assert_uint_eq(be32toh(msg->rxbytes), ingress_if.rxbytes);
+	ck_assert_uint_eq(be32toh(msg->tx), tx_at_ask);
+	ck_assert_uint_eq(be32toh(msg->txbytes), txbytes_at_ask);
+	/* And the reply's own transmission is not in it. */
+	ck_assert_uint_eq(ingress_if.tx, tx_at_ask + 1);
+
+	record("if_stats_reports_counters_that_moved");
+}
+END_TEST
+
 Suite * cmp_suite(void)
 {
 	Suite * s = suite_create("CMP");
@@ -621,6 +824,14 @@ Suite * cmp_suite(void)
 	tcase_add_test(tc_len, test_a_full_size_clock_request_is_answered);
 	tcase_add_test(tc_len, test_the_minimum_request_length_is_the_whole_reply);
 	suite_add_tcase(s, tc_len);
+
+	TCase * tc_route = tcase_create("route_set");
+	tcase_add_test(tc_route, test_route_set_v2_installs_a_route_that_is_used);
+	tcase_add_test(tc_route, test_route_set_v2_for_an_unknown_interface_changes_nothing);
+	tcase_add_test(tc_route, test_route_set_v2_one_byte_short_changes_nothing);
+	tcase_add_test(tc_route, test_route_set_v1_installs_a_route_that_is_used);
+	tcase_add_test(tc_route, test_if_stats_reports_counters_that_moved);
+	suite_add_tcase(s, tc_route);
 
 	TCase * tc_mem = tcase_create("peek_poke");
 	tcase_add_test(tc_mem, test_peek_returns_the_bytes_at_the_address);
