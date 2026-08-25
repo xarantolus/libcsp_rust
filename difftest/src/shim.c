@@ -335,24 +335,32 @@ uint32_t shim_kiss_frame_errors(void) { return shim_kiss_iface.frame; }
 #define SHIM_FRAME_MAX 300
 
 static csp_iface_t  shim_node_iface;   /* ingress: where injected frames arrive */
+static csp_iface_t  shim_node_iface_c;  /* a third subnet, so a routing-table entry can
+                                         * point somewhere the local-subnet rule would
+                                         * not have chosen -- which is how the two
+                                         * precedence levels become distinguishable */
 static csp_iface_t  shim_node_iface_b;  /* egress: a different subnet, so a forwarded
                                          * packet has somewhere to go. With one interface
                                          * split horizon vetoes forwarding and the C
                                          * correctly drops the packet. */
 static uint8_t      shim_tx_buf[SHIM_TX_MAX][SHIM_FRAME_MAX];
 static int          shim_tx_len[SHIM_TX_MAX];
+static const char * shim_tx_if[SHIM_TX_MAX];   /* which interface each frame left by */
+static uint16_t     shim_tx_via[SHIM_TX_MAX];  /* and the next hop it was given */
 static int          shim_tx_n = 0;
 static int          shim_node_ready = 0;
 
 /* Capture nexthop: record the framed bytes, free the packet, report success. */
 static int shim_node_tx_fn(csp_iface_t *iface, uint16_t via, csp_packet_t *packet, int from_me) {
-	(void)iface; (void)via; (void)from_me;
+	(void)from_me;
 	csp_id_prepend(packet);
 	if (shim_tx_n < SHIM_TX_MAX) {
 		int n = (int)packet->frame_length;
 		if (n > SHIM_FRAME_MAX) { n = SHIM_FRAME_MAX; }
 		memcpy(shim_tx_buf[shim_tx_n], packet->frame_begin, (size_t)n);
 		shim_tx_len[shim_tx_n] = n;
+		shim_tx_if[shim_tx_n]  = iface ? iface->name : "?";
+		shim_tx_via[shim_tx_n] = via;
 		shim_tx_n++;
 	}
 	csp_buffer_free(packet);
@@ -364,7 +372,7 @@ static int shim_node_tx_fn(csp_iface_t *iface, uint16_t via, csp_packet_t *packe
  * that is the default route. Idempotent: the first call wins, later calls only check
  * the parameters still match.
  */
-int shim_node_init(int version, uint16_t address, uint16_t netmask, uint16_t egress) {
+int shim_node_init(int version, uint16_t address, uint16_t netmask, uint16_t egress, uint16_t third) {
 	if (shim_node_ready) {
 		return (csp_conf.version == (uint8_t)version && shim_node_iface.addr == address) ? 0 : -1;
 	}
@@ -391,6 +399,13 @@ int shim_node_init(int version, uint16_t address, uint16_t netmask, uint16_t egr
 	shim_node_iface_b.is_default = 1;
 	csp_iflist_add(&shim_node_iface_b);
 
+	memset(&shim_node_iface_c, 0, sizeof(shim_node_iface_c));
+	shim_node_iface_c.name    = "ROUTED";
+	shim_node_iface_c.addr    = third;
+	shim_node_iface_c.netmask = netmask;
+	shim_node_iface_c.nexthop = shim_node_tx_fn;
+	csp_iflist_add(&shim_node_iface_c);
+
 	shim_node_ready = 1;
 	return 0;
 }
@@ -404,6 +419,25 @@ int shim_node_tx_get(int i, uint8_t *out) {
 	if (i < 0 || i >= shim_tx_n) { return -1; }
 	memcpy(out, shim_tx_buf[i], (size_t)shim_tx_len[i]);
 	return shim_tx_len[i];
+}
+
+/* Name of the interface frame `i` left by, and the via it carried. */
+int shim_node_tx_iface(int i, uint8_t *name, uint16_t *via) {
+	if (i < 0 || i >= shim_tx_n) { return -1; }
+	const char *n = shim_tx_if[i] ? shim_tx_if[i] : "?";
+	size_t len = strlen(n);
+	if (len > 15) { len = 15; }
+	memcpy(name, n, len);
+	*via = shim_tx_via[i];
+	return (int)len;
+}
+
+/* Install a routing-table entry on the C node. iface: 0=INGRESS 1=EGRESS 2=ROUTED. */
+int shim_node_route(uint16_t address, int netmask, int iface, uint16_t via) {
+	csp_iface_t *target = iface == 0 ? &shim_node_iface
+	                    : iface == 1 ? &shim_node_iface_b
+	                                 : &shim_node_iface_c;
+	return csp_rtable_set(address, netmask, target, via);
 }
 
 /* Hand a complete on-the-wire frame to the node, as a driver would. */

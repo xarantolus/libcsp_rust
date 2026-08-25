@@ -382,8 +382,26 @@ bits, which collapses both interfaces into subnet 0 and would have produced a te
 passed by asserting nothing happened. All four pass, with source addresses deliberately
 biased above 31 so the cases could not have been carried by a v1 header.
 
-**Still open, and now visible:** `Router::forward` uses the single-destination
-`routes.find`, not the `find_all` fan-out and default-interface fallback that
-`Node::resolve` implements. So the router path still cannot forward to redundant routes
-or fall back to a default interface — the fix for that landed in `resolve` and the router
-does not call it. Recorded rather than fixed: it is a design change, not a patch.
+3. **The routing table was consulted before local subnets — a whole precedence level was
+   missing.** `csp_send_direct` tries **local subnets first** (`csp_iflist_get_by_subnet`),
+   and if any interface owns the destination's subnet it sends there and `return`s; the
+   routing table is only the fallback for destinations no interface owns, and the default
+   interfaces are the fallback after that. Each level is terminal: if it matched but split
+   horizon left nothing usable, the packet is dropped rather than falling through.
+
+   `Router::forward` began at the routing table, so a route could divert traffic the C
+   would have put straight onto the interface owning that subnet. `Router::work` now takes
+   the interface list — it cannot decide correctly without it — and implements all three
+   levels, with split horizon comparing *subnets* (`is_same_subnet`) rather than interface
+   identity. The router was also discarding the ingress interface `qfifo.pop` handed it,
+   which is what split horizon needs.
+
+   **How this was nearly missed twice.** The first version of the test compared the
+   forwarded frame's *bytes* and passed — the bytes are identical whichever link the packet
+   leaves by. It only failed once strengthened to compare which interface the frame went
+   out of. Every forwarding test now asserts the interface, not just the frame.
+
+**Still open:** `Routed::Forwarded` carries one destination, so the fan-out — a clone to
+every tied route, or to every default interface — is still single-path even though
+`find_all` and the default scan now both run. Closing it needs `Routed` to carry a set,
+which is a design change rather than a patch.

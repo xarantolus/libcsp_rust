@@ -352,12 +352,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// One step of the router.
     ///
     /// Returns [`Routed::Idle`] when there is nothing to do, which is not an error.
-    pub fn work<const B: usize, const SZ: usize>(
+    pub fn work<const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
         now_ms: u32,
     ) -> Routed {
-        let Some((packet, _iface)) = self.qfifo.pop(pool) else {
+        let Some((packet, ingress)) = self.qfifo.pop(pool) else {
             return Routed::Idle;
         };
 
@@ -374,16 +375,19 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 self.counters.duplicates += 1;
                 return Routed::Dropped(DropReason::Duplicate);
             }
-            return self.route_one(pool, framed, now_ms);
+            return self.route_one(pool, framed, ifaces, ingress, now_ms);
         }
 
-        self.route_one(pool, packet, now_ms)
+        self.route_one(pool, packet, ifaces, ingress, now_ms)
     }
 
-    fn route_one<'p, const B: usize, const SZ: usize>(
+    #[allow(clippy::too_many_arguments)]
+    fn route_one<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         pool: &'p Pool<B, SZ>,
         packet: Packet<'p, B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        ingress: u8,
         now_ms: u32,
     ) -> Routed {
         let id = packet.id();
@@ -411,7 +415,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         if id.dst == self.address || self.version.is_broadcast(id.dst, self.address, 0) {
             return self.deliver_local(packet, id, now_ms);
         }
-        self.forward(pool, packet, id)
+        self.forward(pool, packet, id, ifaces, ingress)
     }
 
     fn deliver_local<'p, const B: usize, const SZ: usize>(
@@ -496,16 +500,108 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
     }
 
+    /// Decide where a packet that is not for us should go.
+    ///
+    /// Mirrors `csp_send_direct`'s precedence, which is **three levels, not one**:
+    ///
+    /// 1. **A local subnet.** Any interface whose subnet contains the destination wins,
+    ///    and the routing table is then never consulted (`csp_io.c`: `if (local_found)
+    ///    { ...; return; }`).
+    /// 2. **The routing table**, for destinations no interface owns.
+    /// 3. **The default interfaces**, if no route matched.
+    ///
+    /// Each level applies split horizon, and each is *terminal*: if a level matched but
+    /// split horizon left nothing usable, the packet is dropped rather than falling
+    /// through to the next. That is what the C's `local_found` / `route_found` flags do.
+    ///
+    /// An earlier version began at the routing table, so a route could divert traffic the
+    /// C would have put straight onto the interface owning that subnet. Found by a
+    /// node-level differential test — and only after it was strengthened to compare
+    /// *which interface* the frame left by, because the frame **bytes** are identical
+    /// either way and the byte-only version of the test passed.
     #[cfg(feature = "rtable")]
-    fn forward<'p, const B: usize, const SZ: usize>(
+    fn forward<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         _pool: &'p Pool<B, SZ>,
         packet: Packet<'p, B, SZ>,
         id: Id,
+        ifaces: &crate::iflist::IfList<N, A>,
+        ingress: u8,
     ) -> Routed {
-        match self.routes.find(id.dst) {
-            Some(r) => {
-                let (iface, via) = (r.iface, r.via);
+        // 1. A local subnet owns the destination.
+        let mut local_found = false;
+        let mut chosen: Option<(u8, u16)> = None;
+        for idx in ifaces.indices() {
+            if !ifaces.is_within_subnet(id.dst, idx) {
+                continue;
+            }
+            local_found = true;
+            if Self::split_horizon(ifaces, idx, ingress) {
+                continue;
+            }
+            chosen = Some((idx, rtable::NO_VIA));
+        }
+        if local_found {
+            return self.finish_forward(chosen, packet);
+        }
+
+        // 2. The routing table.
+        let mut route_found = false;
+        let placeholder = rtable::Route {
+            address: 0,
+            netmask: 0,
+            iface: 0,
+            via: rtable::NO_VIA,
+        };
+        let mut found = [&placeholder; 4];
+        let n = self.routes.find_all(id.dst, &mut found);
+        for r in found.iter().take(n) {
+            route_found = true;
+            if Self::split_horizon(ifaces, r.iface, ingress) {
+                continue;
+            }
+            chosen = Some((r.iface, r.via));
+        }
+        if route_found {
+            return self.finish_forward(chosen, packet);
+        }
+
+        // 3. Default interfaces.
+        for idx in ifaces.indices() {
+            let Some(e) = ifaces.get(idx) else { continue };
+            if !e.is_default || Self::split_horizon(ifaces, idx, ingress) {
+                continue;
+            }
+            chosen = Some((idx, rtable::NO_VIA));
+        }
+        self.finish_forward(chosen, packet)
+    }
+
+    /// `is_same_subnet`: the same interface, or one whose address falls inside the
+    /// ingress interface's subnet.
+    #[cfg(feature = "rtable")]
+    fn split_horizon<const N: usize, const A: usize>(
+        ifaces: &crate::iflist::IfList<N, A>,
+        candidate: u8,
+        ingress: u8,
+    ) -> bool {
+        if candidate == ingress {
+            return true;
+        }
+        match ifaces.get(candidate) {
+            Some(e) => ifaces.is_within_subnet(e.addr, ingress),
+            None => false,
+        }
+    }
+
+    #[cfg(feature = "rtable")]
+    fn finish_forward<'p, const B: usize, const SZ: usize>(
+        &mut self,
+        chosen: Option<(u8, u16)>,
+        packet: Packet<'p, B, SZ>,
+    ) -> Routed {
+        match chosen {
+            Some((iface, via)) => {
                 self.counters.forwarded += 1;
                 Routed::Forwarded {
                     iface,
@@ -521,11 +617,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     }
 
     #[cfg(not(feature = "rtable"))]
-    fn forward<'p, const B: usize, const SZ: usize>(
+    fn forward<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         _pool: &'p Pool<B, SZ>,
         _packet: Packet<'p, B, SZ>,
         _id: Id,
+        _ifaces: &crate::iflist::IfList<N, A>,
+        _ingress: u8,
     ) -> Routed {
         self.counters.no_route += 1;
         Routed::Dropped(DropReason::NoRoute)
@@ -629,6 +727,19 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
 
 #[cfg(test)]
 mod tests {
+    /// Interfaces for the router tests.
+    ///
+    /// The router needs these to route at all: local-subnet ownership beats the routing
+    /// table and split horizon compares subnets. Index 0 is the interface every test
+    /// injects on, so it is also what split horizon excludes.
+    fn test_ifaces() -> crate::iflist::IfList<4, 4> {
+        let mut l = crate::iflist::IfList::new(csp_core::Version::V1);
+        l.add("IF0", 1, 5, false).unwrap();
+        l.add("IF1", 2, 5, false).unwrap();
+        l.add("IF2", 3, 5, false).unwrap();
+        l
+    }
+
     use super::*;
 
     type P = Pool<16, 264>;
@@ -656,8 +767,8 @@ mod tests {
         // tick. SCOPE.md deviation 6.
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
-        assert_eq!(r.work(&pool, 0), Routed::Idle);
-        assert_eq!(r.work(&pool, 100), Routed::Idle);
+        assert_eq!(r.work(&pool, &test_ifaces(), 0), Routed::Idle);
+        assert_eq!(r.work(&pool, &test_ifaces(), 100), Routed::Idle);
     }
 
     #[test]
@@ -667,7 +778,7 @@ mod tests {
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"hello"), 0);
 
-        match r.work(&pool, 0) {
+        match r.work(&pool, &test_ifaces(), 0) {
             Routed::Delivered { port, conn } => {
                 assert_eq!(port, 20);
                 assert_eq!(r.conns.rx_len(conn).unwrap(), 1);
@@ -683,7 +794,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.receive(pkt(&pool, ME, 39, b"nobody home"), 0);
         assert_eq!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::PortNotBound),
             "must say WHY, not just fail"
         );
@@ -696,7 +807,10 @@ mod tests {
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
         r.receive(pkt(&pool, 25, 20, b"elsewhere"), 0);
-        assert_eq!(r.work(&pool, 0), Routed::Dropped(DropReason::NoRoute));
+        assert_eq!(
+            r.work(&pool, &test_ifaces(), 0),
+            Routed::Dropped(DropReason::NoRoute)
+        );
         assert_eq!(r.counters.no_route, 1);
         assert_eq!(pool.available(), 16);
     }
@@ -708,7 +822,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.routes.set(0, 0, 3, rtable::NO_VIA).unwrap();
         r.receive(pkt(&pool, 25, 20, b"elsewhere"), 0);
-        match r.work(&pool, 0) {
+        match r.work(&pool, &test_ifaces(), 0) {
             Routed::Forwarded { iface, .. } => assert_eq!(iface, 3),
             other => panic!("expected forwarding, got {other:?}"),
         }
@@ -723,10 +837,16 @@ mod tests {
         r.dedup_enabled = true;
 
         r.receive(pkt(&pool, ME, 20, b"same"), 0);
-        assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+        assert!(matches!(
+            r.work(&pool, &test_ifaces(), 0),
+            Routed::Delivered { .. }
+        ));
 
         r.receive(pkt(&pool, ME, 20, b"same"), 0);
-        assert_eq!(r.work(&pool, 10), Routed::Dropped(DropReason::Duplicate));
+        assert_eq!(
+            r.work(&pool, &test_ifaces(), 10),
+            Routed::Dropped(DropReason::Duplicate)
+        );
         assert_eq!(r.counters.duplicates, 1);
     }
 
@@ -737,7 +857,10 @@ mod tests {
         r.bind(20).unwrap();
         for _ in 0..2 {
             r.receive(pkt(&pool, ME, 20, b"same"), 0);
-            assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+            assert!(matches!(
+                r.work(&pool, &test_ifaces(), 0),
+                Routed::Delivered { .. }
+            ));
         }
         assert_eq!(r.counters.duplicates, 0);
     }
@@ -760,7 +883,10 @@ mod tests {
             });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
-            assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+            assert!(matches!(
+                r.work(&pool, &test_ifaces(), 0),
+                Routed::Delivered { .. }
+            ));
         }
         let mut p = pool.acquire(0).unwrap();
         p.set_id(Id {
@@ -774,7 +900,7 @@ mod tests {
         p.set_payload(b"x").unwrap();
         r.receive(p, 0);
         assert_eq!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::ConnectionTableFull)
         );
         assert_eq!(r.counters.conn_table_full, 1);
@@ -788,11 +914,14 @@ mod tests {
         r.bind(20).unwrap();
         for _ in 0..4 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
-            assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+            assert!(matches!(
+                r.work(&pool, &test_ifaces(), 0),
+                Routed::Delivered { .. }
+            ));
         }
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
         assert_eq!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::ReceiveQueueFull)
         );
         assert_eq!(r.counters.rx_queue_full, 1);
@@ -806,7 +935,10 @@ mod tests {
         r.set_promisc(true);
 
         r.receive(pkt(&pool, ME, 20, b"tapped"), 0);
-        assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+        assert!(matches!(
+            r.work(&pool, &test_ifaces(), 0),
+            Routed::Delivered { .. }
+        ));
 
         let seen = r.promisc_read(&pool).expect("the tap should have a copy");
         seen.with_payload(|d| assert_eq!(d, b"tapped"));
@@ -823,7 +955,7 @@ mod tests {
         r.set_promisc(true);
         for _ in 0..12 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
-            let _ = r.work(&pool, 0);
+            let _ = r.work(&pool, &test_ifaces(), 0);
         }
         assert!(
             r.promisc_missed() > 0,
@@ -837,7 +969,10 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
-        assert!(matches!(r.work(&pool, 0), Routed::Delivered { .. }));
+        assert!(matches!(
+            r.work(&pool, &test_ifaces(), 0),
+            Routed::Delivered { .. }
+        ));
         assert_eq!(r.conns.open_count(), 1);
 
         assert_eq!(r.tick(&pool, 5_000, 10_000), 0, "not yet idle");
@@ -852,7 +987,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
-        r.work(&pool, 0);
+        r.work(&pool, &test_ifaces(), 0);
         assert_eq!(
             pool.available(),
             15,
@@ -872,7 +1007,7 @@ mod tests {
         for _ in 0..3 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
         }
-        r.work(&pool, 0);
+        r.work(&pool, &test_ifaces(), 0);
         assert!(pool.available() < 16);
 
         // drain what is on connections too
@@ -947,7 +1082,7 @@ mod tests {
         assert!(r.accept().is_none(), "nothing delivered yet");
 
         r.receive(pkt(&pool, ME, 20, b"hello"), 0);
-        let conn = match r.work(&pool, 0) {
+        let conn = match r.work(&pool, &test_ifaces(), 0) {
             Routed::Delivered { conn, .. } => conn,
             other => panic!("{other:?}"),
         };
@@ -964,7 +1099,7 @@ mod tests {
         r.bind(20).unwrap();
         for _ in 0..3 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
-            r.work(&pool, 0);
+            r.work(&pool, &test_ifaces(), 0);
         }
         assert!(r.accept().is_some());
         assert!(r.accept().is_none(), "one connection, one accept");
@@ -987,7 +1122,7 @@ mod tests {
             });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
-            r.work(&pool, 0);
+            r.work(&pool, &test_ifaces(), 0);
         }
         assert!(r.accept_missed() > 0, "backlog overflow must be counted");
     }
@@ -1003,7 +1138,7 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"unprotected"), 0);
         assert_eq!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::ChecksumRequired))
         );
         assert_eq!(r.counters.rx_error, 1);
@@ -1038,7 +1173,7 @@ mod tests {
         p.set_payload(&buf[..n]).unwrap();
         r.receive(p, 0);
 
-        let conn = match r.work(&pool, 0) {
+        let conn = match r.work(&pool, &test_ifaces(), 0) {
             Routed::Delivered { conn, .. } => conn,
             other => panic!("expected delivery, got {other:?}"),
         };
@@ -1081,7 +1216,7 @@ mod tests {
         r.receive(p, 0);
 
         assert_eq!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::BadChecksum))
         );
     }
@@ -1095,7 +1230,7 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"unauthenticated"), 0);
         assert!(matches!(
-            r.work(&pool, 0),
+            r.work(&pool, &test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::AuthenticationRequired))
         ));
         assert_eq!(
@@ -1114,8 +1249,15 @@ mod tests {
         a.bind(20).unwrap();
 
         a.receive(pkt(&pa, 11, 20, b"for a"), 0);
-        assert!(matches!(a.work(&pa, 0), Routed::Delivered { .. }));
-        assert_eq!(b.work(&pb, 0), Routed::Idle, "b saw nothing");
+        assert!(matches!(
+            a.work(&pa, &test_ifaces(), 0),
+            Routed::Delivered { .. }
+        ));
+        assert_eq!(
+            b.work(&pb, &test_ifaces(), 0),
+            Routed::Idle,
+            "b saw nothing"
+        );
         assert_eq!(b.counters, Counters::default());
     }
 }
