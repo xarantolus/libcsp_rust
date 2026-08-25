@@ -54,12 +54,26 @@ pub enum Routed {
         /// Which connection it went to.
         conn: Handle,
     },
-    /// The packet was addressed elsewhere and handed to an interface.
+    /// The packet was addressed elsewhere and must go out on an interface.
+    ///
+    /// **The caller must send it.** `packet` is a pool slot index; turn it back into a
+    /// [`Packet`] with [`Pool::from_index`] (or [`Node::take_forwarded`]) and hand it to
+    /// the interface. Dropping the index without doing so leaks the buffer.
+    ///
+    /// This carries the packet index rather than the packet because [`Routed`] has no
+    /// lifetime or size parameters. An earlier version reported `{ iface, via }` and
+    /// *destroyed* the packet, pointing at a `Csp::forward` that was never written — so
+    /// every forwarded packet was silently discarded and the node forwarded nothing at
+    /// all. Found by the node-level differential test against the C, which is the only
+    /// thing that could have found it: the codec tests never reach the router, and the
+    /// unit tests asserted on `iface`/`via` rather than on a frame reaching the wire.
     Forwarded {
         /// Interface index.
         iface: u8,
         /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
         via: u16,
+        /// Pool slot holding the packet. The caller owns it.
+        packet: u16,
     },
     /// The packet went no further.
     Dropped(DropReason),
@@ -492,9 +506,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         match self.routes.find(id.dst) {
             Some(r) => {
                 let (iface, via) = (r.iface, r.via);
-                drop(packet); // the caller re-sends via the interface; see Csp::forward
                 self.counters.forwarded += 1;
-                Routed::Forwarded { iface, via }
+                Routed::Forwarded {
+                    iface,
+                    via,
+                    packet: packet.into_index(),
+                }
             }
             None => {
                 self.counters.no_route += 1;
