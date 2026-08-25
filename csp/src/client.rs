@@ -35,8 +35,16 @@ pub fn ping(payload: &[u8]) -> Request<'_> {
 
 /// Verify a ping reply against what was sent.
 ///
-/// The C's `csp_ping` compares only the *length*, so a path that corrupts every byte but
-/// preserves the length passes.
+/// The C's `csp_ping` gets this half right and half wrong. It **does** verify the content
+/// — it fills the request with `i % 256` and checks every byte of the reply against that
+/// pattern. What it never checks is the reply's **length**: the loop runs to `size`, the
+/// size that was *requested*, and indexes `packet->data[i]` regardless of
+/// `packet->length`. A short reply is therefore compared against stale bytes left in the
+/// pooled buffer by whatever used it last. Usually those fail the pattern and the ping
+/// correctly reports failure, but the comparison is reading data that is not part of the
+/// reply.
+///
+/// This checks the length first, then the content.
 pub fn check_ping(sent: &[u8], reply: &[u8]) -> Result<()> {
     if reply.len() != sent.len() {
         return Err(Error::LengthExceedsMaximum {
@@ -191,8 +199,8 @@ mod tests {
 
     #[test]
     fn a_ping_reply_must_match_byte_for_byte() {
-        // csp_ping compares only the LENGTH, so a path that corrupts every byte while
-        // preserving the length passes.
+        // The C verifies content but never checks the reply's length -- its loop runs to
+        // the REQUESTED size and reads past packet->length into stale buffer bytes.
         let sent = b"abcdefgh";
         assert!(check_ping(sent, b"abcdefgh").is_ok());
         assert_eq!(check_ping(sent, b"abcdefgX"), Err(Error::BadChecksum));
@@ -200,6 +208,22 @@ mod tests {
             matches!(check_ping(sent, b"abc"), Err(Error::LengthExceedsMaximum { .. })),
             "a short reply is a different failure from a corrupted one"
         );
+    }
+
+    #[test]
+    fn a_short_reply_is_refused_rather_than_compared_against_stale_bytes() {
+        // This is the C's actual defect: its loop runs to the requested size and indexes
+        // packet->data[i] without consulting packet->length, so a truncated reply is
+        // compared against whatever the previous user of that pooled buffer left behind.
+        let sent = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        // A truncated but otherwise correct prefix must still be refused.
+        assert!(matches!(
+            check_ping(&sent, &sent[..4]),
+            Err(Error::LengthExceedsMaximum { got: 4, max: 8 })
+        ));
+        // And a longer-than-expected reply is refused too.
+        let long = [0u8, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert!(check_ping(&sent, &long).is_err());
     }
 
     #[test]

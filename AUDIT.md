@@ -494,3 +494,42 @@ policy, which is an operational signal rather than a fault.
 **Still open:** the default-interface fallback, tracked in the `csp::node` audit.
 
 **Tests:** 13 in `security`; 410 in total.
+
+---
+
+## `csp::service` + `csp::client` — both halves of the built-in services
+
+Against `src/csp_service_handler.c` and `src/csp_services.c`.
+
+Every port checked in both directions — CMP, ping, ps, memfree, reboot, buf_free, uptime —
+with round-trip tests asserting the client's request is what the server accepts. A mismatch
+there is silent: the request simply does nothing.
+
+**A correction to an earlier claim in this audit.** I recorded that `csp_ping` "compares
+only the length". That is **wrong**, and re-reading the source is what caught it: `csp_ping`
+fills the request with `i % 256` and verifies **every byte** of the reply against that
+pattern. The content check is there and it is correct.
+
+What it never checks is the **length**. The loop runs to `size` — the size that was
+*requested* — and indexes `packet->data[i]` without consulting `packet->length`. A short
+reply is therefore compared against stale bytes left in the pooled buffer by whatever used
+it last. In practice those usually fail the pattern and the ping correctly reports failure,
+so this is a wrong-reason-right-answer rather than a false pass; but the comparison is
+reading data that is not part of the reply. `check_ping` checks length first, then content,
+with a test for a truncated-but-correct prefix.
+
+**Round-trip time:** `csp_ping` returns elapsed milliseconds. The port does not, and that is
+a shape difference rather than a gap — the caller owns the clock everywhere else in this
+library, so having one function reach for it would be the odd one out.
+
+**`csp_ping_noreply`** is a fire-and-forget ping; covered by `sendto` with no reply
+expected.
+
+**Faithful:** yes, with the length check added on top.
+
+**Rusty:** the two halves are separate modules, so a node that only answers does not link
+the client and vice versa. `check_cmp_reply` verifies a reply answers the request that was
+sent — `csp_cmp` returns whatever came back on the connection, so a reply to an *earlier*
+request is accepted as the answer to this one and then read as the wrong message type.
+
+**Tests:** 14 in `client`, 12 in `service`.

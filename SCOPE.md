@@ -245,7 +245,14 @@ whoever maintains the fork can see what was found and decide for themselves.
     whose entire job is reading memory, padding the reply with unrelated memory is the
     wrong direction to be wrong in. The port emits the same wire length, so a C peer sees
     the size it expects, but **zeroes** the tail.
-17. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+17. **`csp_ping` never checks the reply length.** It verifies the *content* correctly —
+    filling the request with `i % 256` and checking every byte — but its loop runs to the
+    **requested** size and indexes `packet->data[i]` without consulting
+    `packet->length`. A short reply is compared against stale bytes left in the pooled
+    buffer. Usually those fail the pattern, so the ping reports failure for the wrong
+    reason rather than passing wrongly; the comparison is still reading data that is not
+    part of the reply.
+18. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the
