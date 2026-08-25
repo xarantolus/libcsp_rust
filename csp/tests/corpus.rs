@@ -15,6 +15,18 @@
 //!
 //! `every_record_has_a_replay` is what stops this file from being a subset: a record with
 //! no arm fails the run.
+//!
+//! # Every arm must call into the port
+//!
+//! A replay that returns a literal — or anything else computed without touching `csp` or
+//! `csp_core` — is a tautology. It passes whatever the port does, and it still counts
+//! itself in "N records replayed", so it reads as evidence while being none.
+//!
+//! This is not hypothetical: `sfp::a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape`
+//! shipped as a hardcoded `json!` of the C's own answer, commented as though that were a
+//! deliberate choice. It is the same failure the `diverges` key-set check exists to stop,
+//! one layer up. The check for it is a mutation: break the port, and every record that
+//! stays green is measuring nothing.
 
 use csp::pool::Pool;
 use csp::router::{DropReason, Routed, Router};
@@ -84,6 +96,10 @@ enum Trailer {
 #[serde(deny_unknown_fields)]
 struct SecurityObserved {
     delivered: u32,
+    /// Bytes the application received. The accepting cases are only meaningful with this:
+    /// `delivered: 1` is the same whether the trailer was verified and stripped or the
+    /// policy never ran at all.
+    delivered_bytes: u32,
     rx_error: u32,
     autherr: u32,
 }
@@ -166,14 +182,26 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     p.set_payload(&body[..n]).unwrap();
 
     r.receive(p, 0);
-    let delivered = match r.work(&pool, &ifaces, 0) {
-        Routed::Delivered { .. } => 1,
-        Routed::Dropped(DropReason::Refused(_)) => 0,
+    let (delivered, delivered_bytes) = match r.work(&pool, &ifaces, 0) {
+        Routed::Delivered { conn, .. } => {
+            // Take the packet off the connection the way an application would, and
+            // measure what it holds. The C reports `p->length` after csp_recvfrom.
+            let len = match r.conns.dequeue_rx(conn) {
+                Ok(Some(slot)) => pool
+                    .from_index(slot)
+                    .map(|p| p.with_payload(|d| d.len() as u32))
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            (1, len)
+        }
+        Routed::Dropped(DropReason::Refused(_)) => (0, 0),
         other => panic!("neither delivered nor refused: {other:?}"),
     };
 
     SecurityObserved {
         delivered,
+        delivered_bytes,
         // The C charges its interface, the port charges its router. Same event, and the
         // split between the two counters is the thing being compared.
         rx_error: r.counters.rx_error,
@@ -683,17 +711,37 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 format!("{} frame(s)", input.frames.len()),
             ))
         }
-        // Two error codes that the C makes identical; the port keeps them apart, which is
-        // the point of the divergence recorded beside it.
+        // The C reports a corrupt fragment and a wrong-shape delivery with the same code.
+        // The port's answer to the same pair is what this compares — and it is different,
+        // which is the whole point of the divergence recorded beside it.
         "sfp" if rec.case == "a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape" => {
-            // The port cannot produce this record: a wrong shape is not an error here at
-            // all, it is a `Delivery::Datagram`. Compared as the C's own claim about
-            // itself, which is what makes the divergence worth having.
+            let corrupt = replay_sfp(&SfpInput {
+                frag_flag: true,
+                body: "68656c6c6f".into(),
+                offset: 99,
+                totalsize: 5,
+            });
+            let wrong_shape = replay_sfp(&SfpInput {
+                frag_flag: false,
+                body: "68656c6c6f".into(),
+                offset: 0,
+                totalsize: 0,
+            });
+            let corrupt_ret = corrupt["ret"].as_i64().unwrap();
+            // A wrong shape is not an error here at all: the datagram comes back whole, so
+            // this reports success where the C reports -103.
+            let wrong_shape_ret = if wrong_shape["recovered"].as_i64().unwrap() > 0 {
+                0
+            } else {
+                wrong_shape["ret"].as_i64().unwrap()
+            };
             Some((
                 serde_json::json!({
-                    "corrupt_ret": -103, "wrong_shape_ret": -103, "indistinguishable": true
+                    "corrupt_ret": corrupt_ret,
+                    "wrong_shape_ret": wrong_shape_ret,
+                    "indistinguishable": corrupt_ret == wrong_shape_ret,
                 }),
-                "the C's two codes".to_string(),
+                "corrupt vs wrong-shape".to_string(),
             ))
         }
         "sfp" => {
@@ -876,6 +924,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
 #[derive(serde::Serialize)]
 struct SecurityJson {
     delivered: u32,
+    delivered_bytes: u32,
     rx_error: u32,
     autherr: u32,
 }
@@ -883,6 +932,7 @@ impl From<SecurityObserved> for SecurityJson {
     fn from(o: SecurityObserved) -> Self {
         SecurityJson {
             delivered: o.delivered,
+            delivered_bytes: o.delivered_bytes,
             rx_error: o.rx_error,
             autherr: o.autherr,
         }
