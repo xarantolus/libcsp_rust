@@ -666,6 +666,105 @@ fn replay_sfp_in(pool: &Pool<8, 264>, input: &SfpInput) -> serde_json::Value {
     }
 }
 
+// --- conn -----------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnInput {
+    /// Absent on the record that only exercises reuse, where the table size is irrelevant.
+    /// The pressure replay asserts it rather than silently treating a missing value as 0.
+    #[serde(default)]
+    conn_max: u32,
+    #[serde(default)]
+    buffer_count: u32,
+    #[serde(default)]
+    offered: u32,
+    #[serde(default)]
+    rounds: u32,
+    #[serde(default)]
+    packets_from_one_peer: u32,
+    #[serde(default)]
+    packets_after_accept: u32,
+}
+
+/// Offer `offered` packets from distinct peer ports and see how many connections the
+/// application can take, and whether every buffer comes back.
+///
+/// Sized to the oracle's node: `CSP_CONN_MAX` 8 connections over a 15-buffer pool. Getting
+/// that wrong in either direction would compare two differently-provisioned nodes and call
+/// the difference a divergence.
+fn replay_conn_pressure(input: &ConnInput) -> (u32, i64) {
+    assert_eq!(
+        input.conn_max, 8,
+        "the replay's Router is sized for the oracle's CSP_CONN_MAX; a corpus from a \
+         differently-sized build would compare two different nodes"
+    );
+    // Same reasoning for the pool: the point at which the oracle stopped offering peers was
+    // its buffer count, not its connection count, so a replay with a bigger pool would
+    // offer more and call the difference a divergence.
+    assert_eq!(
+        input.buffer_count, 15,
+        "pool sized to the oracle's CSP_BUFFER_COUNT"
+    );
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+
+    let pool = P::new();
+    let mut r = R::new(LOCAL_ADDR, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    let ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
+        l
+    };
+
+    let before = pool.available();
+    let rounds = input.rounds.max(1);
+    let per_round = if input.rounds > 0 {
+        input.conn_max
+    } else {
+        input.offered
+    };
+    let mut accepted_total = 0;
+
+    for _ in 0..rounds {
+        for i in 0..per_round {
+            if pool.available() < 2 {
+                break;
+            }
+            let Some(mut p) = pool.acquire(0) else { break };
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 11,
+                dst: LOCAL_ADDR,
+                dport: TEST_PORT,
+                sport: 40 + i as u8,
+            });
+            p.set_payload(b"hi").unwrap();
+            r.receive(p, 0);
+            let _ = r.work(&pool, &ifaces, 0);
+        }
+        // Drain the way an application does: accept, read everything, close.
+        while let Some(h) = r.accept() {
+            while let Ok(Some(slot)) = r.conns.dequeue_rx(h) {
+                drop(pool.from_index(slot));
+            }
+            // close() hands back whatever was still queued so the caller can return it to
+            // the pool -- dropping the indices instead is exactly how a buffer leaks.
+            let mut drained = [0u16; 32];
+            if let Ok(n) = r.conns.close(h, &mut drained) {
+                for &slot in &drained[..n] {
+                    drop(pool.from_index(slot));
+                }
+            }
+            accepted_total += 1;
+        }
+    }
+
+    (accepted_total, before as i64 - pool.available() as i64)
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -808,6 +907,122 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 serde_json::to_value(CmpJson::from(got)).unwrap(),
                 format!("request {} bytes", input.request.len() / 2),
             ))
+        }
+        // How many times the application is offered a connection it already holds.
+        "conn" if rec.case == "a_connection_is_offered_to_the_application_only_once" => {
+            let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
+            type P = Pool<16, 264>;
+            type R = Router<8, 16, 48, 32>;
+            let pool = P::new();
+            let mut r = R::new(LOCAL_ADDR, Version::V2);
+            r.bind(TEST_PORT).unwrap();
+            let ifaces = {
+                let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+                l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
+                l
+            };
+            let deliver = |r: &mut R| {
+                let mut p = pool.acquire(0).unwrap();
+                p.set_id(Id {
+                    pri: 2,
+                    flags: 0,
+                    src: 11,
+                    dst: LOCAL_ADDR,
+                    dport: TEST_PORT,
+                    sport: 40,
+                });
+                p.set_payload(b"hi").unwrap();
+                r.receive(p, 0);
+                let _ = r.work(&pool, &ifaces, 0);
+            };
+
+            deliver(&mut r);
+            let h = r
+                .accept()
+                .expect("the first packet announces the connection");
+            if let Ok(Some(slot)) = r.conns.dequeue_rx(h) {
+                drop(pool.from_index(slot));
+            }
+
+            // More packets while the application already holds the connection.
+            let mut extra_offers = 0;
+            for _ in 0..input.packets_after_accept {
+                deliver(&mut r);
+                if r.accept().is_some() {
+                    extra_offers += 1;
+                }
+            }
+            Some((
+                serde_json::json!({ "extra_offers": extra_offers }),
+                format!("{} packets after accept", input.packets_after_accept),
+            ))
+        }
+        "conn" if rec.case == "a_second_packet_reuses_the_same_connection" => {
+            let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
+            type P = Pool<16, 264>;
+            type R = Router<8, 16, 48, 32>;
+            let pool = P::new();
+            let mut r = R::new(LOCAL_ADDR, Version::V2);
+            r.bind(TEST_PORT).unwrap();
+            let ifaces = {
+                let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+                l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
+                l
+            };
+            for _ in 0..input.packets_from_one_peer {
+                let mut p = pool.acquire(0).unwrap();
+                p.set_id(Id {
+                    pri: 2,
+                    flags: 0,
+                    src: 11,
+                    dst: LOCAL_ADDR,
+                    dport: TEST_PORT,
+                    sport: 40,
+                });
+                p.set_payload(b"hi").unwrap();
+                r.receive(p, 0);
+                let _ = r.work(&pool, &ifaces, 0);
+            }
+            let mut connections = 0;
+            let mut packets_on_it = 0;
+            while let Some(h) = r.accept() {
+                connections += 1;
+                while let Ok(Some(slot)) = r.conns.dequeue_rx(h) {
+                    drop(pool.from_index(slot));
+                    packets_on_it += 1;
+                }
+                let mut drained = [0u16; 32];
+                if let Ok(n) = r.conns.close(h, &mut drained) {
+                    for &slot in &drained[..n] {
+                        drop(pool.from_index(slot));
+                    }
+                }
+            }
+            Some((
+                serde_json::json!({
+                    "connections": connections, "packets_on_it": packets_on_it
+                }),
+                "one peer, two packets".to_string(),
+            ))
+        }
+        "conn" => {
+            let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let (accepted, lost) = replay_conn_pressure(&input);
+            if let Some(n) = accepted.checked_div(input.rounds) {
+                Some((
+                    serde_json::json!({
+                        "accepted_total": accepted,
+                        "accepted_per_round": vec![n; input.rounds as usize],
+                        "buffers_lost": lost,
+                    }),
+                    format!("{} rounds", input.rounds),
+                ))
+            } else {
+                Some((
+                    serde_json::json!({ "accepted": accepted, "buffers_lost": lost }),
+                    format!("{} offered", input.offered),
+                ))
+            }
         }
         "security" => {
             let input: SecurityInput = serde_json::from_value(rec.input.clone()).unwrap();
