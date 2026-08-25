@@ -704,6 +704,59 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 format!("delay count {}", input.ack_delay_count),
             ))
         }
+        // Receiver-side flow control. `csp_rdp_check_ack` stops acknowledging once the
+        // connection's queue leaves less than a window of room, so an unread connection
+        // stops inviting data. `poll_ack` has no equivalent.
+        //
+        // **At the oracle's sizes this record cannot tell the two apart**, and says so:
+        // the gate needs a queue deeper than 12, and the node runs out of its 15 buffers
+        // at 12 delivered. Both sides acknowledge all 12. The flight configuration — 64
+        // buffers, a queue of 32 — does reach it. Kept because it pins the numbers and
+        // because it will start discriminating the moment the oracle is built with them.
+        "rdp" if rec.case == "acks_stop_when_the_application_is_not_reading" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct FlowInput {
+                delivered: u32,
+                rxqueue_len: u32,
+                buffer_count: u32,
+                window_size: u32,
+            }
+            let input: FlowInput = serde_json::from_value(rec.input.clone()).unwrap();
+            assert!(
+                input.delivered <= input.rxqueue_len.saturating_sub(input.window_size),
+                "the oracle reached a queue depth where the gate fires ({} delivered, \
+                 gate at >{}), so this replay is no longer a no-op and needs the port to \
+                 grow the same flow control",
+                input.delivered,
+                input.rxqueue_len - input.window_size
+            );
+            let _ = input.buffer_count;
+
+            let mut c = csp_core::rdp::Connection::new(
+                1000,
+                csp_core::rdp::SynOptions {
+                    delayed_acks: false,
+                    ..csp_core::rdp::SynOptions::default()
+                },
+            );
+            c.state = csp_core::rdp::State::Open;
+            c.rcv_cur = 1000;
+            c.rcv_lsa = 1000;
+            let mut acks = 0;
+            let mut last = 0;
+            for i in 1..=input.delivered {
+                c.rcv_cur = 1000u16.wrapping_add(i as u16);
+                if c.poll_ack(0).is_some() {
+                    acks += 1;
+                    last = i;
+                }
+            }
+            Some((
+                serde_json::json!({ "acks": acks, "last_acked_packet": last }),
+                format!("{} delivered, unread", input.delivered),
+            ))
+        }
         "rdp" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             let acks = replay_rdp_acks(&input);
