@@ -43,6 +43,7 @@ pub mod iface;
 pub mod pool;
 pub mod qfifo;
 pub mod router;
+pub mod service;
 
 use csp_core::Version;
 
@@ -51,7 +52,8 @@ pub use delivery::{Delivery, Handler, PortTable};
 pub use conn::Table as ConnTable;
 pub use iface::{Interface, Transmit};
 pub use qfifo::Qfifo;
-pub use router::{DropReason, Routed, Router};
+pub use router::{Bridged, DropReason, Routed, Router};
+pub use service::{NodeStatus, Request};
 pub use pool::{Packet, Pool};
 
 /// Node configuration.

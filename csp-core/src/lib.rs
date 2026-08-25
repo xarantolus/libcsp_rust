@@ -50,6 +50,9 @@ pub mod cmp;
 #[cfg(feature = "rdp")]
 pub mod rdp;
 
+#[cfg(feature = "if-eth")]
+pub mod eth;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
@@ -156,6 +159,11 @@ pub enum Error {
         got: usize,
         /// The largest the format permits.
         max: usize,
+    },
+    /// An Ethernet frame did not carry the CSP ethertype.
+    UnexpectedEtherType {
+        /// The ethertype seen.
+        got: u16,
     },
     /// A route entry could not be parsed.
     InvalidRoute {

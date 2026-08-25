@@ -27,6 +27,20 @@ use csp_core::{Id, Version};
 #[cfg(feature = "rtable")]
 use csp_core::rtable;
 
+/// What one step of the bridge did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bridged {
+    /// Nothing waiting. Ordinary.
+    Idle,
+    /// The packet should be sent out the opposing interface.
+    Forward {
+        /// Interface to send on.
+        iface: u8,
+    },
+    /// The packet went no further.
+    Dropped(DropReason),
+}
+
 /// What one step of the router did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routed {
@@ -385,6 +399,67 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         closed
     }
 
+    /// One step of a transparent bridge between two interfaces.
+    ///
+    /// Everything arriving on `a` goes out `b` and vice versa, with no routing decision.
+    /// Deduplication still applies, because a bridge is exactly where a packet loops.
+    ///
+    /// Returns [`Bridged::Idle`] on an empty queue. The C prints a message and returns
+    /// void when the interfaces are unset, so a caller cannot tell a misconfigured bridge
+    /// from an idle one; here the pair is a parameter and cannot be unset.
+    pub fn bridge_work<'p, const B: usize, const SZ: usize>(
+        &mut self,
+        pool: &'p Pool<B, SZ>,
+        a: u8,
+        b: u8,
+        now_ms: u32,
+    ) -> Bridged {
+        let Some((mut packet, iface)) = self.qfifo.pop(pool) else {
+            return Bridged::Idle;
+        };
+
+        if self.dedup_enabled {
+            if packet.prepend_header(self.version).is_err() {
+                self.counters.malformed += 1;
+                return Bridged::Dropped(DropReason::Malformed);
+            }
+            let dup = packet.with_frame(|f| self.dedup.is_duplicate(f, now_ms));
+            if dup {
+                self.counters.duplicates += 1;
+                return Bridged::Dropped(DropReason::Duplicate);
+            }
+        }
+
+        if self.promisc_enabled && self.promisc_len < self.promisc.len() {
+            if let Some(copy) = packet.deep_copy() {
+                for slot in self.promisc.iter_mut() {
+                    if slot.is_none() {
+                        *slot = Some(copy.into_index());
+                        self.promisc_len += 1;
+                        break;
+                    }
+                }
+            } else {
+                self.promisc_missed += 1;
+            }
+        }
+
+        // A frame from neither side of the bridge has no opposing interface. The C picks
+        // bif_a in that case, because its `if (input.iface == bif_a) else` has no third
+        // branch -- so a packet from an unrelated interface is injected into side A.
+        let out = if iface == a {
+            b
+        } else if iface == b {
+            a
+        } else {
+            self.counters.no_route += 1;
+            return Bridged::Dropped(DropReason::NoRoute);
+        };
+
+        self.counters.forwarded += 1;
+        Bridged::Forward { iface: out }
+    }
+
     /// Release everything the router is holding.
     pub fn shutdown<const B: usize, const SZ: usize>(&mut self, pool: &Pool<B, SZ>) {
         self.qfifo.drain(pool);
@@ -631,6 +706,53 @@ mod tests {
         }
         assert!(!r.receive(pkt(&pool, ME, 20, b"x"), 0), "queue is full");
         assert_eq!(r.qfifo.dropped(), 1);
+    }
+
+    #[test]
+    fn the_bridge_sends_each_side_to_the_other() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.receive(pkt(&pool, 25, 20, b"a to b"), 1);
+        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
+        r.receive(pkt(&pool, 25, 20, b"b to a"), 2);
+        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 1 });
+    }
+
+    #[test]
+    fn the_bridge_is_idle_on_an_empty_queue() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Idle);
+    }
+
+    #[test]
+    fn a_frame_from_neither_side_is_refused_not_injected_into_side_a() {
+        // The C's `if (input.iface == bif_a) destif = bif_b; else destif = bif_a;` has no
+        // third branch, so a packet arriving on an unrelated interface is forwarded into
+        // side A as though it had come from B.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.receive(pkt(&pool, 25, 20, b"from elsewhere"), 7);
+        assert_eq!(
+            r.bridge_work(&pool, 1, 2, 0),
+            Bridged::Dropped(DropReason::NoRoute)
+        );
+        assert_eq!(pool.available(), 16, "and must not leak it");
+    }
+
+    #[test]
+    fn the_bridge_deduplicates() {
+        // A bridge is exactly where a packet loops back on itself.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.dedup_enabled = true;
+        r.receive(pkt(&pool, 25, 20, b"looping"), 1);
+        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
+        r.receive(pkt(&pool, 25, 20, b"looping"), 1);
+        assert_eq!(
+            r.bridge_work(&pool, 1, 2, 5),
+            Bridged::Dropped(DropReason::Duplicate)
+        );
     }
 
     #[test]

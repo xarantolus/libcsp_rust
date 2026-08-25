@@ -20,6 +20,16 @@
 use crate::pool::Packet;
 use csp_core::Result;
 
+// I2C, UDP and LOOP need no module of their own. Each is a *datagram* interface: one CSP
+// frame per link-layer frame, no segmentation, so the entire protocol logic is
+// `Interface::send` (prepend the header, hand over the frame) on transmit and
+// `Packet::set_frame` (decode the header, keep the payload) on receive. The C gives each
+// one a file because each also owns its syscalls; here those live in the driver, which is
+// the caller's.
+//
+// CAN and Ethernet are different in kind -- they segment, so they get csp_core::cfp and
+// csp_core::eth. KISS is different again because it escapes, so it gets csp_core::kiss.
+
 /// Statistics every interface keeps.
 ///
 /// Plain counters. The C's equivalents are `uint8_t` globals written from ISR and task
@@ -256,6 +266,46 @@ mod tests {
             let mut p = packet(&pool);
             iface.send(version, 8, &mut p).unwrap();
             assert_eq!(iface.driver.lens[0], hdr + 7, "{version:?}");
+        }
+    }
+
+    /// A loopback driver: hands the frame straight back.
+    ///
+    /// This is the whole of `csp_if_lo`, and the same shape as I2C and UDP.
+    struct Loopback {
+        last: [u8; 64],
+        len: usize,
+    }
+
+    impl<'p> Transmit<'p, 4, 264> for Loopback {
+        fn transmit(&mut self, _via: u16, packet: &Packet<'p, 4, 264>) -> Result<()> {
+            packet.with_frame(|f| {
+                self.last[..f.len()].copy_from_slice(f);
+                self.len = f.len();
+            });
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_datagram_interface_round_trips_without_any_extra_protocol() {
+        // I2C, UDP and LOOP are all this: frame out, decode back in.
+        let pool = P::new();
+        for version in [Version::V1, Version::V2] {
+            let mut iface = Interface::new("LOOP", 1, 5, Loopback { last: [0; 64], len: 0 });
+            let id = Id { pri: 1, flags: 0x10, src: 11, dst: 11, dport: 20, sport: 10 };
+
+            let mut out = pool.acquire(0).unwrap();
+            out.set_id(id);
+            out.set_payload(b"round trip").unwrap();
+            iface.send(version, 11, &mut out).unwrap();
+
+            let n = iface.driver.len;
+            let mut back = pool.acquire(0).unwrap();
+            back.set_frame(version, &iface.driver.last[..n]).unwrap();
+
+            assert_eq!(back.id(), id, "{version:?}: header must survive");
+            back.with_payload(|d| assert_eq!(d, b"round trip", "{version:?}: payload"));
         }
     }
 
