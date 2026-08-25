@@ -177,6 +177,58 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
+### Ethernet reassembly was missing three of the C's nine guards
+
+Found on 2026-08-25 by `ctest/suite_eth.c`, which drives `csp_eth_rx` directly and asserts,
+for every refusal, both the counter charged **and** that no pool buffer was consumed. That
+second half is the one worth having: a bounds check that refuses a frame but keeps the
+packet it allocated turns a stream of malformed frames into pool exhaustion, which presents
+as a hang rather than a rejection.
+
+Four of fifteen records diverged. Three were missing guards in `csp-core::eth::Reassembler`:
+
+1. **A zero-length segment was accepted.** It cannot advance reassembly, so a peer sending
+   nothing but those holds a transfer open forever without ever failing — a stall, which is
+   harder to diagnose than an error.
+2. **Only the per-segment extent was bounded, never the running total.** `csp_eth_rx`
+   checks `rx_count + seg_size` against the declared length; the port checked
+   `offset + len`. Segments that each fit on their own can still add up to more than the
+   packet claimed, and the second silently overwrote the first.
+3. **A declared length larger than the buffer was accepted on the first segment** and only
+   failed later, if a segment happened to reach that far. The C refuses it up front. Fixed
+   sans-io: the caller's `out` buffer *is* the bound, so a transfer that can never complete
+   is rejected before it occupies the reassembler.
+
+The fourth was a floor on the declared length — `csp_eth_rx` refuses anything shorter than
+`csp_id_get_header_size()`, since it would be reassembled and then routed on whatever
+followed. That size depends on the wire version, which this module has no other reason to
+know, so `Reassembler::with_min_len` takes it and `new()` stays for a caller that does not
+care.
+
+**One divergence turned out to be the harness.** The replay used a 512-byte buffer where the
+C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
+provisioned. The replay now sizes its buffer to the oracle's.
+
+### SCOPE 11's undefined behaviour is now observed, not just read
+
+The entry below has said `csp_if_eth_unpack_header` shifts a promoted `uint16_t` into the
+sign bit of an `int`. `just ctest-ubsan` now shows it:
+
+```
+csp_if_eth.c:46:33: runtime error: left shift of 32768 by 16 places
+                    cannot be represented in type 'int'
+```
+
+It needs a packet id whose **low** byte is ≥ 0x80 — the field is read without a byte swap,
+so the wire's low byte lands in the top half. That is half of all packet ids, on the
+Ethernet reassembly path. `ctest-ubsan` is separate from `ctest-asan` because ASan aborts on
+the same file's out-of-bounds reads before a test can record anything, while UBSan reports
+and continues.
+
+Also confirmed while writing the suite: `csp_eth_pack_header` does **not** set the
+ethertype — `csp_eth_tx` writes that separately — and `csp_eth_unpack_header`, declared in
+the public header, is **defined nowhere in libcsp**. Linking against it is a build failure.
+
 ### PEEK/POKE: a write that did not happen, reported as success
 
 Found on 2026-08-25 by the second `suite_cmp.c` slice, which overrides libcsp's `__weak`
