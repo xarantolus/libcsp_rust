@@ -108,30 +108,33 @@ global and becomes a `loopback_to_self()` call.
 ## Implementation status
 
 **Measured, not asserted.** `nm -D` on the built C library plus a header scan gives **186
-public functions**; **91 have no Rust counterpart**. An earlier version of this section
-claimed full coverage — that was checked by comparing *module names* against the goal's
-list, which is not the same thing and was wrong.
+public functions**. An earlier version of this section claimed full coverage by comparing
+*module names* against the goal's list, which is not the same thing and was wrong: the
+count was 91 without a counterpart, ~35 of them genuinely missing — including the whole
+application-facing socket API.
 
-Of the 91:
+Those 35 were built, and then every module was audited against its original function by
+function (see `AUDIT.md`), which found more: the default-interface routing fan-out, the
+three CMP memory hooks, `csp_socket_close`, `csp_ping_noreply`, and four interface
+counters that had no way to be incremented.
+
+The current position:
 
 | | Count | |
 |---|---|---|
-| Out of scope by design | ~50 | ZMQ (8), USART drivers (5), the 16-function arch shim replaced by the caller's platform, plus `yaml`, `if-tun` |
-| Absent by decision, recorded below | ~6 | the `print` feature |
-| **Genuinely missing** | **~35** | see the table after the next one |
+| Covered | 140 | including everything in the goal's scope list |
+| Out of scope by design | ~40 | ZMQ (8), USART drivers (5), the 16-function arch shim replaced by the caller's `Platform`, plus `yaml` and `if-tun` |
+| Replaced by a different mechanism | 6 | `csp_cmp_set_memcpy`/`memread64`/`memwrite64` (no-ops in the C) → the `Hooks` trait; `csp_panic` → Rust's `#[panic_handler]`; `csp_listen`'s backlog → a const generic |
+| Absent by explicit decision | ~5 | the `print` feature (`csp_debug.c`, `csp_hex_dump.c`), `csp_bind_callback`, `csp_conn_print_table` |
 
-So the port being 0.64x the size of the C is **not** mostly Rust being more compact. A
-whole layer is absent.
+### Absent by decision
 
-### Genuinely missing
-
-| Area | What | Why it matters |
-|---|---|---|
-| **Socket / client API** | `connect`, `close`, `bind`, `listen`, `accept`, `read`, `send`, `sendto`, `sendto_reply`, `recvfrom`, `transaction` ×3, `send_prio`, `socket_close`, `bind_callback` | **The application-facing API.** The router delivers into connection queues and nothing can take packets out or put any in |
-| **Interface registry** | `csp_iflist_*` — add/remove, lookup by name/addr/subnet, `is_within_subnet`, `check_dfl`, aliases | Needed by CMP `IF_STATS` and by route resolution |
-| **Client service calls** | `csp_ping`, `ping_noreply`, `ps`, `reboot`, `shutdown`, `get_memfree`, `get_buf_free`, `get_uptime` | `service.rs` has only the *server* side |
-| **Hooks** | input/output taps, reboot/shutdown/memfree/ps, clock, panic, crypto | `lib.rs` describes a `Hooks` trait in prose; it does not exist |
-| Connection accessors | `conn_dst`, `conn_src`, `conn_flags`, `conn_is_active` | partially present |
+| What | Why |
+|---|---|
+| `print` — `csp_print_func`, `csp_hex_dump`, `csp_conn_print_table` | A variadic formatter and ten non-atomic global counters. A `no_std` crate has no business owning either; the caller has `defmt`, `log`, or nothing, and `Stats` is already a struct it can print however it likes |
+| `csp_bind_callback` | Binds a bare `fn` to a port, bypassing the connection layer. Every consumer surveyed used `bind(CSP_ANY)` + `accept` + a dispatch table instead, and a callback that cannot own a connection cannot answer a stream |
+| `yaml` | libyaml is not installed in this environment, so there is no C oracle to check a Rust parser against. Feature-gated and stubbed rather than written blind |
+| `if-tun` | Needs the two `csp_crypto_*` hooks, which exist as `Hooks::encrypt`/`decrypt`; the interface itself is a Linux TUN device and belongs with the platform drivers that are out of scope |
 
 ### Implemented
 
@@ -147,7 +150,12 @@ What follows *is* done and tested:
 | Promisc | `csp/router.rs` tap | done |
 | Dedup | `csp/dedup.rs` | done |
 | Bridge | `csp/router.rs::bridge_work` | done |
-| Routing | `csp-core/rtable.rs` + `csp/router.rs` | done |
+| Routing | `csp-core/rtable.rs` + `csp/node.rs::resolve` (fan-out, split horizon, default fallback) | done |
+| Socket / client API | `csp/node.rs` — connect, bind, unbind, accept, read, send ×4, recvfrom, transaction, close | done |
+| Interface registry | `csp/iflist.rs` — add/remove, lookup by name/addr/subnet/broadcast, `check_default`, aliases | done |
+| Client service calls | `csp/client.rs` — ping, ping_noreply, ps, reboot, shutdown, memfree, buf_free, uptime, CMP requests | done |
+| Hooks | `csp/hooks.rs` — 14 of the C's 15, incl. the CMP memory hooks, all defaulting safely | done |
+| Interface counters | `csp/iface.rs` — all ten, with `note_refusal` routing a security refusal to the right one | done |
 | CAN / CFP | `csp-core/cfp.rs` (CFP1 + CFP2) | done |
 | KISS | `csp-core/kiss.rs` | done |
 | Ethernet / EFP | `csp-core/eth.rs` | done |
