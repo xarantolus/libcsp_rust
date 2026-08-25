@@ -852,7 +852,10 @@ fn a_packet_for_a_bound_port_reaches_the_application_identically() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR), "C node came up");
+    assert!(
+        c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR),
+        "C node came up"
+    );
     assert_eq!(c_node_bind(10), 0, "bind failed");
 
     let mut rng = Rng(0x0DE_0001);
@@ -908,7 +911,7 @@ fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
     assert_eq!(c_node_bind(10), 0, "bind failed");
 
     // Port 11 is never bound on either side.
@@ -938,7 +941,7 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
     assert_eq!(c_node_bind(10), 0);
 
     // Addressed to node 18: not us, not either interface's own address, but inside the
@@ -984,7 +987,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
     assert_eq!(c_node_bind(10), 0);
 
     let before = c_node_buf_free();

@@ -333,9 +333,6 @@ uint32_t shim_kiss_frame_errors(void) { return shim_kiss_iface.frame; }
 
 #define SHIM_TX_MAX   16
 #define SHIM_FRAME_MAX 300
-/* Address of the egress interface. Must not collide with any dst a test forwards to,
- * or csp_iflist_get_by_addr makes the packet "to me" instead of forwarding it. */
-#define SHIM_EGRESS_ADDR 20
 
 static csp_iface_t  shim_node_iface;   /* ingress: where injected frames arrive */
 static csp_iface_t  shim_node_iface_b;  /* egress: a different subnet, so a forwarded
@@ -367,7 +364,7 @@ static int shim_node_tx_fn(csp_iface_t *iface, uint16_t via, csp_packet_t *packe
  * that is the default route. Idempotent: the first call wins, later calls only check
  * the parameters still match.
  */
-int shim_node_init(int version, uint16_t address) {
+int shim_node_init(int version, uint16_t address, uint16_t netmask, uint16_t egress) {
 	if (shim_node_ready) {
 		return (csp_conf.version == (uint8_t)version && shim_node_iface.addr == address) ? 0 : -1;
 	}
@@ -376,19 +373,20 @@ int shim_node_init(int version, uint16_t address) {
 	csp_conf.version = (uint8_t)version;
 	shim_ensure_init();
 
-	/* netmask 2 on a 5-host-bit v1 address puts A on 8..15 and B on 16..23, so the two
-	 * are genuinely different subnets and is_same_subnet does not merge them. */
+	/* The two interfaces must land in different subnets or split horizon vetoes
+	 * forwarding. What netmask achieves that depends on the wire version: v1 has 5 host
+	 * bits and v2 has 14, so the caller supplies it rather than the shim assuming v1. */
 	memset(&shim_node_iface, 0, sizeof(shim_node_iface));
 	shim_node_iface.name    = "INGRESS";
 	shim_node_iface.addr    = address;
-	shim_node_iface.netmask = 2;
+	shim_node_iface.netmask = netmask;
 	shim_node_iface.nexthop = shim_node_tx_fn;
 	csp_iflist_add(&shim_node_iface);
 
 	memset(&shim_node_iface_b, 0, sizeof(shim_node_iface_b));
 	shim_node_iface_b.name    = "EGRESS";
-	shim_node_iface_b.addr    = SHIM_EGRESS_ADDR;
-	shim_node_iface_b.netmask = 2;
+	shim_node_iface_b.addr    = egress;
+	shim_node_iface_b.netmask = netmask;
 	shim_node_iface_b.nexthop = shim_node_tx_fn;
 	shim_node_iface_b.is_default = 1;
 	csp_iflist_add(&shim_node_iface_b);

@@ -372,6 +372,16 @@ done without.
    "C delivered nothing" against "Rust delivered correctly" and looked like a port bug.
    Checking the C's own return code is what separated the two.
 
+**v2 at node level.** Every node-level test in `diff.rs` pinned `Version::V1`; the
+`versions()` loops there are all codec-level, so v2 *headers* were verified and v2
+*routing and delivery* had never been exercised at all. `difftest/tests/node_v2.rs` now
+runs the same four behaviours on v2 — in its own test binary, because `csp_conf.version`
+is init-only and one process gets one C node at one version. The topology had to be
+recomputed rather than copied: v1's netmask of 2 means 12 network bits under v2's 14 host
+bits, which collapses both interfaces into subnet 0 and would have produced a test that
+passed by asserting nothing happened. All four pass, with source addresses deliberately
+biased above 31 so the cases could not have been carried by a v1 header.
+
 **Still open, and now visible:** `Router::forward` uses the single-destination
 `routes.find`, not the `find_all` fan-out and default-interface fallback that
 `Node::resolve` implements. So the router path still cannot forward to redundant routes
