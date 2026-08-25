@@ -169,7 +169,10 @@ scope for the goal:
 
 These are places the port deliberately does **not** reproduce C behaviour. Each one is a
 defect in the original, and each is covered by a conformance test asserting the *new*
-behaviour:
+behaviour.
+
+**This list is a record, not a bug report.** Nothing here is filed upstream; it exists so
+whoever maintains the fork can see what was found and decide for themselves.
 
 1. **`csp_port` re-init leak** — `csp_port.c:30` relies on `.bss` and has no
    `csp_port_init()`, so a second `csp_init()` leaks bindings. The C unittests only
