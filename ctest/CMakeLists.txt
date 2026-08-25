@@ -49,6 +49,7 @@ target_sources(ctest PRIVATE
   suite_rdp.c
   suite_promisc.c
   suite_dedup.c
+  suite_security.c
 )
 
 target_sources(ctest PRIVATE

@@ -177,6 +177,39 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
+### The security policy verified the trailers in the wrong order
+
+Found on 2026-08-25, on the **first run** of the corpus replay (`csp/tests/corpus.rs`)
+against `ctest/suite_security.c`. Three records diverged; all three were port bugs.
+
+**1. CRC32 and HMAC were checked in the wrong order.** `csp_send_direct` appends the MAC
+and *then* the checksum over it (`csp_io.c:250-271`), so the wire layout is
+`[payload][MAC][CRC32]` and the checksum covers the MAC. A receiver must unwrap
+outermost-first. `security::check` verified the MAC first, over a body that still carried
+the CRC32 — authenticating `payload || MAC || CRC32` instead of `payload`.
+
+So a packet using **both** protections — the configuration a flight node would actually
+choose — failed authentication on this port and was accepted by every real libcsp node.
+Not a counter-attribution nit: a working peer could not talk to us.
+
+It survived because `both_protections_together_verify_and_strip_in_order` *assembled the
+packet from the same misreading*: checksum inner, MAC outer. It was named as if it proved
+the layering. This is the self-referential-test failure the C oracle exists to break, caught
+the first time the oracle ran.
+
+**2. The `*_PROHIB` options were enforced on receive.** They are outgoing options.
+`csp_connect` reads `CSP_O_NOCRC32` to clear the *request* on what this node sends
+(`csp_conn.c:279`); `CSP_SO_HMACPROHIB` and `CSP_SO_RDPPROHIB` are read nowhere in libcsp
+at all, and `csp_route_security_check` looks at none of them. The port refused such packets
+with `Refusal::Prohibited`, so a peer sending a correctly authenticated packet to a node
+whose socket carried `HMACPROHIB` was dropped here and accepted everywhere else. Refusing
+traffic that carries *more* protection than was asked for is the wrong direction to err in.
+Removed, along with the now-unproducible `Refusal::Prohibited` variant.
+
+**3. The counter split followed from (1).** A packet failing the checksum was charged to
+`autherr` rather than `rx_error`, so an operator would read "someone is spoofing us" where
+the C says "the link is corrupting frames".
+
 ### Deduplication was a bool where the C has four modes
 
 Found on 2026-08-25 by writing `ctest/suite_dedup.c` — the first thing built on the C

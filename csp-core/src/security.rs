@@ -54,8 +54,6 @@ pub enum Refusal {
     AuthenticationRequired,
     /// The endpoint requires reliable delivery and the packet was not RDP.
     ReliabilityRequired,
-    /// The packet used a protection the endpoint prohibits.
-    Prohibited,
     /// The packet used a feature this build does not support.
     Unsupported,
 }
@@ -129,18 +127,37 @@ pub fn check<'a>(
         return Err(Refusal::Unsupported);
     }
 
-    // --- prohibitions ---
-    if id.has_flag(flags::CRC32) && endpoint_opts & opts::CRC32_PROHIB != 0 {
-        return Err(Refusal::Prohibited);
-    }
-    if id.has_flag(flags::HMAC) && endpoint_opts & opts::HMAC_PROHIB != 0 {
-        return Err(Refusal::Prohibited);
-    }
-    if id.has_flag(flags::RDP) && endpoint_opts & opts::RDP_PROHIB != 0 {
-        return Err(Refusal::Prohibited);
+    // The `*_PROHIB` options are **not** checked here, and that is deliberate.
+    //
+    // They are outgoing options, not a receive policy: `csp_connect` reads `CSP_O_NOCRC32`
+    // to clear the corresponding *request* on packets this node sends (`csp_conn.c:279`),
+    // and `CSP_SO_HMACPROHIB` / `CSP_SO_RDPPROHIB` are read nowhere in libcsp at all.
+    // `csp_route_security_check` never looks at any of them.
+    //
+    // This used to refuse such packets with `Refusal::Prohibited`, and the corpus caught
+    // it: a peer sending a correctly authenticated packet to a node whose socket happened
+    // to carry `HMACPROHIB` was dropped here and accepted by every real libcsp node.
+    // Refusing traffic that carries *more* protection than was asked for is the wrong
+    // direction to err in — a command wrongly refused in orbit cannot be retried by
+    // anyone who can see why.
+
+    // --- CRC32 first ---
+    //
+    // The order is not a matter of taste. `csp_send_direct` appends the MAC and *then* the
+    // checksum (`csp_io.c:250-271`), so the wire layout is `[payload][MAC][CRC32]` and the
+    // checksum covers the MAC. A receiver has to unwrap outermost-first.
+    //
+    // This ran HMAC first, over a body that still had the CRC32 on the end — so it
+    // authenticated `payload || MAC || CRC32` instead of `payload`. A packet using both
+    // protections, which is the configuration a flight node would actually pick, failed
+    // authentication here and was accepted by the C.
+    if id.has_flag(flags::CRC32) {
+        body = crc32::verify(header, body, coverage).map_err(|_| Refusal::BadChecksum)?;
+    } else if endpoint_opts & opts::CRC32_REQ != 0 {
+        return Err(Refusal::ChecksumRequired);
     }
 
-    // --- HMAC first: it authenticates the bytes the checksum then covers ---
+    // --- then HMAC ---
     #[cfg(feature = "hmac")]
     if id.has_flag(flags::HMAC) {
         let Some(key) = key else {
@@ -158,13 +175,6 @@ pub fn check<'a>(
         return Err(Refusal::AuthenticationRequired);
     }
     let _ = key;
-
-    // --- CRC32 ---
-    if id.has_flag(flags::CRC32) {
-        body = crc32::verify(header, body, coverage).map_err(|_| Refusal::BadChecksum)?;
-    } else if endpoint_opts & opts::CRC32_REQ != 0 {
-        return Err(Refusal::ChecksumRequired);
-    }
 
     // --- reliability ---
     if !id.has_flag(flags::RDP) && endpoint_opts & opts::RDP_REQ != 0 {
@@ -397,27 +407,63 @@ mod tests {
         );
     }
 
+    /// The `*_PROHIB` options are outgoing options and do not refuse anything on receive.
+    ///
+    /// `csp_connect` reads `CSP_O_NOCRC32` to clear the *request* on what this node sends
+    /// (`csp_conn.c:279`); `HMACPROHIB` and `RDPPROHIB` are read nowhere in libcsp.
+    /// `csp_route_security_check` looks at none of them.
+    ///
+    /// This test previously asserted the opposite, and the corpus caught it: a peer sending
+    /// a correctly authenticated packet to a node whose socket carried `HMACPROHIB` was
+    /// refused here and accepted by every real libcsp node.
+    #[cfg(feature = "hmac")]
     #[test]
-    fn prohibitions_are_enforced_as_well_as_requirements() {
-        for (flag, opt) in [
-            (flags::CRC32, opts::CRC32_PROHIB),
-            (flags::HMAC, opts::HMAC_PROHIB),
-            (flags::RDP, opts::RDP_PROHIB),
-        ] {
-            assert_eq!(
-                check(
-                    opt,
-                    &id_with(flag),
-                    &[],
-                    b"payloadXXXXXXXX",
-                    Coverage::PayloadOnly,
-                    Some(KEY),
-                    sup()
-                ),
-                Err(Refusal::Prohibited),
-                "flag {flag:#x}"
-            );
-        }
+    fn a_prohibition_does_not_refuse_a_packet_that_carries_the_protection() {
+        let mut signed = [0u8; 64];
+        let n = hmac::append(KEY, &[], b"payload", Coverage::PayloadOnly, &mut signed).unwrap();
+        assert_eq!(
+            check(
+                opts::HMAC_PROHIB,
+                &id_with(flags::HMAC),
+                &[],
+                &signed[..n],
+                Coverage::PayloadOnly,
+                Some(KEY),
+                sup()
+            ),
+            Ok(&b"payload"[..]),
+            "HMACPROHIB is not a receive policy"
+        );
+
+        let mut summed = [0u8; 64];
+        let n = crc32::append(&[], b"payload", Coverage::PayloadOnly, &mut summed).unwrap();
+        assert_eq!(
+            check(
+                opts::CRC32_PROHIB,
+                &id_with(flags::CRC32),
+                &[],
+                &summed[..n],
+                Coverage::PayloadOnly,
+                Some(KEY),
+                sup()
+            ),
+            Ok(&b"payload"[..]),
+            "CRC32PROHIB applies to what csp_connect sends, not to what arrives"
+        );
+
+        assert_eq!(
+            check(
+                opts::RDP_PROHIB,
+                &id_with(flags::RDP),
+                &[],
+                b"payload",
+                Coverage::PayloadOnly,
+                Some(KEY),
+                sup()
+            ),
+            Ok(&b"payload"[..]),
+            "RDPPROHIB is read nowhere in libcsp"
+        );
     }
 
     #[test]
@@ -437,13 +483,20 @@ mod tests {
     #[cfg(feature = "hmac")]
     #[test]
     fn both_protections_together_verify_and_strip_in_order() {
-        // HMAC is applied first on receive, because it authenticates the bytes the
-        // checksum then covers.
+        // `csp_send_direct` appends the MAC and *then* the checksum over it
+        // (`csp_io.c:250-271`), so the wire is `[payload][MAC][CRC32]` and a receiver
+        // unwraps outermost-first: checksum, then MAC.
+        //
+        // This test previously built the packet the other way round — checksum inner, MAC
+        // outer — and asserted it verified, which is how the receive order came to be
+        // backwards and stayed that way through an audit. It was named as if it proved the
+        // layering while assembling the packet from the same misreading as the code.
+        // `ctest/suite_security.c` builds the same case with the real libcsp.
         let id = id_with(flags::CRC32 | flags::HMAC);
         let mut inner = [0u8; 64];
-        let n1 = crc32::append(&[], b"payload", Coverage::PayloadOnly, &mut inner).unwrap();
+        let n1 = hmac::append(KEY, &[], b"payload", Coverage::PayloadOnly, &mut inner).unwrap();
         let mut outer = [0u8; 64];
-        let n2 = hmac::append(KEY, &[], &inner[..n1], Coverage::PayloadOnly, &mut outer).unwrap();
+        let n2 = crc32::append(&[], &inner[..n1], Coverage::PayloadOnly, &mut outer).unwrap();
 
         assert_eq!(
             check(
