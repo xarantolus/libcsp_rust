@@ -749,6 +749,7 @@ mod tests {
 
     #[test]
     fn decoding_arbitrary_bytes_never_panics() {
+        let mut decoded = 0u32;
         let mut buf = [0u8; 64];
         let mut x: u32 = 0xE741_0001;
         for _ in 0..50_000 {
@@ -760,10 +761,14 @@ mod tests {
             }
             for n in [0usize, 10, 21, 22, 64] {
                 if let Ok(h) = Header::decode(&buf[..n]) {
+                    decoded += 1;
                     let _ = h.reassembly_key();
                     let _ = h.is_csp();
                 }
             }
         }
+        // Measured at 100 000: the guard is what stops a stricter decoder silently
+        // reducing this test to "the length check does not panic".
+        assert!(decoded > 10_000, "only {decoded} headers decoded");
     }
 }

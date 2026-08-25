@@ -410,6 +410,7 @@ mod tests {
 
     #[test]
     fn decoder_never_panics_on_arbitrary_input() {
+        let mut frames = 0u32;
         let mut d = Decoder::<32>::new();
         let mut x: u32 = 0x1234_5678;
         for _ in 0..200_000 {
@@ -417,7 +418,17 @@ mod tests {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
-            let _ = d.push(x as u8);
+            if d.push(x as u8).is_some() {
+                frames += 1;
+            }
         }
+        // Measured at 83. Low because a 32-byte decoder overflows on most random runs,
+        // but non-zero is the point: a decoder fuzzed with input that never completes a
+        // frame proves only that the reject path does not panic.
+        assert!(
+            frames > 20,
+            "only {frames} frames completed in 200000 bytes -- the generator is no \
+             longer reaching the frame-completion path"
+        );
     }
 }

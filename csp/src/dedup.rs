@@ -176,19 +176,59 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_traffic_never_panics() {
+    fn arbitrary_traffic_hits_both_the_duplicate_and_the_fresh_path() {
         let mut d = Dedup::new();
         let mut x: u32 = 0xD3D0_0001;
         let mut buf = [0u8; 32];
-        for _ in 0..50_000 {
+        let mut last = [0u8; 32];
+        let mut last_n = 0usize;
+        let (mut fired, mut passed) = (0u32, 0u32);
+
+        for i in 0..50_000u32 {
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;
-            let n = (x as usize) % buf.len();
-            for (i, b) in buf.iter_mut().enumerate() {
-                *b = (x >> (i % 24)) as u8;
+
+            // Time advances by 1 ms per iteration. The original passed the *random* `x`
+            // as the timestamp, which is the deeper reason the duplicate branch never
+            // fired: two sightings of the same bytes were never inside DEDUP_WINDOW_MS of
+            // each other, so structurally this test could not detect a duplicate however
+            // the frames were generated.
+            let now = i;
+
+            // Every fourth iteration replays the previous frame, one millisecond later.
+            //
+            // Measured: without both changes the duplicate branch fired **0 times in
+            // 50 000**, so the test exercised only the "not a duplicate" path -- which is
+            // not what dedup is for. The positive case is covered by
+            // `an_identical_frame_inside_the_window_is_a_duplicate`, so this was a weak
+            // test rather than a hole, but it claimed more than it delivered.
+            let (frame, t) = if i % 4 == 3 && last_n > 0 {
+                (&last[..last_n], now)
+            } else {
+                let n = (x as usize) % buf.len();
+                for (j, b) in buf.iter_mut().enumerate() {
+                    *b = (x >> (j % 24)) as u8;
+                }
+                last[..n].copy_from_slice(&buf[..n]);
+                last_n = n;
+                (&buf[..n], now)
+            };
+
+            if d.is_duplicate(frame, t) {
+                fired += 1;
+            } else {
+                passed += 1;
             }
-            let _ = d.is_duplicate(&buf[..n], x);
         }
+
+        assert!(
+            fired > 1_000,
+            "the duplicate branch fired only {fired} times"
+        );
+        assert!(
+            passed > 1_000,
+            "the non-duplicate branch ran only {passed} times"
+        );
     }
 }

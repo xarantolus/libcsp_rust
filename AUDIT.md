@@ -778,3 +778,33 @@ questionable when they were made held up:
   audit found being reused for unrelated conditions — `TableFull` for a duplicate name and
   `NoTransferInProgress` for an unknown index — which had survived because nothing tested
   the failure path.
+
+## Test-suite audit (2026-08-25)
+
+All 465 tests reviewed against ten criteria. Findings, measured rather than eyeballed.
+
+### Fixed
+
+| # | Criterion | Finding |
+|---|---|---|
+| 1 | Vacuous | **`dedup`'s fuzz test fired the duplicate branch 0 times in 50 000.** It passed a *random* `u32` as the timestamp, so two sightings of the same bytes were never within `DEDUP_WINDOW_MS` — structurally it could not detect a duplicate however the frames were generated. It therefore only ever exercised the "not a duplicate" path, in the module whose entire job is the other one. Now advances a monotonic clock, replays every fourth frame, and asserts **both** branches fire. Not a coverage hole — `an_identical_frame_inside_the_window_is_a_duplicate` covers the positive case — but the test claimed far more than it delivered. |
+| 1 | Vacuous | **No fuzz test asserted its own reach.** Measured: `service` answers **1139 of 50 000** random requests (2.3 %); `kiss` completes **83 frames in 200 000 bytes**; `cmp` decodes ~140 000 of 160 000; `eth` 100 000. None is vacuous today, but nothing stopped a stricter decoder taking any of them to zero silently — which is precisely how a KISS fuzz test here once ran against no input at all. All four now assert a floor, with the measured value in the comment. |
+| 8 | Shared state | **`LOCK.lock().unwrap()` turned one failure into a cascade.** A panicking test poisons the mutex and every later test reports `PoisonError` instead of its own result. This happened during the route-table work and sent the investigation at the wrong test first. Replaced with a `lock()` helper that recovers; the C state a panicking test leaves behind is re-established by the next `setup`. |
+| 10 | Name overclaims | `arbitrary_traffic_never_panics` → `arbitrary_traffic_hits_both_the_duplicate_and_the_fresh_path`; `decoding_arbitrary_bytes_never_panics` → `..._and_still_decodes_some`. Both now assert what the name says. |
+
+### Checked, and clean
+
+- **C6 impossible test data** — swept every `Version::V1` test for addresses above 31 and found none. The `dst=99` / `flags=0xff` class of error was fixed earlier and has not returned.
+- **C7 nondeterminism** — zero uses of `Instant::now`, `SystemTime`, `thread::sleep` or unseeded randomness. Every fuzz test is a seeded xorshift, so a failure reproduces from its seed.
+- **C5 no teeth** — the three `is_to_me` tests were verified by temporarily restoring the old code; all three fail without the fix. The forwarding tests were verified the same way last cycle.
+- **C3 internals** — the nine flagged were false positives (`.len()` on a `Vec`) except `rdp`'s state fuzzer, which sets `c.state` directly to reach all five states. That is reachability, not an assertion about internals, and there is no other way in.
+- **C9 weak assertions** — the two flagged (`frame_is_empty_until...`, `clear_empties_the_table`) assert exactly the property under test. False positives.
+- **C2 artefact vs behaviour** — every forwarding test now compares the interface as well as the frame, fixed last cycle after a byte-only comparison passed while the port used the wrong link.
+
+### Not fixed — the structural one
+
+**Criterion 4, at module level: `rdp` (49 tests), `cmp` (27), `eth` (22) and `security` (13) have no external oracle at all.** No golden vectors, no differential test against the C. 111 tests — a quarter of the suite — verified only against my own reading of the C.
+
+That is the same shape as the node layer before the C-node harness existed, and the node layer turned out to contain a total functional failure (`Router::forward` destroying every packet) plus two precedence bugs. `rdp` is the largest module in the port and implements a reliability protocol; `security` is the authentication gate. Neither has ever been run against libcsp.
+
+`rdp` and `security` are reachable from the existing node harness — the C node links `csp_rdp.c` already. `cmp` needs `csp_service_handler` wired to a bound port. `eth` needs no node at all, only a codec-level shim like the CFP one.
