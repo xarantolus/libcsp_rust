@@ -356,3 +356,52 @@ handing out an iterator over an internal pointer, and the table is a value rathe
 
 **Deviations:** `SCOPE.md` — full-table refusal, and the parser's lack of a 100-character
 cliff.
+
+---
+
+## `csp::pool` — the packet buffer pool
+
+Against `src/csp_buffer.c` (9 public + 2 private functions), plus libcsp's own
+`unittests/buffer.c` and the ownership test in `unittests/promisc.c`.
+
+| C | Rust | |
+|---|---|---|
+| `csp_buffer_init` | `Pool::new` | ✅ |
+| `csp_buffer_get` / `_isr` | `Pool::acquire(reserve)` | ✅ |
+| `csp_buffer_get_always` / `_isr` | — | ❌ **deliberately absent** (`SCOPE.md` 7) |
+| `csp_buffer_free` / `_isr` | `Drop` | ✅ cannot be forgotten or repeated |
+| `csp_buffer_refc_inc` | `Packet::add_ref` | ✅ |
+| `csp_buffer_clone` / `copy` | `Packet::deep_copy` | ✅ |
+| `csp_buffer_remaining` | `Pool::available` | ✅ |
+
+**libcsp's own two buffer tests are ported, not merely "covered in spirit":**
+
+- `test_alloc_clean_734` — every slot must come back clean. A reused buffer still holding
+  the previous packet leaks it into whatever is sent next.
+- `test_clone_frame_begin_fixed` — the clone's frame must be its own. In the C
+  `frame_begin` is a *pointer* into the packet's own array, so `csp_buffer_copy` has to
+  recompute it after the `memcpy`; get that wrong and the clone's frame points into the
+  source. Here it is an offset, so the copy is exact by construction — pinned anyway,
+  because "correct by construction" is a claim that should still have a test.
+
+**Faithful:** yes, with one deliberate absence. There is no `get_always` equivalent: the C's
+version calls `csp_panic` and then `while(1)`, and the default `csp_panic` just *returns*,
+so its real behaviour on exhaustion is a silent hang. `acquire` returns `None`.
+
+**Rusty:** this is the module where the port earns the most. Three C properties dissolve
+together — `frame_begin` becomes an offset, the handle carries a slot index so there is no
+`CONTAINER_OF` walk backwards, and the refcount is an `AtomicU8` rather than an
+`unsigned int` touched from ISR and task context. The consequence is operational: a handler
+cannot leak a buffer, which is the entire reason `test_csp_robustness.py` exists in the
+flight test suite.
+
+**Found during the audit:** no defects; three coverage gaps now tested — that `deep_copy`
+preserves the frame across both wire versions, the exhaustive form of issue #734, and that
+`add_ref` (shared slot) and `deep_copy` (new slot) are genuinely different, since confusing
+them is how a "clone" ends up aliasing its source.
+
+**Also worth recording:** my first draft of the #734 test used `flags: 0xff` with CSP v2 and
+was rejected by the port's own field validation — v2 flags are six bits. The test data was
+wrong and the code was right, which is the validation from `SCOPE.md` 7 doing its job.
+
+**Tests:** 18 in `pool`, up from 15.

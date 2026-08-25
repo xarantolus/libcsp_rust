@@ -517,6 +517,88 @@ mod tests {
     }
 
     #[test]
+    fn deep_copy_preserves_the_frame() {
+        // libcsp unittests/buffer.c::test_clone_frame_begin_fixed. In the C, frame_begin
+        // is a POINTER into the packet's own array, so csp_buffer_copy has to recompute it
+        // after the memcpy -- get that wrong and the clone's frame points into the source.
+        // Here it is an offset, so the copy is exact by construction; this pins it anyway.
+        let pool = P::new();
+        for version in [Version::V1, Version::V2] {
+            let mut src = pool.acquire(0).unwrap();
+            src.set_id(Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 });
+            src.set_payload(b"hello").unwrap();
+            src.prepend_header(version).unwrap();
+
+            let mut clone = src.deep_copy().unwrap();
+            let mut sf = [0u8; 32];
+            let sn = src.with_frame(|f| {
+                sf[..f.len()].copy_from_slice(f);
+                f.len()
+            });
+            clone.with_frame(|cf| {
+                assert_eq!(cf, &sf[..sn], "{version:?}: the clone's frame must match");
+            });
+
+            // Modifying the source must not touch the clone.
+            src.set_payload(b"world").unwrap();
+            clone.with_payload(|d| assert_eq!(d, b"hello", "{version:?}: clone is independent"));
+
+            // And the clone's frame is still its own.
+            clone.set_payload(b"third").unwrap();
+            src.with_payload(|d| assert_eq!(d, b"world"));
+        }
+    }
+
+    #[test]
+    fn every_slot_comes_back_clean_after_carrying_data() {
+        // libcsp issue #734, ported: fill every buffer with distinct data, free them all,
+        // then re-acquire and check nothing survived. A reused buffer that still holds the
+        // previous packet leaks it into whatever is sent next.
+        let pool = P::new();
+        for round in 0..3u8 {
+            {
+                let mut held: [Option<Packet<'_, 4, 264>>; 4] = core::array::from_fn(|_| None);
+                for (i, slot) in held.iter_mut().enumerate() {
+                    let mut p = pool.acquire(0).unwrap();
+                    p.set_payload(&[0xA0 + i as u8 + round; 32]).unwrap();
+                    // 0x3f, not 0xff: v2 flags are six bits, and encode refuses an
+                    // oversized value rather than shifting it into the next field.
+                    p.set_id(Id { pri: 3, flags: 0x3f, src: 9, dst: 9, dport: 9, sport: 9 });
+                    p.prepend_header(Version::V2).unwrap();
+                    *slot = Some(p);
+                }
+            } // every one released here
+
+            let checked: [Option<Packet<'_, 4, 264>>; 4] = core::array::from_fn(|_| {
+                let p = pool.acquire(0).unwrap();
+                assert_eq!(p.len(), 0, "round {round}: length must reset");
+                assert_eq!(p.id(), Id::default(), "round {round}: header must reset");
+                p.with_frame(|f| assert!(f.is_empty(), "round {round}: frame must reset"));
+                Some(p)
+            });
+            drop(checked);
+            assert_eq!(pool.available(), 4, "round {round}: all returned");
+        }
+    }
+
+    #[test]
+    fn a_reference_and_a_copy_are_different_things() {
+        // add_ref shares the slot; deep_copy takes a new one. Confusing the two is how a
+        // "clone" ends up aliasing its source.
+        let pool = P::new();
+        let mut a = pool.acquire(0).unwrap();
+        a.set_payload(b"original").unwrap();
+
+        let shared = a.add_ref();
+        let copied = a.deep_copy().unwrap();
+        assert_eq!(pool.available(), 2, "one shared slot, one new one");
+
+        a.set_payload(b"mutated!").unwrap();
+        shared.with_payload(|d| assert_eq!(d, b"mutated!", "a reference sees the change"));
+        copied.with_payload(|d| assert_eq!(d, b"original", "a copy does not"));
+    }
+
+    #[test]
     fn two_pools_are_completely_independent() {
         let a = P::new();
         let b = P::new();
