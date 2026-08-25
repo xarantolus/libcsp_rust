@@ -492,6 +492,64 @@ fn replay_eth(input: &EthInput) -> EthObserved {
     }
 }
 
+// --- rdp ------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RdpInput {
+    delayed_acks: u8,
+    #[serde(default)]
+    ack_delay_count: u32,
+    #[serde(default)]
+    packets: u32,
+    #[serde(default)]
+    packets_since_last_ack: u32,
+}
+
+/// Count the acknowledgements the port would put on the wire for the same exchange.
+///
+/// An open connection, then `packets` in-order data packets, asking after each one whether
+/// an acknowledgement is due. `poll_ack` is what decides, and taking one restarts the delay
+/// counters — so this counts frames a peer would see, not internal state.
+fn replay_rdp_acks(input: &RdpInput) -> u32 {
+    use csp_core::rdp;
+
+    let mut c = rdp::Connection::new(
+        1000,
+        rdp::SynOptions {
+            delayed_acks: input.delayed_acks != 0,
+            ack_delay_count: input.ack_delay_count,
+            ack_timeout: 100_000, // so only the count can trigger it, as in the C test
+            ..rdp::SynOptions::default()
+        },
+    );
+    c.state = rdp::State::Open;
+    c.rcv_cur = 1000;
+    c.rcv_lsa = 1000;
+    c.ack_timestamp = 0;
+
+    let mut acks = 0;
+    for i in 1..=input.packets {
+        c.rcv_cur = 1000u16.wrapping_add(i as u16);
+        if c.poll_ack(0).is_some() {
+            acks += 1;
+        }
+    }
+    // The "nothing to acknowledge" case sends no packets and just asks. The C records
+    // how many arrived since its last acknowledgement; asserting it here is what keeps the
+    // replay honest about which scenario it is reproducing.
+    if input.packets == 0 {
+        assert_eq!(
+            input.packets_since_last_ack, 0,
+            "this arm only models an idle connection"
+        );
+        if c.poll_ack(0).is_some() {
+            acks += 1;
+        }
+    }
+    acks
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -614,7 +672,43 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 format!("{input:?}"),
             ))
         }
-        "rdp" => None,
+        // The initial send sequence number is rand_r() over the C's clock; the port takes
+        // it as a parameter, so there is nothing to compare.
+        "rdp" if rec.case == "isn_is_a_function_of_the_clock" => None,
+        "rdp" if rec.case == "the_delay_count_fires_one_packet_after_it" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // The C records the running total after each of five packets.
+            let mut c = csp_core::rdp::Connection::new(
+                1000,
+                csp_core::rdp::SynOptions {
+                    delayed_acks: input.delayed_acks != 0,
+                    ack_delay_count: input.ack_delay_count,
+                    ack_timeout: 100_000,
+                    ..csp_core::rdp::SynOptions::default()
+                },
+            );
+            c.state = csp_core::rdp::State::Open;
+            c.rcv_cur = 1000;
+            c.rcv_lsa = 1000;
+            let mut running = Vec::new();
+            let mut acks = 0;
+            for i in 1..=5u16 {
+                c.rcv_cur = 1000 + i;
+                if c.poll_ack(0).is_some() {
+                    acks += 1;
+                }
+                running.push(acks);
+            }
+            Some((
+                serde_json::json!({ "acks_after_n_packets": running }),
+                format!("delay count {}", input.ack_delay_count),
+            ))
+        }
+        "rdp" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let acks = replay_rdp_acks(&input);
+            Some((serde_json::json!({ "acks": acks }), format!("{input:?}")))
+        }
         other => panic!("no replay for suite {other}: add one or the corpus is not being checked"),
     }
 }

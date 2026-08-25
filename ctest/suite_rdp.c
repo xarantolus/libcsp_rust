@@ -397,6 +397,144 @@ START_TEST(test_rdp_queue_flush_all_releases_receive_buffers)
 }
 END_TEST
 
+/* --- the acknowledgement policy ---
+ *
+ * `csp_rdp_should_ack` has three conditions and `csp_rdp_check_ack` gates all of them
+ * behind a fourth. All four are only observable as *whether an ACK reaches the wire*, which
+ * is what these count -- the internal sequence numbers are not the behaviour, they are how
+ * the behaviour is computed.
+ *
+ * Three things here were predicted from reading `csp_rdp.c` and are settled by measuring:
+ * whether the C acknowledges when there is nothing to acknowledge, whether the delay count
+ * fires at N or N+1 outstanding, and whether a full receive queue suppresses the ack.
+ */
+
+/* Open a connection with the given delayed-ack options and return it. */
+static const csp_conn_t * open_conn(uint32_t delayed_acks, uint32_t ack_delay_count) {
+	const uint32_t opts[6] = { 4, 20000, 1000, delayed_acks, 250, ack_delay_count };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+	return conn;
+}
+
+/* Deliver one in-order data packet. `seq` continues from the handshake's 1000.
+   The RDP header is a *trailer* in libcsp: put_header_and_route writes it at
+   `data[length]`, so the payload goes in first and the header lands after it. */
+static void deliver_data(uint16_t seq, uint16_t ack_nr) {
+	csp_packet_t * packet = new_rdp_packet();
+	packet->data[0] = 'x';
+	packet->length = 1;
+	put_header_and_route(packet, RDP_ACK, seq, ack_nr);
+}
+
+/* With delayed acks off, every packet is acknowledged as it arrives. */
+START_TEST(test_without_delayed_acks_every_packet_is_acknowledged)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 3; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+	}
+	const unsigned int acks = test_tx_count - before;
+
+	ck_assert_uint_eq(acks, 3);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "without_delayed_acks_every_packet_is_acknowledged", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 0);
+		ctest_trace_int("ack_delay_count", 2);
+		ctest_trace_int("packets", 3);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+	(void)conn;
+}
+END_TEST
+
+/* The delay count. `csp_rdp_should_ack` tests
+ *
+ *     csp_rdp_seq_after(rcv_cur, rcv_lsa + ack_delay_count)
+ *
+ * which is *strictly* after, so the ack fires once the outstanding count exceeds the
+ * delay -- at count + 1, not at count. Measured rather than argued, because an
+ * implementation using `>=` is off by exactly one packet and nothing else looks wrong. */
+START_TEST(test_the_delay_count_fires_one_packet_after_it)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(1, 2);
+
+	/* The clock does not move, so the ack timeout cannot be what triggers it. */
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int acks_at[5];
+	unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 5; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+		acks_at[i - 1] = test_tx_count - before;
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "the_delay_count_fires_one_packet_after_it", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 1);
+		ctest_trace_int("ack_delay_count", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_arr_begin("acks_after_n_packets");
+		for (int i = 0; i < 5; i++) {
+			ctest_trace_int(NULL, (int64_t)acks_at[i]);
+		}
+		ctest_trace_arr_end();
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	/* Nothing before the count is exceeded. */
+	ck_assert_uint_eq(acks_at[0], 0);
+	ck_assert_uint_eq(acks_at[1], 0);
+	/* And something after. */
+	ck_assert_uint_gt(acks_at[4], 0);
+	(void)conn;
+}
+END_TEST
+
+/* Nothing has arrived since the last acknowledgement, and delayed acks are off. The C's
+   first condition returns true unconditionally, so it acknowledges anyway -- an ack for a
+   sequence number the peer already knows about. */
+START_TEST(test_an_ack_is_sent_even_with_nothing_to_acknowledge)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+
+	unsigned int before = test_tx_count;
+	csp_rdp_check_ack((csp_conn_t *)conn);
+	const unsigned int acks = test_tx_count - before;
+
+	if (ctest_tracing()) {
+		/* The port refuses to send this one; SCOPE.md records why. */
+		ctest_trace_begin("rdp", "an_ack_is_sent_even_with_nothing_to_acknowledge", "diverges");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 0);
+		ctest_trace_int("packets_since_last_ack", 0);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+	ck_assert_uint_eq(acks, 1);
+}
+END_TEST
+
 Suite * rdp_suite(void)
 {
 	Suite * s;
@@ -424,6 +562,12 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_tx, test_rdp_retransmit_count_resets_on_ack);
 	suite_add_tcase(s, tc_tx);
 
+	TCase * tc_ack = tcase_create("ack");
+	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
+	tcase_add_test(tc_ack, test_an_ack_is_sent_even_with_nothing_to_acknowledge);
+	suite_add_tcase(s, tc_ack);
+
 	tc_queue = tcase_create("queue");
 	tcase_add_test(tc_queue, test_rdp_queue_flush_all_releases_buffers);
 	tcase_add_test(tc_queue, test_rdp_queue_flush_all_releases_receive_buffers);
@@ -433,6 +577,144 @@ Suite * rdp_suite(void)
 }
 
 #else /* !CSP_USE_RDP */
+
+/* --- the acknowledgement policy ---
+ *
+ * `csp_rdp_should_ack` has three conditions and `csp_rdp_check_ack` gates all of them
+ * behind a fourth. All four are only observable as *whether an ACK reaches the wire*, which
+ * is what these count -- the internal sequence numbers are not the behaviour, they are how
+ * the behaviour is computed.
+ *
+ * Three things here were predicted from reading `csp_rdp.c` and are settled by measuring:
+ * whether the C acknowledges when there is nothing to acknowledge, whether the delay count
+ * fires at N or N+1 outstanding, and whether a full receive queue suppresses the ack.
+ */
+
+/* Open a connection with the given delayed-ack options and return it. */
+static const csp_conn_t * open_conn(uint32_t delayed_acks, uint32_t ack_delay_count) {
+	const uint32_t opts[6] = { 4, 20000, 1000, delayed_acks, 250, ack_delay_count };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+	return conn;
+}
+
+/* Deliver one in-order data packet. `seq` continues from the handshake's 1000.
+   The RDP header is a *trailer* in libcsp: put_header_and_route writes it at
+   `data[length]`, so the payload goes in first and the header lands after it. */
+static void deliver_data(uint16_t seq, uint16_t ack_nr) {
+	csp_packet_t * packet = new_rdp_packet();
+	packet->data[0] = 'x';
+	packet->length = 1;
+	put_header_and_route(packet, RDP_ACK, seq, ack_nr);
+}
+
+/* With delayed acks off, every packet is acknowledged as it arrives. */
+START_TEST(test_without_delayed_acks_every_packet_is_acknowledged)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 3; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+	}
+	const unsigned int acks = test_tx_count - before;
+
+	ck_assert_uint_eq(acks, 3);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "without_delayed_acks_every_packet_is_acknowledged", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 0);
+		ctest_trace_int("ack_delay_count", 2);
+		ctest_trace_int("packets", 3);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+	(void)conn;
+}
+END_TEST
+
+/* The delay count. `csp_rdp_should_ack` tests
+ *
+ *     csp_rdp_seq_after(rcv_cur, rcv_lsa + ack_delay_count)
+ *
+ * which is *strictly* after, so the ack fires once the outstanding count exceeds the
+ * delay -- at count + 1, not at count. Measured rather than argued, because an
+ * implementation using `>=` is off by exactly one packet and nothing else looks wrong. */
+START_TEST(test_the_delay_count_fires_one_packet_after_it)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(1, 2);
+
+	/* The clock does not move, so the ack timeout cannot be what triggers it. */
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int acks_at[5];
+	unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 5; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+		acks_at[i - 1] = test_tx_count - before;
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "the_delay_count_fires_one_packet_after_it", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 1);
+		ctest_trace_int("ack_delay_count", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_arr_begin("acks_after_n_packets");
+		for (int i = 0; i < 5; i++) {
+			ctest_trace_int(NULL, (int64_t)acks_at[i]);
+		}
+		ctest_trace_arr_end();
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	/* Nothing before the count is exceeded. */
+	ck_assert_uint_eq(acks_at[0], 0);
+	ck_assert_uint_eq(acks_at[1], 0);
+	/* And something after. */
+	ck_assert_uint_gt(acks_at[4], 0);
+	(void)conn;
+}
+END_TEST
+
+/* Nothing has arrived since the last acknowledgement, and delayed acks are off. The C's
+   first condition returns true unconditionally, so it acknowledges anyway -- an ack for a
+   sequence number the peer already knows about. */
+START_TEST(test_an_ack_is_sent_even_with_nothing_to_acknowledge)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+
+	unsigned int before = test_tx_count;
+	csp_rdp_check_ack((csp_conn_t *)conn);
+	const unsigned int acks = test_tx_count - before;
+
+	if (ctest_tracing()) {
+		/* The port refuses to send this one; SCOPE.md records why. */
+		ctest_trace_begin("rdp", "an_ack_is_sent_even_with_nothing_to_acknowledge", "diverges");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 0);
+		ctest_trace_int("packets_since_last_ack", 0);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+	ck_assert_uint_eq(acks, 1);
+}
+END_TEST
 
 Suite * rdp_suite(void)
 {
