@@ -535,6 +535,65 @@ START_TEST(test_an_ack_is_sent_even_with_nothing_to_acknowledge)
 }
 END_TEST
 
+/* `csp_rdp_check_ack` opens with
+ *
+ *     if (abs(CSP_CONN_RXQUEUE_LEN - csp_queue_size(conn->rx_queue)) < window_size) return;
+ *
+ * — acknowledge only while there is room for a full window still to arrive. That is
+ * receiver-side flow control: an unread connection stops inviting data instead of accepting
+ * it and dropping it. Nothing in the port's `poll_ack` corresponds to it.
+ *
+ * Measured as the packet number at which acknowledgements stop, with the application never
+ * reading. Nothing here inspects the queue; it counts frames.
+ */
+START_TEST(test_acks_stop_when_the_application_is_not_reading)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* Deliver until the pool runs dry, never reading any of it. The bound is the buffer
+	   pool, not the queue: CSP_BUFFER_COUNT is 15 and CSP_CONN_RXQUEUE_LEN is 16, so an
+	   unread connection exhausts the node's buffers before its own queue is full. */
+	unsigned int acks = 0;
+	unsigned int last_acked_packet = 0;
+	unsigned int delivered = 0;
+	for (uint16_t i = 1; i <= CSP_CONN_RXQUEUE_LEN; i++) {
+		if (csp_buffer_remaining() < 4) {
+			break;
+		}
+		const unsigned int before = test_tx_count;
+		deliver_data((uint16_t)(1000 + i), iss);
+		delivered++;
+		if (test_tx_count > before) {
+			acks++;
+			last_acked_packet = i;
+		}
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "acks_stop_when_the_application_is_not_reading", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delivered", (int64_t)delivered);
+		ctest_trace_int("rxqueue_len", CSP_CONN_RXQUEUE_LEN);
+		ctest_trace_int("buffer_count", CSP_BUFFER_COUNT);
+		ctest_trace_int("window_size", (int64_t)conn->rdp.window_size);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_int("last_acked_packet", (int64_t)last_acked_packet);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	ck_assert_uint_gt(delivered, 0);
+	ck_assert_uint_gt(acks, 0);
+	/* Whether the gate ever fires is what the recorded numbers say; asserting a specific
+	   answer here would be asserting the reading this test exists to check. */
+	ck_assert_uint_le(acks, delivered);
+}
+END_TEST
+
 Suite * rdp_suite(void)
 {
 	Suite * s;
@@ -566,6 +625,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
 	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
 	tcase_add_test(tc_ack, test_an_ack_is_sent_even_with_nothing_to_acknowledge);
+	tcase_add_test(tc_ack, test_acks_stop_when_the_application_is_not_reading);
 	suite_add_tcase(s, tc_ack);
 
 	tc_queue = tcase_create("queue");
@@ -713,6 +773,65 @@ START_TEST(test_an_ack_is_sent_even_with_nothing_to_acknowledge)
 		ctest_trace_end();
 	}
 	ck_assert_uint_eq(acks, 1);
+}
+END_TEST
+
+/* `csp_rdp_check_ack` opens with
+ *
+ *     if (abs(CSP_CONN_RXQUEUE_LEN - csp_queue_size(conn->rx_queue)) < window_size) return;
+ *
+ * — acknowledge only while there is room for a full window still to arrive. That is
+ * receiver-side flow control: an unread connection stops inviting data instead of accepting
+ * it and dropping it. Nothing in the port's `poll_ack` corresponds to it.
+ *
+ * Measured as the packet number at which acknowledgements stop, with the application never
+ * reading. Nothing here inspects the queue; it counts frames.
+ */
+START_TEST(test_acks_stop_when_the_application_is_not_reading)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* Deliver until the pool runs dry, never reading any of it. The bound is the buffer
+	   pool, not the queue: CSP_BUFFER_COUNT is 15 and CSP_CONN_RXQUEUE_LEN is 16, so an
+	   unread connection exhausts the node's buffers before its own queue is full. */
+	unsigned int acks = 0;
+	unsigned int last_acked_packet = 0;
+	unsigned int delivered = 0;
+	for (uint16_t i = 1; i <= CSP_CONN_RXQUEUE_LEN; i++) {
+		if (csp_buffer_remaining() < 4) {
+			break;
+		}
+		const unsigned int before = test_tx_count;
+		deliver_data((uint16_t)(1000 + i), iss);
+		delivered++;
+		if (test_tx_count > before) {
+			acks++;
+			last_acked_packet = i;
+		}
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "acks_stop_when_the_application_is_not_reading", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delivered", (int64_t)delivered);
+		ctest_trace_int("rxqueue_len", CSP_CONN_RXQUEUE_LEN);
+		ctest_trace_int("buffer_count", CSP_BUFFER_COUNT);
+		ctest_trace_int("window_size", (int64_t)conn->rdp.window_size);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_int("last_acked_packet", (int64_t)last_acked_packet);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	ck_assert_uint_gt(delivered, 0);
+	ck_assert_uint_gt(acks, 0);
+	/* Whether the gate ever fires is what the recorded numbers say; asserting a specific
+	   answer here would be asserting the reading this test exists to check. */
+	ck_assert_uint_le(acks, delivered);
 }
 END_TEST
 
