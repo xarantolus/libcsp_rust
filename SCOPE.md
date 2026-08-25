@@ -106,7 +106,35 @@ global and becomes a `loopback_to_self()` call.
 
 ## Implementation status
 
-Everything the goal enumerates is implemented and tested:
+**Measured, not asserted.** `nm -D` on the built C library plus a header scan gives **186
+public functions**; **91 have no Rust counterpart**. An earlier version of this section
+claimed full coverage — that was checked by comparing *module names* against the goal's
+list, which is not the same thing and was wrong.
+
+Of the 91:
+
+| | Count | |
+|---|---|---|
+| Out of scope by design | ~50 | ZMQ (8), USART drivers (5), the 16-function arch shim replaced by the caller's platform, plus `yaml`, `if-tun` |
+| Absent by decision, recorded below | ~6 | the `print` feature |
+| **Genuinely missing** | **~35** | see the table after the next one |
+
+So the port being 0.64x the size of the C is **not** mostly Rust being more compact. A
+whole layer is absent.
+
+### Genuinely missing
+
+| Area | What | Why it matters |
+|---|---|---|
+| **Socket / client API** | `connect`, `close`, `bind`, `listen`, `accept`, `read`, `send`, `sendto`, `sendto_reply`, `recvfrom`, `transaction` ×3, `send_prio`, `socket_close`, `bind_callback` | **The application-facing API.** The router delivers into connection queues and nothing can take packets out or put any in |
+| **Interface registry** | `csp_iflist_*` — add/remove, lookup by name/addr/subnet, `is_within_subnet`, `check_dfl`, aliases | Needed by CMP `IF_STATS` and by route resolution |
+| **Client service calls** | `csp_ping`, `ping_noreply`, `ps`, `reboot`, `shutdown`, `get_memfree`, `get_buf_free`, `get_uptime` | `service.rs` has only the *server* side |
+| **Hooks** | input/output taps, reboot/shutdown/memfree/ps, clock, panic, crypto | `lib.rs` describes a `Hooks` trait in prose; it does not exist |
+| Connection accessors | `conn_dst`, `conn_src`, `conn_flags`, `conn_is_active` | partially present |
+
+### Implemented
+
+What follows *is* done and tested:
 
 | Area | Where | Status |
 |---|---|---|
