@@ -96,7 +96,7 @@ unsafe extern "C" {
     fn shim_kiss_last_id(out: *mut u8) -> c_int;
     fn shim_kiss_drops() -> u32;
     fn shim_kiss_frame_errors() -> u32;
-    fn shim_node_init(version: c_int, address: u16) -> c_int;
+    fn shim_node_init(version: c_int, address: u16, netmask: u16, egress: u16) -> c_int;
     fn shim_node_bind(port: u8) -> c_int;
     fn shim_node_inject(frame: *const u8, len: u32) -> c_int;
     fn shim_node_pump() -> c_int;
@@ -165,14 +165,18 @@ pub struct Delivered {
     pub payload: Vec<u8>,
 }
 
-/// Bring the C node up. Idempotent; the first call fixes version and address.
-pub fn c_node_init(version: csp_core::Version, address: u16) -> bool {
+/// Bring the C node up with two interfaces in different subnets.
+///
+/// Idempotent, and it has to be: `csp_conf.version` is init-only (SCOPE.md deviation 18),
+/// so one process gets one node at one wire version. Testing the other version means a
+/// second test binary, which is why `node_v2.rs` exists alongside `diff.rs`.
+pub fn c_node_init(version: csp_core::Version, address: u16, netmask: u16, egress: u16) -> bool {
     let v = match version {
         csp_core::Version::V1 => 1,
         csp_core::Version::V2 => 2,
     };
     // SAFETY: calls csp_init once behind an internal guard; callers hold `LOCK`.
-    unsafe { shim_node_init(v, address) == 0 }
+    unsafe { shim_node_init(v, address, netmask, egress) == 0 }
 }
 
 /// Bind a port on the C node.
