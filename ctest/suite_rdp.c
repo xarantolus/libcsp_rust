@@ -3,6 +3,7 @@
 #include <endian.h>
 
 #include "clock.h"
+#include "trace.h"
 
 #include "csp/csp.h"
 #include "csp/csp_id.h"
@@ -231,6 +232,18 @@ START_TEST(test_rdp_isn_is_a_function_of_the_clock)
 	const csp_conn_t * conn = find_rdp_conn();
 	ck_assert_ptr_nonnull(conn);
 	ck_assert_uint_eq(conn->rdp.snd_iss, RDP_ISS_AT_1234567_MS);
+
+	/* Recorded after the assertions, so a record only exists for a case the harness got
+	   right. The verdict is c_only: the port takes the ISN as a parameter rather than
+	   deriving it from a clock, so there is nothing here for it to match. */
+	ctest_trace_begin("rdp", "isn_is_a_function_of_the_clock", "c_only");
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("clock_ms", 1234567);
+	ctest_trace_int("snd_iss", conn->rdp.snd_iss);
+	ctest_trace_int("snd_nxt", conn->rdp.snd_nxt);
+	ctest_trace_int("snd_una", conn->rdp.snd_una);
+	ctest_trace_obj_end();
+	ctest_trace_end();
 }
 END_TEST
 
