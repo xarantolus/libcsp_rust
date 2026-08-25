@@ -31,7 +31,7 @@ fn random_valid_id(rng: &mut Rng, v: Version) -> Id {
 
 #[test]
 fn version_parameters_agree() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     for v in versions() {
         c_set_version(v);
         assert_eq!(c_header_size(), v.header_size(), "{v:?} header size");
@@ -43,7 +43,7 @@ fn version_parameters_agree() {
 
 #[test]
 fn header_encoding_agrees_for_every_in_range_id() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let mut rng = Rng(0x1234_5678_9abc_def0);
     for v in versions() {
         c_set_version(v);
@@ -69,7 +69,7 @@ fn header_encoding_agrees_for_every_in_range_id() {
 fn header_decoding_agrees_for_arbitrary_bytes() {
     // Decoding must agree on *every* bit pattern, not just well-formed ones -- this is
     // what a hostile or corrupted frame looks like.
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let mut rng = Rng(0xdead_beef_cafe_0001);
     for v in versions() {
         c_set_version(v);
@@ -88,7 +88,7 @@ fn header_decoding_agrees_for_arbitrary_bytes() {
 fn decode_encode_is_a_fixed_point_in_both() {
     // Whatever the C decodes out of arbitrary bytes must re-encode to the same bytes in
     // both implementations. This catches a masking difference the round-trip alone hides.
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let mut rng = Rng(0x0bad_c0de_0000_0007);
     for v in versions() {
         c_set_version(v);
@@ -110,7 +110,7 @@ fn decode_encode_is_a_fixed_point_in_both() {
 
 #[test]
 fn broadcast_detection_agrees() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let mut rng = Rng(0xfeed_face_0000_002a);
     for v in versions() {
         c_set_version(v);
@@ -205,7 +205,7 @@ fn hmac_agrees_on_random_keys_and_messages() {
 fn rust_refuses_out_of_range_fields_where_the_c_corrupts_its_neighbour() {
     // SCOPE.md deviation 7. The C shifts an oversized value into the adjacent field and
     // produces a header that decodes as a *different, valid* packet.
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     c_set_version(Version::V1);
 
     let id = Id {
@@ -405,7 +405,7 @@ fn valid_entry(rng: &mut Rng, host_bits: u16, max_node: u16) -> String {
 /// the netmask default differs anywhere, a random table finds it.
 #[test]
 fn rtable_lookups_agree_for_tables_both_sides_accept() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     c_set_version(Version::V1);
     register_ifaces();
 
@@ -480,7 +480,7 @@ fn rtable_lookups_agree_for_tables_both_sides_accept() {
 /// number, which callers read as success. This port parses the later entries.
 #[test]
 fn a_one_character_entry_ends_the_cs_parse_and_it_reports_success() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     c_set_version(Version::V1);
     register_ifaces();
 
@@ -522,7 +522,7 @@ fn a_one_character_entry_ends_the_cs_parse_and_it_reports_success() {
 /// The port parses the whole string either way.
 #[test]
 fn the_c_truncates_a_long_table_at_a_hundred_characters() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     c_set_version(Version::V1);
     register_ifaces();
 
@@ -576,7 +576,7 @@ fn the_c_truncates_a_long_table_at_a_hundred_characters() {
 /// anything else. Both must still agree on the bytes.
 #[test]
 fn kiss_frames_we_encode_arrive_intact_at_a_c_node() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let mut rng = Rng(0x4155_0001);
 
     for version in versions() {
@@ -647,7 +647,7 @@ fn kiss_frames_we_encode_arrive_intact_at_a_c_node() {
 /// obeyed as if it were genuine.
 #[test]
 fn a_corrupted_kiss_frame_never_reaches_the_router_with_the_wrong_payload() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     c_set_version(Version::V1);
     let hdr = c_header_size();
     let mut rng = Rng(0x4155_0002);
@@ -859,7 +859,7 @@ fn framed(version: Version, id: Id, payload: &[u8]) -> Vec<u8> {
 /// only against a reading of it.
 #[test]
 fn a_packet_for_a_bound_port_reaches_the_application_identically() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(
@@ -918,7 +918,7 @@ fn a_packet_for_a_bound_port_reaches_the_application_identically() {
 /// A packet for a port nobody bound must not reach any application, on either side.
 #[test]
 fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -948,7 +948,7 @@ fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
 /// tests structurally could not check. The C emits the frame on its default interface.
 #[test]
 fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -999,7 +999,7 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
 /// the node in orbit long after the packet that caused it was forgotten.
 #[test]
 fn no_path_through_the_node_leaks_a_buffer() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -1058,7 +1058,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
 /// precedence sends it out EGRESS; routing-table precedence sends it out ROUTED.
 #[test]
 fn a_local_subnet_beats_the_routing_table() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -1111,7 +1111,7 @@ fn a_local_subnet_beats_the_routing_table() {
 /// is a command addressed to the radio-side address being bounced onto the bus.
 #[test]
 fn a_packet_for_any_of_our_own_interfaces_is_delivered_locally() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -1157,7 +1157,7 @@ fn a_packet_for_any_of_our_own_interfaces_is_delivered_locally() {
 /// INGRESS is 9/2 here, so its subnet is 8..15 and its broadcast is 15.
 #[test]
 fn both_broadcast_forms_are_delivered_locally() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
@@ -1201,7 +1201,7 @@ fn both_broadcast_forms_are_delivered_locally() {
 /// swallow traffic it should forward.
 #[test]
 fn another_interfaces_broadcast_is_not_ours_to_swallow() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     let version = Version::V1;
     c_set_version(version);
     assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));

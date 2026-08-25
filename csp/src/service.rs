@@ -288,6 +288,7 @@ mod tests {
 
     #[test]
     fn arbitrary_requests_never_panic() {
+        let mut answered = 0u32;
         let status = status();
         let mut out = [0u8; 64];
         let mut x: u32 = 0x5E12_0001;
@@ -302,8 +303,18 @@ mod tests {
                 *b = (x >> (i % 24)) as u8;
             }
             if let Ok(req) = Request::decode(port, &payload[..n]) {
+                answered += 1;
                 let _ = respond(req, &payload[..n], &status, &mut out);
             }
         }
+        // Measured at 1139 of 50 000: a random u8 port is a valid service port about 2 %
+        // of the time. Without this assertion a stricter `Request::decode` could take it
+        // to zero and the test would still pass, having exercised nothing -- which is
+        // exactly how a KISS fuzz test here once ran against no input at all.
+        assert!(
+            answered > 500,
+            "only {answered} of 50000 random requests were answered -- the generator is \
+             no longer reaching `respond`"
+        );
     }
 }

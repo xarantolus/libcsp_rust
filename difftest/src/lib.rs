@@ -447,6 +447,20 @@ pub fn c_set_version(v: csp_core::Version) {
 /// cannot run concurrently. This is exactly the property the port removes.
 pub static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Take [`LOCK`], recovering if a previous test poisoned it.
+///
+/// `LOCK.lock().unwrap()` turns one genuine failure into a cascade: the panicking test
+/// poisons the mutex and every test after it fails with `PoisonError` instead of its own
+/// result. That happened here — a route-table test failed and `version_parameters_agree`
+/// reported a poison error, which sent the investigation at the wrong thing first.
+///
+/// Recovering is the right trade for this harness. The C state a panicking test leaves
+/// behind is re-established by the next test's `setup`/`c_node_init`, whereas a cascade
+/// hides which test actually broke.
+pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Encode a header with the C, returning the header bytes.
 pub fn c_id_encode(id: &csp_core::Id) -> Vec<u8> {
     let mut buf = [0u8; 16];

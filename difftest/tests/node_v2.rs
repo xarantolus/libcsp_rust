@@ -131,7 +131,7 @@ fn setup() {
 /// have carried at all.
 #[test]
 fn a_packet_for_a_bound_port_reaches_the_application_identically() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     let mut rng = Rng(0x2_0001);
@@ -189,7 +189,7 @@ fn a_packet_for_a_bound_port_reaches_the_application_identically() {
 
 #[test]
 fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     let id = Id {
@@ -211,7 +211,7 @@ fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
 
 #[test]
 fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     let id = Id {
@@ -245,7 +245,7 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
 
 #[test]
 fn no_path_through_the_node_leaks_a_buffer() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     let before = c_node_buf_free();
@@ -287,7 +287,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
 /// that differs between the versions — 5 bits against 14.
 #[test]
 fn a_local_subnet_beats_the_routing_table() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     // FORWARD_DST is in EGRESS's subnet; point the routing table at ROUTED instead.
@@ -326,7 +326,7 @@ fn a_local_subnet_beats_the_routing_table() {
 /// so the v1 checks in `diff.rs` do not cover this.
 #[test]
 fn any_interface_address_and_both_broadcast_forms_are_ours() {
-    let _g = LOCK.lock().unwrap();
+    let _g = lock();
     setup();
 
     // 1. The other interface's own address.
