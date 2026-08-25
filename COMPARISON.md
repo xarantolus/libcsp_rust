@@ -17,7 +17,7 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | `static mut` | **90** | 90 | **0** |
 | `extern "C"` | 486 | 486 | 0 |
 | raw pointers | **2 709** | 2 709 | 0 |
-| Rust LOC | 16 903 (**1.98× the C**) | 16 903 | **6 319** |
+| Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **5 451 (0.64×)** |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
 | Tests passing | 0 | 0 | **254** |
 | Two nodes in one process | no | no | **yes** |
