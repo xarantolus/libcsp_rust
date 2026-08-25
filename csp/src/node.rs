@@ -26,7 +26,7 @@ use crate::conn::Handle;
 use crate::pool::{Packet, Pool};
 use crate::router::{Routed, Router};
 use crate::{Config, CspStorage};
-use csp_core::{Id, Result, Version};
+use csp_core::{Error, Id, Result, Version};
 
 #[cfg(feature = "rtable")]
 use csp_core::rtable;
@@ -335,6 +335,79 @@ impl<
         Ok(self.route(reply, id))
     }
 
+    /// Send overriding the connection's priority.
+    ///
+    /// `csp_send_prio` mutates `conn->idout.pri` permanently as a side effect, so every
+    /// later packet on that connection inherits the new priority. Here the override
+    /// applies to this packet only.
+    pub fn send_prio(
+        &mut self,
+        conn: Handle,
+        pri: u8,
+        mut packet: Packet<'a, BUFS, BUFSZ>,
+        now_ms: u32,
+    ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
+        let mut id = self.router.conns.id_out(conn)?;
+        id.pri = pri;
+        id.validate(self.version)?;
+        self.router.conns.touch(conn, now_ms)?;
+        packet.set_id(id);
+        Ok(self.route(packet, id))
+    }
+
+    /// Receive on a bound port without a connection.
+    ///
+    /// Drains the next connection that has data and hands back the packet with the header
+    /// it arrived with, closing the connection. This is `csp_recvfrom`: the
+    /// connection-less server pattern.
+    pub fn recvfrom(&mut self) -> Result<Option<Packet<'a, BUFS, BUFSZ>>> {
+        let Some(conn) = self.accept() else {
+            return Ok(None);
+        };
+        let packet = match self.router.conns.dequeue_rx(conn)? {
+            Some(idx) => self.pool().from_index(idx),
+            None => None,
+        };
+        self.close(conn)?;
+        Ok(packet)
+    }
+
+    /// Wait for a reply on a connection, driving the router meanwhile.
+    ///
+    /// Returns the reply **packet**, whatever length it is. `csp_transaction` demands the
+    /// reply be exactly the length of the buffer handed to it unless given `-1`, and all
+    /// three consumers in the flight repository pass `-1` with a comment explaining why —
+    /// C, Rust and Python arrived at the same workaround independently.
+    ///
+    /// `clock` is called for the current time each iteration rather than a `now` being
+    /// passed once, so this works against a real clock instead of a synthetic tick.
+    /// Returns [`Error::Truncated`] when `deadline_ms` passes with no reply.
+    ///
+    /// Transmission is the caller's: hand the request to an interface first, then wait
+    /// here. Keeping the two apart is what lets one function serve a node whose interfaces
+    /// are CAN, KISS, or a test double.
+    pub fn transaction(
+        &mut self,
+        conn: Handle,
+        deadline_ms: u32,
+        mut clock: impl FnMut() -> u32,
+    ) -> Result<Packet<'a, BUFS, BUFSZ>> {
+        loop {
+            if let Some(idx) = self.router.conns.dequeue_rx(conn)? {
+                if let Some(p) = self.pool().from_index(idx) {
+                    return Ok(p);
+                }
+            }
+            let now = clock();
+            if now >= deadline_ms {
+                return Err(Error::Truncated);
+            }
+            // An idle step is ordinary here, which is exactly why csp_route_work's
+            // idle-is-an-error behaviour had to go.
+            let _ = self.work(now);
+        }
+    }
+
     /// Resolve where a packet goes.
     fn route(
         &mut self,
@@ -397,7 +470,6 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use csp_core::Error;
 
     type S = CspStorage<4, 16, 264, 48, 8>;
     type N<'a> = Node<'a, 4, 16, 264, 48, 8, 4>;
@@ -608,6 +680,81 @@ mod tests {
             n.conn_sfp_mtu(rdp).unwrap() < n.conn_sfp_mtu(plain).unwrap(),
             "RDP overhead must reduce the usable MTU"
         );
+    }
+
+    #[test]
+    fn send_prio_does_not_change_the_connection_permanently() {
+        // csp_send_prio mutates conn->idout.pri as a side effect, so every later packet
+        // on that connection silently inherits the override.
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+
+        let out = n.send_prio(c, 0, n.packet().unwrap(), 0).unwrap();
+        assert_eq!(out.into_packet().id().pri, 0);
+
+        let out = n.send(c, n.packet().unwrap(), 0).unwrap();
+        assert_eq!(out.into_packet().id().pri, 2, "the connection keeps its own priority");
+    }
+
+    #[test]
+    fn recvfrom_returns_a_packet_and_releases_the_connection() {
+        let s = S::new();
+        let mut n = node(&s);
+        n.bind(20).unwrap();
+        let mut p = n.packet().unwrap();
+        p.set_id(Id { pri: 2, flags: 0, src: 8, dst: ME, dport: 20, sport: 10 });
+        p.set_payload(b"connectionless").unwrap();
+        n.router.receive(p, 0);
+        n.work(0);
+
+        let got = n.recvfrom().unwrap().expect("a packet should be waiting");
+        got.with_payload(|d| assert_eq!(d, b"connectionless"));
+        assert_eq!(n.router.conns.open_count(), 0, "the connection must be released");
+    }
+
+    #[test]
+    fn recvfrom_on_an_idle_node_is_not_an_error() {
+        let s = S::new();
+        let mut n = node(&s);
+        assert!(n.recvfrom().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_transaction_returns_the_reply_whatever_its_length() {
+        // csp_transaction demands an exact length unless given -1; all three consumers
+        // in the flight repo pass -1 with a comment explaining why.
+        let s = S::new();
+        let mut n = node(&s);
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+
+        // The peer's reply arrives on the connection's expected incoming header.
+        let idin = n.router.conns.id_in(c).unwrap();
+        let mut reply = n.packet().unwrap();
+        reply.set_id(idin);
+        reply.set_payload(b"a reply of some arbitrary length").unwrap();
+        let idx = reply.into_index();
+        n.router.conns.enqueue_rx(c, idx).unwrap();
+
+        let got = n.transaction(c, 100, || 0).unwrap();
+        got.with_payload(|d| assert_eq!(d, b"a reply of some arbitrary length"));
+    }
+
+    #[test]
+    fn a_transaction_that_gets_no_reply_times_out() {
+        let s = S::new();
+        let mut n = node(&s);
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+        // A clock that advances, so the deadline is actually reached rather than spun on.
+        let mut t = 0u32;
+        assert!(matches!(
+            n.transaction(c, 50, || {
+                t += 10;
+                t
+            }),
+            Err(Error::Truncated)
+        ));
     }
 
     #[test]
