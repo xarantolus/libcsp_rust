@@ -288,6 +288,207 @@ impl Iterator for V2Fragmenter<'_> {
     }
 }
 
+/// Fields that identify one CFP 2 transfer: priority, destination, sender and the
+/// 2-bit sender count. Everything else in the identifier varies between fragments.
+pub const V2_CONN_MASK: u32 = (V2_DST_MASK << V2_DST_OFFSET)
+    | (V2_SENDER_MASK << V2_SENDER_OFFSET)
+    | (V2_PRIO_MASK << V2_PRIO_OFFSET)
+    | (V2_SC_MASK << V2_SC_OFFSET);
+
+/// Reassembles CFP 2 frames back into a CSP packet.
+///
+/// CFP 2 carries no length field: the transfer ends when a frame arrives with the `end`
+/// bit set. The fragment counter is **3 bits**, so it wraps every 8 frames and losing
+/// exactly 8 consecutive fragments is undetectable — a property of the wire format, not of
+/// this implementation.
+#[derive(Debug, Clone, Copy)]
+pub struct V2Reassembler {
+    id: Option<Id>,
+    next_fc: u32,
+    len: usize,
+}
+
+impl Default for V2Reassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl V2Reassembler {
+    /// Start idle.
+    pub const fn new() -> Self {
+        V2Reassembler {
+            id: None,
+            next_fc: 1,
+            len: 0,
+        }
+    }
+
+    /// Bytes accepted so far.
+    pub const fn received(&self) -> usize {
+        self.len
+    }
+
+    /// Feed a frame.
+    ///
+    /// Returns `Some((id, len))` once the `end` bit arrives: the decoded CSP header and
+    /// how many payload bytes were written to `out`. Returning the length matters because
+    /// CFP 2 has no length field — without it the caller cannot tell how much of `out`
+    /// is the packet.
+    pub fn push(
+        &mut self,
+        can_id: u32,
+        data: &[u8],
+        out: &mut [u8],
+    ) -> Result<Option<(Id, usize)>> {
+        let begin = (can_id >> V2_BEGIN_OFFSET) & 1 != 0;
+        let end = (can_id >> V2_END_OFFSET) & 1 != 0;
+
+        let payload = if begin {
+            // The CSP header is split: its first two bytes live in the CAN identifier
+            // (priority and destination), the next four in the frame data.
+            if data.len() < V2_EXT_SIZE {
+                return Err(Error::Truncated);
+            }
+            let first_two = ((can_id >> V2_DST_OFFSET) as u16).to_be_bytes();
+            let mut header = [0u8; 6];
+            header[..2].copy_from_slice(&first_two);
+            header[2..6].copy_from_slice(&data[..V2_EXT_SIZE]);
+            self.id = Some(Id::decode(Version::V2, &header)?);
+            self.next_fc = 1;
+            self.len = 0;
+            &data[V2_EXT_SIZE..]
+        } else {
+            // A continuation with no transfer in progress means the opening frame was
+            // lost. Reassembling anyway would produce a packet with a garbage header.
+            if self.id.is_none() {
+                return Err(Error::NoTransferInProgress);
+            }
+            let fc = (can_id >> V2_FC_OFFSET) & V2_FC_MASK;
+            if fc != self.next_fc {
+                // A gap. The C drops the whole packet here too, because with a 3-bit
+                // counter there is no way to tell one lost fragment from nine.
+                let expected = self.next_fc as u16;
+                self.reset();
+                return Err(Error::UnexpectedOffset {
+                    expected: expected as u32,
+                    got: fc,
+                });
+            }
+            self.next_fc = (self.next_fc + 1) & V2_FC_MASK;
+            data
+        };
+
+        let end_off = self.len + payload.len();
+        if end_off > out.len() {
+            self.reset();
+            return Err(Error::BufferTooSmall { needed: end_off });
+        }
+        out[self.len..end_off].copy_from_slice(payload);
+        self.len = end_off;
+
+        if end {
+            let id = self.id.ok_or(Error::NoTransferInProgress)?;
+            let len = self.len;
+            self.reset();
+            return Ok(Some((id, len)));
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.id = None;
+        self.next_fc = 1;
+        self.len = 0;
+    }
+}
+
+/// Several reassemblies in flight at once, keyed by transfer.
+///
+/// On a shared bus, fragments from different senders interleave. A single reassembler
+/// drops every interleaved transfer, so the C keeps a pool (`csp_if_can_pbuf.c`) keyed by
+/// the connection fields of the identifier. This is that, generic over the reassembler so
+/// CFP 1, CFP 2 and Ethernet can share it.
+#[derive(Debug)]
+pub struct Pbufs<R, const N: usize> {
+    slots: [Option<(u32, u32, R)>; N],
+}
+
+impl<R: Default + Copy, const N: usize> Default for Pbufs<R, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R: Default + Copy, const N: usize> Pbufs<R, N> {
+    /// Compile-time invariant: a zero-capacity pool can reassemble nothing, which would
+    /// look like total packet loss rather than a sizing mistake.
+    const SANITY: () = assert!(N > 0, "the reassembly pool needs at least one slot");
+
+    /// An empty pool.
+    pub fn new() -> Self {
+        let () = Self::SANITY;
+        Pbufs {
+            slots: [None; N],
+        }
+    }
+
+    /// Reassemblies in flight.
+    pub fn len(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
+    /// True if nothing is in flight.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The reassembler for `key`, creating one if this is a new transfer.
+    ///
+    /// Returns `None` when the pool is full — every slot is a transfer in progress, and
+    /// evicting one to make room would corrupt it.
+    pub fn get_or_create(&mut self, key: u32, now_ms: u32) -> Option<&mut R> {
+        if let Some(i) = self
+            .slots
+            .iter()
+            .position(|s| matches!(s, Some((k, _, _)) if *k == key))
+        {
+            let slot = self.slots[i].as_mut()?;
+            slot.1 = now_ms;
+            return Some(&mut slot.2);
+        }
+        let i = self.slots.iter().position(|s| s.is_none())?;
+        self.slots[i] = Some((key, now_ms, R::default()));
+        self.slots[i].as_mut().map(|s| &mut s.2)
+    }
+
+    /// Forget a transfer — on completion, or when it went wrong.
+    pub fn release(&mut self, key: u32) {
+        for s in self.slots.iter_mut() {
+            if matches!(s, Some((k, _, _)) if *k == key) {
+                *s = None;
+            }
+        }
+    }
+
+    /// Drop transfers with no fragment for longer than `timeout_ms`, returning how many.
+    ///
+    /// Not optional: a sender that starts a transfer and stops holds a slot forever, and
+    /// there are only `N`.
+    pub fn expire(&mut self, now_ms: u32, timeout_ms: u32) -> usize {
+        let mut n = 0;
+        for s in self.slots.iter_mut() {
+            if let Some((_, last, _)) = s {
+                if now_ms.wrapping_sub(*last) > timeout_ms {
+                    *s = None;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+}
+
 /// Reassembles CFP 1 frames back into a CSP packet.
 ///
 /// Rejects a `MORE` frame that arrives without a preceding `BEGIN`, and refuses a
@@ -607,6 +808,166 @@ mod tests {
             }
             assert_eq!(seen, total, "total={total}");
         }
+    }
+
+    #[test]
+    fn v2_roundtrip_through_reassembly() {
+        let id = Id { pri: 2, flags: 0x10, src: 1000, dst: 2000, dport: 20, sport: 10 };
+        for total in [0usize, 1, 4, 5, 12, 13, 100, 250] {
+            let payload: heapless_vec::Vec8<u8> = (0..total).map(|i| (i.wrapping_mul(3) & 0xff) as u8).collect();
+            let mut r = V2Reassembler::new();
+            let mut out = [0u8; 300];
+            let mut done = None;
+            for f in V2Fragmenter::new(id, 5, 1, payload.as_slice()) {
+                done = r.push(f.id, f.data(), &mut out).unwrap();
+            }
+            if total == 0 {
+                // A zero-length packet is one frame carrying only the header extension.
+                let (got, len) = done.expect("even an empty packet completes");
+                assert_eq!(got, id);
+                assert_eq!(len, 0);
+                continue;
+            }
+            let (got, len) = done.unwrap_or_else(|| panic!("total={total} never completed"));
+            assert_eq!(got, id, "total={total}: header");
+            assert_eq!(len, total, "total={total}: length");
+            assert_eq!(&out[..total], payload.as_slice(), "total={total}: payload");
+        }
+    }
+
+    #[test]
+    fn v2_continuation_without_a_begin_is_refused() {
+        let mut r = V2Reassembler::new();
+        let mut out = [0u8; 64];
+        // fc=1, no begin bit
+        let id = (1u32 << V2_FC_OFFSET) | (0 << V2_BEGIN_OFFSET);
+        assert_eq!(
+            r.push(id, &[1, 2, 3, 4], &mut out),
+            Err(Error::NoTransferInProgress)
+        );
+    }
+
+    #[test]
+    fn v2_detects_a_lost_fragment_by_its_counter() {
+        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let payload = [0u8; 60];
+        let frames: heapless_vec::Vec8<Frame> =
+            V2Fragmenter::new(id, 5, 0, &payload).collect();
+        assert!(frames.len() >= 3, "need at least three frames to skip one");
+
+        let mut r = V2Reassembler::new();
+        let mut out = [0u8; 100];
+        r.push(frames.get(0).id, frames.get(0).data(), &mut out).unwrap();
+        // skip frame 1, feed frame 2
+        let f2 = frames.get(2);
+        assert!(
+            matches!(r.push(f2.id, f2.data(), &mut out), Err(Error::UnexpectedOffset { .. })),
+            "a gap in the 3-bit fragment counter must be caught"
+        );
+    }
+
+    #[test]
+    fn v2_short_begin_frame_is_refused() {
+        let mut r = V2Reassembler::new();
+        let mut out = [0u8; 64];
+        let id = 1u32 << V2_BEGIN_OFFSET;
+        assert_eq!(r.push(id, &[0, 0], &mut out), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn v2_reports_an_output_buffer_that_is_too_small() {
+        let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let payload = [0u8; 100];
+        let mut r = V2Reassembler::new();
+        let mut tiny = [0u8; 8];
+        let mut err = None;
+        for f in V2Fragmenter::new(id, 5, 0, &payload) {
+            if let Err(e) = r.push(f.id, f.data(), &mut tiny) {
+                err = Some(e);
+                break;
+            }
+        }
+        assert!(matches!(err, Some(Error::BufferTooSmall { .. })));
+    }
+
+    #[test]
+    fn interleaved_transfers_both_survive() {
+        // The whole reason the pool exists: on a shared bus, fragments from different
+        // senders arrive interleaved. A single reassembler drops both.
+        let a = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+        let b = Id { pri: 2, flags: 0, src: 2, dst: 9, dport: 21, sport: 11 };
+        let pa = [0xAAu8; 40];
+        let pb = [0xBBu8; 40];
+
+        let fa: heapless_vec::Vec8<Frame> = V2Fragmenter::new(a, 5, 0, &pa).collect();
+        let fb: heapless_vec::Vec8<Frame> = V2Fragmenter::new(b, 6, 1, &pb).collect();
+        assert!(fa.len() > 1 && fb.len() > 1);
+
+        let mut pool: Pbufs<V2Reassembler, 4> = Pbufs::new();
+        let mut oa = [0u8; 64];
+        let mut ob = [0u8; 64];
+        let (mut da, mut db) = (None, None);
+
+        for i in 0..core::cmp::max(fa.len(), fb.len()) {
+            if i < fa.len() {
+                let f = fa.get(i);
+                let r = pool.get_or_create(f.id & V2_CONN_MASK, 0).unwrap();
+                if let Some(d) = r.push(f.id, f.data(), &mut oa).unwrap() {
+                    da = Some(d);
+                    pool.release(f.id & V2_CONN_MASK);
+                }
+            }
+            if i < fb.len() {
+                let f = fb.get(i);
+                let r = pool.get_or_create(f.id & V2_CONN_MASK, 0).unwrap();
+                if let Some(d) = r.push(f.id, f.data(), &mut ob).unwrap() {
+                    db = Some(d);
+                    pool.release(f.id & V2_CONN_MASK);
+                }
+            }
+        }
+
+        assert_eq!(da.map(|(i, _)| i), Some(a), "transfer A must complete");
+        assert_eq!(db.map(|(i, _)| i), Some(b), "transfer B must complete");
+        assert_eq!(&oa[..40], &pa[..]);
+        assert_eq!(&ob[..40], &pb[..]);
+        assert!(pool.is_empty(), "both released");
+    }
+
+    #[test]
+    fn a_full_pool_refuses_rather_than_evicting_a_transfer_in_progress() {
+        let mut pool: Pbufs<V2Reassembler, 2> = Pbufs::new();
+        assert!(pool.get_or_create(1, 0).is_some());
+        assert!(pool.get_or_create(2, 0).is_some());
+        assert!(
+            pool.get_or_create(3, 0).is_none(),
+            "evicting would corrupt a transfer in progress"
+        );
+        // an existing key still resolves
+        assert!(pool.get_or_create(1, 0).is_some());
+    }
+
+    #[test]
+    fn abandoned_transfers_are_expired() {
+        // A sender that starts a transfer and stops would otherwise hold a slot forever.
+        let mut pool: Pbufs<V2Reassembler, 2> = Pbufs::new();
+        pool.get_or_create(1, 0).unwrap();
+        pool.get_or_create(2, 5_000).unwrap();
+        assert_eq!(pool.expire(6_000, 3_000), 1, "only the stale one");
+        assert_eq!(pool.len(), 1);
+        assert!(pool.get_or_create(3, 6_000).is_some(), "the slot is reusable");
+    }
+
+    #[test]
+    fn pool_expiry_survives_the_clock_wrap() {
+        let mut pool: Pbufs<V2Reassembler, 2> = Pbufs::new();
+        let t = u32::MAX - 100;
+        pool.get_or_create(1, t).unwrap();
+        assert_eq!(
+            pool.expire(t.wrapping_add(50), 3_000),
+            0,
+            "must not expire merely because the clock wrapped"
+        );
     }
 
     #[test]

@@ -35,11 +35,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod client;
 pub mod conn;
 pub mod dedup;
+pub mod node;
 #[cfg(feature = "sfp")]
 pub mod delivery;
+pub mod hooks;
 pub mod iface;
+pub mod iflist;
 pub mod pool;
 pub mod qfifo;
 pub mod router;
@@ -50,7 +54,10 @@ use csp_core::Version;
 #[cfg(feature = "sfp")]
 pub use delivery::{Delivery, Handler, PortTable};
 pub use conn::Table as ConnTable;
+pub use node::{Node, Outbound};
+pub use hooks::{Hooks, NoHooks, PowerAction, Timestamp};
 pub use iface::{Interface, Transmit};
+pub use iflist::IfList;
 pub use qfifo::Qfifo;
 pub use router::{Bridged, DropReason, Routed, Router};
 pub use service::{NodeStatus, Request};
@@ -108,6 +115,16 @@ impl<'a> Config<'a> {
         self.revision = s;
         self
     }
+
+    /// The wire version.
+    pub const fn version(&self) -> Version {
+        self.version
+    }
+
+    /// The node address.
+    pub const fn addr(&self) -> u16 {
+        self.address
+    }
 }
 
 /// Caller-owned storage for a node.
@@ -150,6 +167,11 @@ impl<
     /// Allocate the storage. Contains no allocator calls.
     pub fn new() -> Self {
         CspStorage { pool: Pool::new() }
+    }
+
+    /// The packet pool.
+    pub const fn pool_ref(&self) -> &Pool<BUFS, BUFSZ> {
+        &self.pool
     }
 }
 
