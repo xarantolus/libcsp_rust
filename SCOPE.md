@@ -148,7 +148,7 @@ What follows *is* done and tested:
 | CMP | `csp-core/cmp.rs` — client **and** decoder | done |
 | Crypto | `csp-core/{crc32,sha1,hmac}.rs` | done |
 | Promisc | `csp/router.rs` tap | done |
-| Dedup | `csp/dedup.rs` | done |
+| Dedup | `csp/dedup.rs` — all four `csp_dedup_types_e` modes, checked against the C | done |
 | Bridge | `csp/router.rs::bridge_work` | done |
 | Routing | `csp-core/rtable.rs` + `csp/node.rs::resolve` (fan-out, split horizon, default fallback) | done |
 | Socket / client API | `csp/node.rs` — connect, bind, unbind, accept, read, send ×4, recvfrom, transaction, close | done |
@@ -161,6 +161,43 @@ What follows *is* done and tested:
 | Ethernet / EFP | `csp-core/eth.rs` | done |
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
+
+### Deduplication was a bool where the C has four modes
+
+Found on 2026-08-25 by writing `ctest/suite_dedup.c` — the first thing built on the C
+oracle, and it fired immediately.
+
+`csp_dedup.c` does not mention a mode, because the mode lives in the caller:
+`csp_route.c:238` combines `csp_conf.dedup` with `is_to_me`. The port had
+`dedup_enabled: bool`, which can express only `CSP_DEDUP_OFF` and `CSP_DEDUP_ALL`, and it
+ran the check in `Router::work` *before* the destination was known — so the two middle
+modes were not merely unimplemented, they were unreachable.
+
+Measured on the real libcsp: two identical packets addressed to the node, and two
+identical packets through it, per mode.
+
+| mode | delivered of 2 | forwarded of 2 |
+|---|---|---|
+| `CSP_DEDUP_OFF` | 2 | 2 |
+| `CSP_DEDUP_FWD` | 2 | 1 |
+| `CSP_DEDUP_INCOMING` | 1 | 2 |
+| `CSP_DEDUP_ALL` | 1 | 1 |
+
+The middle two point in opposite directions, so collapsing them is not a simplification.
+`FWD` — suppress a frame that arrived over two paths of a mesh, leave traffic addressed to
+this node alone — is what deduplication is normally *for*. `INCOMING` is the one to be
+careful with: a ground station retransmitting an identical command 50 ms after the first,
+because no acknowledgement came back, loses the retransmission. Two identical commands
+inside 100 ms are indistinguishable from one command seen twice.
+
+Now `DedupMode`, evaluated where the C evaluates it: after `is_to_me`, before the
+promiscuous tap. `every_dedup_mode_matches_the_c` asserts the table above.
+
+**A second divergence in the same area:** `csp_bridge.c:45` deduplicates **unconditionally**,
+without consulting `csp_conf.dedup` at all — a bridge is forwarding by definition and one
+that does not deduplicate loops a frame between its interfaces forever. `bridge_work` gated
+it on the flag, so a bridge built from the port with deduplication off, the default, looped
+where the C does not. Now unconditional.
 
 ### RDP is implemented in the core and not reached by the node
 

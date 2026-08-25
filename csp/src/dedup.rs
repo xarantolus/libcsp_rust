@@ -22,6 +22,46 @@
 
 use csp_core::crc32;
 
+/// Which traffic to deduplicate — the C's `csp_dedup_types_e`.
+///
+/// Not a boolean, because the two middle modes are the interesting ones and they point in
+/// opposite directions. `csp_route.c:238` decides per packet, using `is_to_me`:
+///
+/// - [`Forwarded`](DedupMode::Forwarded) suppresses the same frame arriving over two paths
+///   of a mesh, which is what deduplication is for. It leaves traffic addressed to this
+///   node alone.
+/// - [`Incoming`](DedupMode::Incoming) does the opposite, and is the one to think twice
+///   about: a ground station that retransmits an identical command 50 ms after the first,
+///   because no acknowledgement came back, has the retransmission silently discarded. Two
+///   identical commands inside 100 ms are indistinguishable from one command seen twice.
+/// - [`All`](DedupMode::All) is both, and inherits that hazard.
+///
+/// The C's default is `CSP_DEDUP_OFF`, and so is this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DedupMode {
+    /// Never deduplicate. `CSP_DEDUP_OFF`.
+    #[default]
+    Off,
+    /// Only packets being routed onward to another node. `CSP_DEDUP_FWD`.
+    Forwarded,
+    /// Only packets addressed to this node. `CSP_DEDUP_INCOMING`.
+    Incoming,
+    /// Both. `CSP_DEDUP_ALL`.
+    All,
+}
+
+impl DedupMode {
+    /// Does this mode deduplicate a packet whose destination is, or is not, this node?
+    pub const fn applies(self, to_me: bool) -> bool {
+        match self {
+            DedupMode::Off => false,
+            DedupMode::Forwarded => !to_me,
+            DedupMode::Incoming => to_me,
+            DedupMode::All => true,
+        }
+    }
+}
+
 /// Checksums remembered.
 pub const DEDUP_COUNT: usize = 16;
 /// How recently a packet must have been seen to count as a duplicate, ms.
