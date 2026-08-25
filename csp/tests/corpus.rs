@@ -805,6 +805,44 @@ fn every_record_has_a_replay() {
     }
 }
 
+/// A deliberate divergence has to be written down where a reader will find it.
+///
+/// The `diverges` verdict is the port saying "the C does X and I do Y on purpose". That is
+/// only a decision if the reason exists somewhere; otherwise it is a bug with a label. So
+/// every such record must name itself in `SCOPE.md`, as `suite::case`.
+///
+/// This checks one direction only — every divergence in the corpus is documented. The
+/// reverse, that every deviation `SCOPE.md` lists has a corpus record, is not enforced:
+/// most of the 29 are not reachable from a C test at all (they are about API shape, or
+/// about code paths the oracle does not build), and a check that has to be told which ones
+/// to skip is a check nobody trusts. `SCOPE.md` says which are measured.
+#[test]
+fn every_deliberate_divergence_is_documented() {
+    const SCOPE: &str = include_str!("../../SCOPE.md");
+
+    let diverging: Vec<_> = records()
+        .into_iter()
+        .filter(|r| r.verdict == Verdict::Diverges)
+        .collect();
+
+    for rec in &diverging {
+        let anchor = format!("{}::{}", rec.suite, rec.case);
+        assert!(
+            SCOPE.contains(&anchor),
+            "{anchor} is recorded as a deliberate divergence but SCOPE.md does not mention \
+             it. Add the case name where the reason is written down, or change the verdict."
+        );
+    }
+
+    // Not a floor for its own sake: it fires if the corpus is regenerated from a build
+    // where the divergence stopped being reachable, which would otherwise make this test
+    // pass by having nothing to check.
+    assert!(
+        !diverging.is_empty(),
+        "no `diverges` records at all — the verdict machinery is not being exercised"
+    );
+}
+
 #[test]
 fn the_port_reproduces_what_the_c_did() {
     // Every mismatch, not the first: one divergence usually implies others in the same

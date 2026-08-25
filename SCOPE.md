@@ -201,6 +201,10 @@ an acknowledgement for a sequence number the peer already has. Measured: one fra
 nothing. The port returns `false` when `rcv_cur == rcv_lsa`. A peer that does not receive a
 redundant acknowledgement loses nothing, and the frame is not free.
 
+Corpus case: `rdp::an_ack_is_sent_even_with_nothing_to_acknowledge`. A test asserts that
+every `diverges` record names itself here, so a divergence cannot be recorded without a
+reason a reader can find.
+
 This is the **first record in the corpus carrying the `diverges` verdict**, so the machinery
 that has been in `csp/tests/corpus.rs` since the security suite is now exercised: the arm
 asserts `assert_ne!`, and removing the port's guard makes the run fail with *"recorded as a
