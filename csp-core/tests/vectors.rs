@@ -430,3 +430,66 @@ fn sfp_max_mtu_matches_the_c() {
     }
     assert!(checked >= 6, "only checked {checked}");
 }
+
+/// CFP fragmentation against the CAN frames the C actually emitted.
+///
+/// Each vector is `can_id:u32 BE || dlc:u8 || data:8` for one frame.
+#[test]
+fn cfp_fragmentation_matches_the_c() {
+    use csp_core::cfp;
+    use std::collections::BTreeMap;
+
+    let vectors = load();
+    let mut groups: BTreeMap<(u8, u64), Vec<&Vector>> = BTreeMap::new();
+    for v in vectors.iter().filter(|v| v.kind.starts_with("cfp_v")) {
+        let ver = v.num("v").unwrap() as u8;
+        groups.entry((ver, v.num("len").unwrap())).or_default().push(v);
+    }
+    assert!(!groups.is_empty(), "no cfp vectors");
+
+    // The oracle's fixed packet: id below, payload[i] = i & 0xff, ident counter reset to 0.
+    let id = Id { pri: 2, flags: 0, src: 1, dst: 8, dport: 20, sport: 10 };
+
+    let mut transfers = 0;
+    let mut frames = 0;
+    for ((ver, len), vs) in &groups {
+        let payload: Vec<u8> = (0..*len as usize).map(|i| (i & 0xff) as u8).collect();
+
+        let ours: Vec<cfp::Frame> = if *ver == 1 {
+            let mut hdr = [0u8; 4];
+            id.encode(Version::V1, &mut hdr).unwrap();
+            // via == 8 == id.dst in the oracle; ident starts at 0.
+            cfp::V1Fragmenter::new(hdr, id.src, 8, 0, &payload).collect()
+        } else {
+            // can_if.addr defaults to 0, and CFP2 puts the *interface* address in the id.
+            cfp::V2Fragmenter::new(id, 0, 0, &payload).collect()
+        };
+
+        assert_eq!(
+            ours.len(),
+            vs.len(),
+            "v{ver} len={len}: frame count differs (rust {} vs c {})",
+            ours.len(),
+            vs.len()
+        );
+
+        for (i, (want, got)) in vs.iter().zip(ours.iter()).enumerate() {
+            assert_eq!(want.out.len(), 13, "malformed vector");
+            let c_id = u32::from_be_bytes([want.out[0], want.out[1], want.out[2], want.out[3]]);
+            let c_dlc = want.out[4];
+            let c_data = &want.out[5..5 + c_dlc as usize];
+
+            assert_eq!(
+                got.id, c_id,
+                "v{ver} len={len} frame {i}: can id {:#x} != {:#x}",
+                got.id, c_id
+            );
+            assert_eq!(got.dlc(), c_dlc, "v{ver} len={len} frame {i}: dlc");
+            assert_eq!(got.data(), c_data, "v{ver} len={len} frame {i}: data");
+            frames += 1;
+        }
+        transfers += 1;
+    }
+    assert!(transfers >= 15, "only checked {transfers} transfers");
+    println!("checked {transfers} cfp transfers, {frames} frames");
+}

@@ -38,6 +38,9 @@ pub mod kiss;
 #[cfg(feature = "sfp")]
 pub mod sfp;
 
+#[cfg(feature = "if-can")]
+pub mod cfp;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
