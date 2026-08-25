@@ -2,10 +2,12 @@
 #include "csp/csp.h"
 #include "csp/csp_id.h"
 
+#include "csp/autoconfig.h"
 #include "csp_buffer_private.h"
 
 #define CSP_ID2_HEADER_SIZE 6
 
+#if (CSP_BUFFER_ZERO_CLEAR)
 /* https://github.com/libcsp/libcsp/issues/734 */
 START_TEST(test_alloc_clean_734)
 {
@@ -33,6 +35,7 @@ START_TEST(test_alloc_clean_734)
     }
 }
 END_TEST
+#endif
 
 START_TEST(test_clone_frame_begin_fixed)
 {
@@ -77,7 +80,12 @@ Suite * buffer_suite(void)
 	s = suite_create("Packet Buffer");
 
 	tc_alloc = tcase_create("allocate");
+#if (CSP_BUFFER_ZERO_CLEAR)
+	/* This test *is* the zero-clear option: with it off the pool is meant to hand back
+	   whatever was there, so asserting a cleared buffer would be asserting the wrong
+	   build. */
 	tcase_add_test(tc_alloc, test_alloc_clean_734);
+#endif
 	tcase_add_test(tc_alloc, test_clone_frame_begin_fixed);
 	suite_add_tcase(s, tc_alloc);
 

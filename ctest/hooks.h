@@ -24,3 +24,23 @@ void ctest_set_ps_entries(unsigned int entries);
 
 /** Forget the reboot/shutdown flags and restore the default answers. */
 void ctest_hooks_reset(void);
+
+/* --- the memory window PEEK and POKE are allowed to touch ---
+ *
+ * libcsp's default `csp_cmp_memcpy` is a bare `memcpy`, so a PEEK reads and a POKE writes
+ * any address a packet names. It is `__weak`, and this overrides it with a bounds-checked
+ * stub: the only thing reachable is `ctest_peek_region`, addressed as an offset from
+ * `CTEST_PEEK_BASE`. Anything else is refused.
+ *
+ * The indirection is not only for safety — `csp_cmp_peek_msg.addr` is a `uint32_t`, so on a
+ * 64-bit host a real pointer does not survive the round trip anyway.
+ */
+
+/** Base address the test region appears at, as seen on the wire. */
+#define CTEST_PEEK_BASE 0x1000u
+
+/** Bytes in the test region. */
+#define CTEST_PEEK_REGION_LEN 256
+
+/** Fill the region with a known pattern and return a pointer to it. */
+uint8_t * ctest_peek_region(void);
