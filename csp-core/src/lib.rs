@@ -211,6 +211,27 @@ pub enum Error {
         /// Which part of the entry was wrong.
         reason: RouteError,
     },
+    /// A protection this build does not implement was asked for.
+    ///
+    /// Refusing is the safe answer: the alternative is to set the feature's bit in the
+    /// header and not perform it, which tells the peer to parse bytes that are not there.
+    /// The C sets `CSP_DBG_ERR_UNSUPPORTED` on a global and returns a null connection,
+    /// which is the same decision reported somewhere easier to miss.
+    Unsupported {
+        /// Which protection.
+        feature: Feature,
+    },
+}
+
+/// A connection protection, for [`Error::Unsupported`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    /// Reliable datagram protocol.
+    Rdp,
+    /// HMAC authentication.
+    Hmac,
+    /// CRC-32C checksum.
+    Crc32,
 }
 
 /// Identifies the field in [`Error::FieldOutOfRange`].

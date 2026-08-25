@@ -143,7 +143,7 @@ What follows *is* done and tested:
 | Area | Where | Status |
 |---|---|---|
 | Core (io, conn, route, qfifo, port, buffer, id) | `csp/{pool,conn,qfifo,router,iface}.rs`, `csp-core/id.rs` | done |
-| RDP | `csp-core/rdp.rs` + `csp/conn.rs` (per-connection state, timers driven by `Router::tick`) | done |
+| RDP | `csp-core/rdp.rs` — state machine, option clamping, retransmit queue | **core only; the node does not drive it** — see below |
 | SFP | `csp-core/sfp.rs` + `csp/delivery.rs` | done |
 | CMP | `csp-core/cmp.rs` — client **and** decoder | done |
 | Crypto | `csp-core/{crc32,sha1,hmac}.rs` | done |
@@ -162,8 +162,37 @@ What follows *is* done and tested:
 | I2C, LOOP, UDP | `csp/iface.rs` | done — each is a datagram interface, so the whole protocol logic is `Interface::send` + `Packet::set_frame`. Proven by a loopback round-trip test, not asserted |
 | Built-in services | `csp/service.rs` | done |
 
-Three items listed in the feature table above are **not implemented**, and none is in
-scope for the goal:
+### RDP is implemented in the core and not reached by the node
+
+Found on 2026-08-25 while building `ctest/`, by reading the C's `csp_connect` against
+ours. `csp-core/rdp.rs` is a complete RDP: the state machine, the SYN option clamping, the
+retransmission queue, 49 passing tests. **Nothing in the `csp` crate drives any of it.**
+
+Measured, not argued — `grep -rn 'rdp' csp/src/` outside `conn.rs` returns three lines:
+`router.rs:668` (the idle-timeout tick) and two lines of one test in `node.rs`.
+
+| What the protocol needs | State |
+|---|---|
+| Send a `SYN` when a connection opens | never happens; `connect` builds an `Id` and stops |
+| Feed a received RDP packet to the state machine | `Connection::step` is called from exactly one site, `conn.rs:435`, always with `Event::Tick` |
+| A retransmission queue per connection | `TxQueue` is instantiated only inside `csp-core/src/rdp.rs`'s own test module |
+| An unpredictable initial sequence number | `conn.rs:98` passes a literal `0` for every connection |
+
+So a connection asking for RDP got the `CSP_FRDP` flag's five bytes deducted from its SFP
+MTU and no protocol. `Node::connect` now **refuses** `RDP_REQ` with
+`Error::Unsupported { feature: Rdp }`, which is what the C does when built without
+`CSP_USE_RDP`. Flagging RDP without speaking it would be worse than refusing: the peer
+reads the first five bytes of payload as an RDP header.
+
+**Why the audits missed it.** `AUDIT.md`'s RDP entry audited `csp-core/rdp.rs` against
+`csp_rdp.c` function by function and was right about all of it. Nothing asked whether the
+layer above called any of those functions. This is the `Router::forward` shape again — a
+component with green tests that nothing reaches — and it is the second instance, which
+makes "is this reached from the node?" a question the node suite has to answer per feature
+rather than a thing to notice.
+
+Three further items listed in the feature table above are **not implemented**, and none is
+in scope for the goal:
 
 - **`yaml`** — configuration file loading. Off by default in the C too, meaningless on a
   `no_std` flight target, and libyaml is not installed here so there is no oracle. Routes
