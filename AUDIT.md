@@ -232,3 +232,50 @@ fragments is undetectable. That is the wire format, and it is documented rather 
 papered over.
 
 **Tests:** 158 in `csp`, and the `cfp` module's own suite covers both versions.
+
+---
+
+## `csp-core::{kiss, eth}` — serial framing and Ethernet
+
+Against `src/interfaces/csp_if_kiss.c` and `csp_if_eth.c` / `csp_if_eth_pbuf.c`.
+
+| C | Rust | |
+|---|---|---|
+| `csp_kiss_tx` escaping | `kiss::encode` | ✅ 6 golden frames, incl. the escape cases |
+| `csp_kiss_rx` state machine | `kiss::Decoder` | ✅ |
+| ETH header pack/unpack | `eth::Header` | ✅ |
+| ETH segmentation / reassembly | `Segmenter` / `Reassembler` | ✅ out-of-order tolerated |
+| ARP | `ArpTable` | ✅ added earlier in this work |
+
+**Found during the audit — an interop difference.** The C's `KISS_MODE_ESCAPED` appends
+**only** for `TFESC` and `TFEND`:
+
+```c
+if (inputbyte == TFESC) ...frame_begin[rx_length++] = FESC;
+if (inputbyte == TFEND) ...frame_begin[rx_length++] = FEND;
+```
+
+Any other byte after `FESC` is silently dropped. The port passed it through, which would
+build a frame **one byte longer** than the peer built — a payload disagreement, and with
+the KISS CRC enabled a checksum disagreement too. Now matched, with a test feeding
+`FESC 0x99` and asserting the byte vanishes.
+
+**Two differences checked and deliberately kept:**
+
+- On an over-long frame the C resets to `NOT_STARTED` *mid-frame*, so the tail of the
+  discarded frame is then read as the start of a new one. The port goes to a skip state and
+  waits for the delimiter. Cleaner, and not observable to a peer.
+- The port treats a closing `FEND` as also opening the next frame; the C requires a
+  separate one. Since the C's encoder always emits a leading `FEND`, both interoperate —
+  the port is simply tolerant of shared delimiters.
+
+**Faithful:** yes. KISS frames match the C byte-for-byte, and that match is what settled the
+`CSP_21` CRC-coverage question empirically.
+
+**Rusty:** yes. The decoder is a fixed-capacity state machine returning borrowed frames,
+with over-long frames counted rather than truncated into something that would still parse.
+
+**ETH:** the C's header does not match the bit-packed EFP layout its own file comment
+specifies; the port follows the code, since that is what is on the wire. Its unpacker is
+also asymmetric with its packer and shifts a promoted `int` into the sign bit
+(`SCOPE.md` 11).

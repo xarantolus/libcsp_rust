@@ -181,13 +181,22 @@ impl<const N: usize> Decoder<N> {
                 None
             }
             Mode::Escaped => {
+                // The C appends ONLY for TFESC and TFEND:
+                //
+                //     if (inputbyte == TFESC) ...frame_begin[rx_length++] = FESC;
+                //     if (inputbyte == TFEND) ...frame_begin[rx_length++] = FEND;
+                //
+                // Any other byte after FESC is silently dropped, not passed through. That
+                // is a real interop detail rather than a nicety: passing it through would
+                // build a frame one byte longer than the peer built, so the two sides
+                // would disagree about the payload (and, with the KISS CRC enabled,
+                // disagree about the checksum too).
+                self.mode = Mode::InFrame;
                 let decoded = match b {
                     TFEND => FEND,
                     TFESC => FESC,
-                    // The C does not validate this; an unknown escape passes through.
-                    other => other,
+                    _ => return None,
                 };
-                self.mode = Mode::InFrame;
                 if self.expect_command {
                     self.expect_command = false;
                     return None;
@@ -331,6 +340,28 @@ mod tests {
         for _ in 0..5 {
             assert!(d.push(FEND).is_none());
         }
+    }
+
+    #[test]
+    fn an_invalid_escape_drops_the_byte_as_the_c_does() {
+        // The C appends only for TFESC and TFEND. Passing an unknown escape through would
+        // build a frame one byte longer than the peer built.
+        let mut d = Decoder::<64>::new();
+        let stream = [FEND, TNC_DATA, 0x41, FESC, 0x99, 0x42, FEND];
+        let mut out = [0u8; 8];
+        let mut len = None;
+        for &b in &stream {
+            if let Some(f) = d.push(b) {
+                out[..f.len()].copy_from_slice(f);
+                len = Some(f.len());
+            }
+        }
+        let n = len.expect("a frame should have been delivered");
+        assert_eq!(
+            &out[..n],
+            &[0x41u8, 0x42],
+            "the invalid escape byte must vanish, not appear as 0x99"
+        );
     }
 
     #[test]
