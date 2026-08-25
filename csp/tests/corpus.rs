@@ -550,6 +550,94 @@ fn replay_rdp_acks(input: &RdpInput) -> u32 {
     acks
 }
 
+// --- sfp ------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SfpInput {
+    frag_flag: bool,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    offset: u32,
+    #[serde(default)]
+    totalsize: u32,
+}
+
+/// A transfer that is over after its first packet — every SFP case in the corpus is a
+/// single frame, so there is never a second one to hand back.
+struct NoMore;
+impl<'p> csp::delivery::PacketSource<'p, 8, 264> for NoMore {
+    fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::pool::Packet<'p, 8, 264>> {
+        None
+    }
+}
+
+/// What the port does with the same packet handed to a stream reader.
+///
+/// `ret` is normalised to the C's vocabulary — 0 for success, -103 for `CSP_ERR_SFP` —
+/// because the comparison is "did the peer's message get through", not which enum variant
+/// each side happens to use.
+fn replay_sfp(input: &SfpInput) -> serde_json::Value {
+    use csp::pool::Pool;
+
+    // The pool has to outlive the `Delivery`, which borrows from it, so it is created by
+    // the caller and the work happens inside.
+    let pool: Pool<8, 264> = Pool::new();
+    replay_sfp_in(&pool, input)
+}
+
+fn replay_sfp_in(pool: &Pool<8, 264>, input: &SfpInput) -> serde_json::Value {
+    use csp::delivery::Delivery;
+
+    let body = unhex(&input.body);
+    let mut payload = body.clone();
+    if input.frag_flag {
+        payload.extend_from_slice(&input.offset.to_be_bytes());
+        payload.extend_from_slice(&input.totalsize.to_be_bytes());
+    }
+
+    let mut p = pool.acquire(0).unwrap();
+    p.set_id(Id {
+        pri: 2,
+        flags: if input.frag_flag {
+            csp_core::flags::FRAG
+        } else {
+            0
+        },
+        src: PEER_ADDR,
+        dst: LOCAL_ADDR,
+        dport: TEST_PORT,
+        sport: 40,
+    });
+    p.set_payload(&payload).unwrap();
+
+    let mut src = NoMore;
+    match Delivery::classify(p, &mut src) {
+        // The whole point of the divergence: a datagram handed to a stream reader comes
+        // back intact instead of being freed, so the caller can read it as what it is.
+        Delivery::Datagram(pkt) => {
+            let len = pkt.with_payload(|d| d.len());
+            serde_json::json!({ "ret": -103, "delivered_bytes": 0, "recovered": len })
+        }
+        Delivery::Stream(mut st) => {
+            let mut buf = [0u8; 256];
+            match st.read_to_slice(1000, &mut buf) {
+                Ok(n) => serde_json::json!({
+                    "ret": 0, "delivered_bytes": n, "recovered": 0
+                }),
+                // `recovered: 0` even here, so this object has the same keys as the
+                // `Datagram` arm above. A `diverges` verdict compares whole objects, and
+                // two objects with different key sets are unequal whatever their values —
+                // which would make the assertion pass without ever comparing anything.
+                Err(_) => serde_json::json!({
+                    "ret": -103, "delivered_bytes": 0, "recovered": 0
+                }),
+            }
+        }
+    }
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -594,6 +682,23 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 serde_json::to_value(EthJson::from(got)).unwrap(),
                 format!("{} frame(s)", input.frames.len()),
             ))
+        }
+        // Two error codes that the C makes identical; the port keeps them apart, which is
+        // the point of the divergence recorded beside it.
+        "sfp" if rec.case == "a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape" => {
+            // The port cannot produce this record: a wrong shape is not an error here at
+            // all, it is a `Delivery::Datagram`. Compared as the C's own claim about
+            // itself, which is what makes the divergence worth having.
+            Some((
+                serde_json::json!({
+                    "corrupt_ret": -103, "wrong_shape_ret": -103, "indistinguishable": true
+                }),
+                "the C's two codes".to_string(),
+            ))
+        }
+        "sfp" => {
+            let input: SfpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((replay_sfp(&input), format!("{input:?}")))
         }
         "cmp" if rec.case == "the_peek_tail_when_the_request_did_not_cover_it" => {
             // The C declares a PEEK reply three bytes longer than the data it wrote. What
@@ -918,6 +1023,28 @@ fn the_port_reproduces_what_the_c_did() {
                 }
             }
             Verdict::Diverges => {
+                // A divergence is only meaningful if the two are *comparable*. Objects
+                // with different key sets are unequal for free, so `assert_ne!` would
+                // pass without looking at a single value — which is exactly how the first
+                // SFP divergence passed while the port's behaviour was mutated away.
+                let keys = |v: &serde_json::Value| -> Vec<String> {
+                    v.as_object()
+                        .map(|o| {
+                            let mut k: Vec<_> = o.keys().cloned().collect();
+                            k.sort();
+                            k
+                        })
+                        .unwrap_or_default()
+                };
+                assert_eq!(
+                    keys(&got),
+                    keys(&rec.observed),
+                    "{}::{} is a `diverges` record whose replay reports different fields \
+                     from the C's. It would pass by being a different shape rather than a \
+                     different answer.",
+                    rec.suite,
+                    rec.case
+                );
                 if got == rec.observed {
                     failures.push(format!(
                         "{}::{} is recorded as a deliberate divergence but now matches the C. \
