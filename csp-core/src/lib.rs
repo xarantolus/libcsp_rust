@@ -160,6 +160,14 @@ pub enum Error {
         /// The largest the format permits.
         max: usize,
     },
+    /// A packet with this sequence number is already buffered.
+    ///
+    /// Not a failure of the peer: retransmission is how RDP recovers, so the same
+    /// sequence number arriving twice is expected. It means "drop this copy".
+    DuplicateSequence {
+        /// The sequence number already held.
+        seq: u16,
+    },
     /// A management-protocol message that should have been a reply was not.
     ///
     /// Distinct from a code mismatch: this one says the peer sent a *request* where an

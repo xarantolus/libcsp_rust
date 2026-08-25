@@ -448,6 +448,113 @@ impl<const N: usize> TxQueue<N> {
     }
 }
 
+/// One out-of-order packet, held until the gap before it fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RxEntry {
+    seq_nr: u16,
+    token: u16,
+}
+
+/// Packets that arrived out of order, held until they can be delivered in sequence.
+///
+/// Without this, a packet arriving after a gap is **discarded** and the peer has to
+/// retransmit it — so a single lost packet costs a retransmission of everything sent
+/// after it, which on a link with any real latency is most of the window.
+///
+/// The C's version scans linearly and restarts from the front after every delivery (the
+/// backward `goto front` at `csp_rdp.c:256`). Here that is a `while let` loop in the
+/// caller, which is the same algorithm without the label.
+#[derive(Debug)]
+pub struct RxQueue<const N: usize> {
+    entries: [Option<RxEntry>; N],
+}
+
+impl<const N: usize> Default for RxQueue<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> RxQueue<N> {
+    /// Compile-time invariant: with no slots, every out-of-order packet is dropped and
+    /// the connection silently degrades to stop-and-wait.
+    const SANITY: () = assert!(N > 0, "the RDP receive queue needs at least one slot");
+
+    /// An empty queue.
+    pub const fn new() -> Self {
+        let () = Self::SANITY;
+        RxQueue {
+            entries: [None; N],
+        }
+    }
+
+    /// Packets held.
+    pub fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    /// True if nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Is this sequence number already buffered?
+    pub fn contains(&self, seq_nr: u16) -> bool {
+        self.entries.iter().flatten().any(|e| e.seq_nr == seq_nr)
+    }
+
+    /// Hold an out-of-order packet.
+    ///
+    /// [`Error::DuplicateSequence`] means the peer retransmitted something already held —
+    /// expected, not a fault, and the caller should release its copy.
+    /// [`Error::TableFull`] means the window is exhausted.
+    pub fn insert(&mut self, seq_nr: u16, token: u16) -> Result<()> {
+        if self.contains(seq_nr) {
+            return Err(Error::DuplicateSequence { seq: seq_nr });
+        }
+        for slot in self.entries.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(RxEntry { seq_nr, token });
+                return Ok(());
+            }
+        }
+        Err(Error::TableFull)
+    }
+
+    /// Take the packet with sequence number `seq_nr`, if it is held.
+    ///
+    /// Drive it in a loop to drain everything the newly-arrived packet unblocked:
+    ///
+    /// ```ignore
+    /// while let Some(token) = rx.take(conn.rcv_cur.wrapping_add(1)) {
+    ///     deliver(token);
+    ///     conn.rcv_cur = conn.rcv_cur.wrapping_add(1);
+    /// }
+    /// ```
+    pub fn take(&mut self, seq_nr: u16) -> Option<u16> {
+        for slot in self.entries.iter_mut() {
+            if matches!(slot, Some(e) if e.seq_nr == seq_nr) {
+                return slot.take().map(|e| e.token);
+            }
+        }
+        None
+    }
+
+    /// Abandon everything, returning the tokens so the caller can release them.
+    pub fn flush(&mut self, out: &mut [u16]) -> usize {
+        let mut n = 0;
+        for slot in self.entries.iter_mut() {
+            if let Some(e) = slot.take() {
+                if n < out.len() {
+                    out[n] = e.token;
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+}
+
 /// Is `a` strictly before `b` in wrapping 16-bit sequence space?
 pub const fn seq_before(a: u16, b: u16) -> bool {
     // Half the space is "before"; this is the standard wrapping comparison.
@@ -1086,6 +1193,123 @@ mod tests {
         c.rcv_cur = 11;
         c.state = State::Closed;
         assert_eq!(c.poll_ack(999_999), None);
+    }
+
+    // --- receive reorder queue ---
+
+    #[test]
+    fn an_out_of_order_packet_is_held_not_discarded() {
+        // Discarding it costs a retransmission of everything after the gap.
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(12, 112).unwrap();
+        assert_eq!(q.len(), 1);
+        assert!(q.contains(12));
+        // The gap has not filled, so 12 is not deliverable yet.
+        assert_eq!(q.take(11), None);
+    }
+
+    #[test]
+    fn filling_a_gap_releases_everything_it_unblocked() {
+        // The C restarts its scan from the front after each delivery (goto front); here
+        // that is a while-let in the caller.
+        let mut q: RxQueue<8> = RxQueue::new();
+        // 12, 13, 14 arrived; 11 was lost and has just been retransmitted.
+        for (seq, tok) in [(12u16, 112u16), (13, 113), (14, 114)] {
+            q.insert(seq, tok).unwrap();
+        }
+        let mut rcv_cur = 10u16;
+        let mut delivered = heapless::Vec8::new();
+        // 11 arrives in order and is delivered directly.
+        rcv_cur = rcv_cur.wrapping_add(1);
+        delivered.push(111);
+        // Now drain what it unblocked.
+        while let Some(tok) = q.take(rcv_cur.wrapping_add(1)) {
+            delivered.push(tok);
+            rcv_cur = rcv_cur.wrapping_add(1);
+        }
+        assert_eq!(delivered.as_slice(), &[111, 112, 113, 114]);
+        assert!(q.is_empty());
+        assert_eq!(rcv_cur, 14);
+    }
+
+    #[test]
+    fn a_gap_that_does_not_fill_holds_the_rest_back() {
+        let mut q: RxQueue<8> = RxQueue::new();
+        // 13 and 14 arrived, but 12 is still missing.
+        q.insert(13, 113).unwrap();
+        q.insert(14, 114).unwrap();
+        let rcv_cur = 11u16;
+        assert_eq!(q.take(rcv_cur.wrapping_add(1)), None, "12 is still missing");
+        assert_eq!(q.len(), 2, "and the rest stay held");
+    }
+
+    #[test]
+    fn a_retransmitted_duplicate_is_reported_as_such() {
+        // Retransmission is how RDP recovers, so this is expected rather than a fault --
+        // and the caller must release its copy rather than leak it.
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(12, 112).unwrap();
+        assert_eq!(
+            q.insert(12, 999),
+            Err(Error::DuplicateSequence { seq: 12 })
+        );
+        assert_eq!(q.len(), 1, "the original is kept, not replaced");
+        assert_eq!(q.take(12), Some(112), "and it is the original token");
+    }
+
+    #[test]
+    fn a_full_receive_window_is_reported() {
+        let mut q: RxQueue<2> = RxQueue::new();
+        q.insert(1, 1).unwrap();
+        q.insert(2, 2).unwrap();
+        assert_eq!(q.insert(3, 3), Err(Error::TableFull));
+    }
+
+    #[test]
+    fn the_reorder_queue_works_across_the_sequence_wrap() {
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(0, 200).unwrap();
+        q.insert(1, 201).unwrap();
+        let mut rcv_cur = 0xFFFEu16;
+        let mut got = heapless::Vec8::new();
+        rcv_cur = rcv_cur.wrapping_add(1); // 0xFFFF delivered in order
+        while let Some(t) = q.take(rcv_cur.wrapping_add(1)) {
+            got.push(t);
+            rcv_cur = rcv_cur.wrapping_add(1);
+        }
+        assert_eq!(got.as_slice(), &[200, 201], "must not stall at the wrap");
+        assert_eq!(rcv_cur, 1);
+    }
+
+    #[test]
+    fn rx_flush_returns_every_token_so_nothing_leaks() {
+        let mut q: RxQueue<4> = RxQueue::new();
+        q.insert(1, 101).unwrap();
+        q.insert(2, 102).unwrap();
+        let mut out = [0u16; 8];
+        let n = q.flush(&mut out);
+        assert_eq!(n, 2);
+        assert!(out[..n].contains(&101) && out[..n].contains(&102));
+        assert!(q.is_empty());
+    }
+
+    mod heapless {
+        pub struct Vec8 {
+            items: [u16; 8],
+            len: usize,
+        }
+        impl Vec8 {
+            pub fn new() -> Self {
+                Vec8 { items: [0; 8], len: 0 }
+            }
+            pub fn push(&mut self, v: u16) {
+                self.items[self.len] = v;
+                self.len += 1;
+            }
+            pub fn as_slice(&self) -> &[u16] {
+                &self.items[..self.len]
+            }
+        }
     }
 
     // --- retransmission queue ---

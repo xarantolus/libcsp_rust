@@ -98,3 +98,54 @@ header authenticates), and that payload-only genuinely ignores it.
 verifier silently falls back (`SCOPE.md`, KISS/`CSP_21` note).
 
 **Tests:** 183 in `csp-core`, up from 174.
+
+---
+
+## `csp-core::rdp` — reliable delivery
+
+Against `src/csp_rdp.c` (1 022 lines, 30 `goto`s) and `src/csp_rdp_queue.c`. The riskiest
+module in the library, and the audit found the most here.
+
+| C | Rust | |
+|---|---|---|
+| header add/remove/ref | `Header::encode` / `decode` / `strip` | ✅ |
+| SYN option block + clamping | `SynOptions::decode_clamped` | ✅ every bound tested |
+| `csp_rdp_seq_between` / `seq_before` | `seq_between` / `seq_before` | ✅ wrapping |
+| state machine (5 states) | `Connection::step` | ✅ |
+| `csp_rdp_should_ack` / `check_ack` | `should_ack` / `poll_ack` | ✅ **added during this audit** |
+| TX queue + retransmission | `TxQueue` | ✅ added earlier in this work |
+| RX reorder queue | `RxQueue` | ✅ **added during this audit** |
+| `csp_rdp_set_opt` / `get_opt` | `Connection::opts`, per connection | ✅ better than the C's globals |
+| `RDP_EAK` | parsed, never generated | ✅ faithful — the C never generates one either |
+
+**Two real defects found in the port, both serious:**
+
+1. **Received data was never acknowledged.** The `Open` state delivered in-order data and
+   returned; only a *duplicate* was re-acked. The protocol still converged, but solely via
+   the sender's retransmission timer — so every packet cost a full `packet_timeout` of
+   latency and a duplicate on the link, and a connection that lost its window would give up
+   after `MAX_RETRANSMITS` believing the peer was dead when every packet had arrived.
+   Fixed with the C's three-condition `should_ack`, exposed as `poll_ack` and checked
+   separately from packet handling — which is faithful, since `csp_rdp_check_ack` is called
+   by the router, not the receive path.
+
+2. **Out-of-order packets were discarded.** A packet arriving after a gap was dropped, so a
+   single lost packet forced retransmission of everything sent after it — on a link with
+   real latency, most of the window. `RxQueue` holds them and releases everything the gap
+   unblocked, which is the C's backward `goto front` at `csp_rdp.c:256` expressed as a
+   `while let`.
+
+**Faithful:** yes, now. `RDP_EAK` is parsed and never generated, which matches the C
+exactly — it defines the flag and inspects it in three places but has no path that sets it.
+
+**Rusty:** yes, and materially better in one respect: RDP options are **per connection**.
+The C keeps its six tunables (`csp_rdp_window_size`, `conn_timeout`, `packet_timeout`,
+`delayed_acks`, `ack_timeout`, `ack_delay_count`) as file statics shared by every
+connection, so two connections with different timeouts are not expressible. Both queues are
+per connection too; the C keeps one TX and one RX queue globally and tells entries apart by
+comparing `packet->conn`, so a busy connection crowds out a quiet one.
+
+**Deviations:** `SCOPE.md` — SYN option clamping is treated as a security control, and the
+give-up counter bounds retransmission.
+
+**Tests:** 48 in `rdp`, up from 33.
