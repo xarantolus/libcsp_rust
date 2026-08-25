@@ -42,6 +42,16 @@ static void emit(const char * kind, const char * desc, const uint8_t * data, siz
 	fprintf(out, "\n");
 }
 
+/* Payload lengths are ambiguous -- the table has two distinct 1-byte entries -- so the
+ * vectors record the payload bytes themselves and are self-describing. */
+static void hexify(char * dst, size_t dstsz, const uint8_t * data, size_t len) {
+	size_t o = 0;
+	for (size_t i = 0; i < len && o + 3 < dstsz; i++) {
+		o += (size_t)snprintf(dst + o, dstsz - o, "%02x", data[i]);
+	}
+	dst[o] = '\0';
+}
+
 static void emit_u32(const char * kind, const char * desc, uint32_t v) {
 	uint8_t b[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8), (uint8_t)v};
 	emit(kind, desc, b, 4);
@@ -182,11 +192,12 @@ static void gen_id(int version) {
 			p->length = (uint16_t)PAYLOAD_LENS[pi];
 			memcpy(p->data, PAYLOADS[pi], PAYLOAD_LENS[pi]);
 			csp_id_prepend(p);
-			char desc[160];
+			char phex[64];
+			hexify(phex, sizeof(phex), PAYLOADS[pi], PAYLOAD_LENS[pi]);
+			char desc[200];
 			snprintf(desc, sizeof(desc),
-			         "v=%d,pri=%u,src=%u,dst=%u,sport=%u,dport=%u,flags=0x%02x,len=%zu",
-			         version, c->pri, c->src, c->dst, c->sport, c->dport, c->flags,
-			         PAYLOAD_LENS[pi]);
+			         "v=%d,pri=%u,src=%u,dst=%u,sport=%u,dport=%u,flags=0x%02x,payload=%s",
+			         version, c->pri, c->src, c->dst, c->sport, c->dport, c->flags, phex);
 			char kind[16];
 			snprintf(kind, sizeof(kind), "id_v%d", version);
 			emit(kind, desc, p->frame_begin, p->frame_length);
@@ -215,8 +226,10 @@ static void gen_id_params(int v) {
 /* ---- 3. CRC32-C ---- */
 static void gen_crc32(void) {
 	for (size_t pi = 0; pi < N_PAYLOADS; pi++) {
-		char desc[64];
-		snprintf(desc, sizeof(desc), "len=%zu", PAYLOAD_LENS[pi]);
+		char phex[64];
+		hexify(phex, sizeof(phex), PAYLOADS[pi], PAYLOAD_LENS[pi]);
+		char desc[96];
+		snprintf(desc, sizeof(desc), "payload=%s", phex);
 		emit_u32("crc32", desc, csp_crc32_memory(PAYLOADS[pi], (uint32_t)PAYLOAD_LENS[pi]));
 	}
 	static const char * strs[] = {"", "a", "abc", "message digest",
