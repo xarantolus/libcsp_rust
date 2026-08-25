@@ -265,11 +265,130 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
     }
 }
 
+// --- cmp ------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CmpInput {
+    /// The exact request bytes the C node was given, as lowercase hex.
+    request: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CmpObserved {
+    replies: u32,
+    reply_len: u32,
+    /// `-1` when nothing was sent.
+    reply_type: i32,
+    reply_code: i32,
+}
+
+fn unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+/// Answer a CMP request the way a server built on this port would: classify it with
+/// `parse_request`, then encode the matching reply.
+///
+/// This is the port's equivalent of `csp_cmp_handler`, and the comparison is whether it
+/// answers the same requests with the same shape. Nothing here inspects the port's
+/// internals; a peer sees exactly these four numbers.
+fn replay_cmp(input: &CmpInput) -> CmpObserved {
+    use csp_core::cmp;
+
+    const HOSTNAME: &str = "oracle-node";
+    const MODEL: &str = "ctest-model";
+    const REVISION: &str = "rev-1";
+
+    let req = unhex(&input.request);
+    let none = CmpObserved {
+        replies: 0,
+        reply_len: 0,
+        reply_type: -1,
+        reply_code: -1,
+    };
+
+    let Ok(query) = cmp::parse_request(&req) else {
+        return none;
+    };
+    let code = req[1];
+    let h = cmp::Header {
+        kind: cmp::REPLY,
+        code,
+    };
+
+    let mut out = [0u8; 256];
+    let n = match query {
+        cmp::Query::Ident => cmp::Ident {
+            hostname: HOSTNAME,
+            model: MODEL,
+            revision: REVISION,
+            // The C fills these from __DATE__/__TIME__; only the length matters here and
+            // they are deliberately absent from the corpus.
+            date: "Jan  1 2026",
+            time: "00:00:00",
+        }
+        .encode(h, &mut out),
+        cmp::Query::IfStats { interface } => {
+            // The C answers only for an interface it has. "INGRESS" is the one the oracle
+            // registers; anything else gets no reply.
+            if interface != "INGRESS" {
+                return none;
+            }
+            cmp::IfStatsMsg {
+                interface,
+                stats: cmp::IfStats::default(),
+            }
+            .encode(h, &mut out)
+        }
+        cmp::Query::Clock { .. } => cmp::Timestamp {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }
+        .encode(h, &mut out),
+        // Not exercised by the corpus yet; a panic here is better than a silent 0.
+        other => panic!("no reply encoder for {other:?}"),
+    };
+
+    match n {
+        Ok(n) => CmpObserved {
+            replies: 1,
+            reply_len: n as u32,
+            reply_type: cmp::REPLY as i32,
+            reply_code: code as i32,
+        },
+        Err(_) => none,
+    }
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
 fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
     match rec.suite.as_str() {
+        "cmp" if rec.case == "the_minimum_request_length_is_the_whole_reply" => {
+            // This record is the measured contract itself rather than one exchange: the
+            // smallest request the C will answer, per code. The port's table has to agree
+            // with it, because `cmp_request` pads to it and `parse_request` refuses below
+            // it — one constant standing in for the C's per-handler length checks.
+            let got = serde_json::json!({
+                "ident_min": csp_core::cmp::request_len(csp_core::cmp::code::IDENT),
+                "clock_min": csp_core::cmp::request_len(csp_core::cmp::code::CLOCK),
+            });
+            Some((got, "cmp::request_len".to_string()))
+        }
+        "cmp" => {
+            let input: CmpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let got = replay_cmp(&input);
+            Some((
+                serde_json::to_value(CmpJson::from(got)).unwrap(),
+                format!("request {} bytes", input.request.len() / 2),
+            ))
+        }
         "security" => {
             let input: SecurityInput = serde_json::from_value(rec.input.clone()).unwrap();
             let got = replay_security(&input);
@@ -305,6 +424,24 @@ impl From<SecurityObserved> for SecurityJson {
             delivered: o.delivered,
             rx_error: o.rx_error,
             autherr: o.autherr,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CmpJson {
+    replies: u32,
+    reply_len: u32,
+    reply_type: i32,
+    reply_code: i32,
+}
+impl From<CmpObserved> for CmpJson {
+    fn from(o: CmpObserved) -> Self {
+        CmpJson {
+            replies: o.replies,
+            reply_len: o.reply_len,
+            reply_type: o.reply_type,
+            reply_code: o.reply_code,
         }
     }
 }

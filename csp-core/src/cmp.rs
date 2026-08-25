@@ -58,6 +58,36 @@ pub mod len {
     pub const PEEK_V2_MAX: usize = 196;
 }
 
+/// The smallest **request** a node will answer for this code.
+///
+/// Not the same as the header length, and that is the trap. Each handler in `src/cmp/`
+/// opens with `csp_cmp_check_len`, and for most codes the bound is the size of the *whole
+/// reply* — the node writes its answer back into the request buffer, so the request has to
+/// be big enough to hold it. A client that sends only the two bytes it knows about gets
+/// **no reply at all**: the handler returns `CSP_ERR_INVAL` and `csp_service_handler`
+/// discards the packet without answering, so the caller waits out its timeout and learns
+/// nothing about why.
+///
+/// Measured against a real node in `ctest/suite_cmp.c`, which sweeps the request length for
+/// `IDENT` and `CLOCK` and reports the first one that is answered.
+///
+/// `IF_STATS` is the exception: it checks only as far as the interface name.
+///
+/// An unknown code gets [`Header::LEN`] — there is no handler to have an opinion, and the
+/// node will not answer it whatever its size.
+pub const fn request_len(code: u8) -> usize {
+    match code {
+        code::IDENT => Ident::LEN,
+        code::ROUTE_SET_V1 => RouteSetV1::LEN,
+        code::IF_STATS => IfStatsMsg::REQUEST_LEN,
+        code::PEEK | code::POKE => Peek::HEADER_LEN,
+        code::CLOCK => Timestamp::LEN,
+        code::ROUTE_SET_V2 => RouteSetV2::LEN,
+        code::PEEK_V2 | code::POKE_V2 => PeekV2::HEADER_LEN,
+        _ => Header::LEN,
+    }
+}
+
 /// The two-byte header every CMP message starts with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -608,6 +638,19 @@ pub fn parse_request(data: &[u8]) -> Result<Query<'_>> {
     if h.is_reply() {
         return Err(Error::NotAReply { got: h.kind });
     }
+
+    // The per-code floor, applied to every code rather than left to each message's own
+    // decoder. `IDENT` had no length check here at all, so this node answered a two-byte
+    // request that a C node discards in silence.
+    //
+    // Answering anyway is tempting — the C's requirement exists only because it writes the
+    // reply back into the request's buffer, which this port does not do. But it would make
+    // an unauthenticated port turn 2 bytes into 93, and amplification on a link that costs
+    // power to transmit is not a good trade for accepting a malformed request.
+    if data.len() < request_len(h.code) {
+        return Err(Error::Truncated);
+    }
+
     match h.code {
         code::IDENT => Ok(Query::Ident),
         code::IF_STATS => Ok(Query::IfStats {
@@ -1105,8 +1148,20 @@ mod tests {
     fn every_message_type_dispatches_to_its_query() {
         let mut buf = [0u8; 128];
 
-        let n = req(code::IDENT, &[], &mut buf);
+        // An IDENT request has to be as long as the reply the node writes back into it.
+        // This test used to build the two-byte form and assert it dispatched, which is the
+        // one length a real node is guaranteed *not* to answer — see
+        // `ctest/suite_cmp.c`, which measures it.
+        let n = req(code::IDENT, &[0; Ident::LEN - Header::LEN], &mut buf);
+        assert_eq!(n, Ident::LEN);
         assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Ident);
+
+        let short = req(code::IDENT, &[], &mut buf);
+        assert_eq!(
+            parse_request(&buf[..short]),
+            Err(Error::Truncated),
+            "a bare IDENT header is not a request any node will answer"
+        );
 
         let mut stats = [0u8; 64];
         let n = IfStatsMsg {
