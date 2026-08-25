@@ -41,6 +41,9 @@ pub mod sfp;
 #[cfg(feature = "if-can")]
 pub mod cfp;
 
+#[cfg(feature = "rtable")]
+pub mod rtable;
+
 pub use id::{Id, Version};
 
 /// Errors returned by the pure codecs.
@@ -72,6 +75,11 @@ pub enum Error {
     BadChecksum,
     /// The frame is structurally invalid (bad framing, impossible length, bad offset).
     Malformed,
+    /// The routing table is full.
+    ///
+    /// The C overwrites its last entry and returns success, so a node that installs one
+    /// route too many gets a wrong routing table with nothing reported.
+    TableFull,
     /// The packet is a plain datagram, not an SFP fragment.
     ///
     /// Distinct from [`Error::Malformed`] on purpose: nothing is wrong, the caller just
