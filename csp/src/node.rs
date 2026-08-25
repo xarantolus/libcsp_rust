@@ -669,7 +669,10 @@ impl<
     /// One step of the router.
     pub fn work(&mut self, now_ms: u32) -> Routed {
         let pool = self.storage.pool_ref();
-        self.router.work(pool, now_ms)
+        // The router cannot make a correct routing decision without the interface list:
+        // local-subnet ownership beats the routing table, and split horizon compares
+        // subnets. Passing it here is what closes that.
+        self.router.work(pool, &self.ifaces, now_ms)
     }
 
     /// Periodic maintenance: RDP timers and idle connection expiry.

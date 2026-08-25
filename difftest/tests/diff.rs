@@ -765,6 +765,7 @@ fn rust_node_exchange_routed(
     // packet has a different subnet to leave by and split horizon does not veto it.
     node.ifaces.add("INGRESS", NODE_ADDR, 2, false).unwrap();
     node.ifaces.add("EGRESS", EGRESS_ADDR, 2, true).unwrap();
+    node.ifaces.add("ROUTED", 26, 2, false).unwrap();
     for &p in bind_ports {
         node.bind(p).unwrap();
     }
@@ -794,10 +795,19 @@ fn rust_node_exchange_routed(
         match node.work(0) {
             Routed::Idle => break,
             Routed::Delivered { .. } => {}
-            Routed::Forwarded { packet, .. } => {
+            Routed::Forwarded { iface, via, packet } => {
                 if let Some(mut p) = node.take_forwarded(packet) {
                     if p.prepend_header(version).is_ok() {
                         out.tx.push(p.with_frame(|f| f.to_vec()));
+                        // Which interface, not just which bytes. Comparing only the frame
+                        // would pass while the port sent it out of the wrong link -- the
+                        // bytes are identical either way.
+                        let name = node
+                            .ifaces
+                            .get(iface)
+                            .map(|e| e.name.to_string())
+                            .unwrap_or_else(|| format!("?{iface}"));
+                        out.tx_via.push((name, via));
                     }
                 }
             }
@@ -853,7 +863,7 @@ fn a_packet_for_a_bound_port_reaches_the_application_identically() {
     let version = Version::V1;
     c_set_version(version);
     assert!(
-        c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR),
+        c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26),
         "C node came up"
     );
     assert_eq!(c_node_bind(10), 0, "bind failed");
@@ -911,7 +921,7 @@ fn a_packet_for_an_unbound_port_is_delivered_to_nobody() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
     assert_eq!(c_node_bind(10), 0, "bind failed");
 
     // Port 11 is never bound on either side.
@@ -941,7 +951,7 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
     assert_eq!(c_node_bind(10), 0);
 
     // Addressed to node 18: not us, not either interface's own address, but inside the
@@ -975,6 +985,11 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
     );
     // And what went out is what came in: forwarding must not mutate the packet.
     assert_eq!(c.tx[0], frame, "the C forwards the frame unchanged");
+    assert_eq!(
+        r.tx_via[0].0, c.tx_via[0].0,
+        "and must leave by the same interface -- the bytes are identical whichever link \
+         it goes out of, so comparing only the frame proves nothing about routing"
+    );
 }
 
 /// Nothing leaks, whatever the node decides to do with a packet.
@@ -987,7 +1002,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
     let _g = LOCK.lock().unwrap();
     let version = Version::V1;
     c_set_version(version);
-    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR));
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
     assert_eq!(c_node_bind(10), 0);
 
     let before = c_node_buf_free();
@@ -1023,5 +1038,64 @@ fn no_path_through_the_node_leaks_a_buffer() {
         before,
         "the C node leaked {} buffers over 400 exchanges",
         before - c_node_buf_free()
+    );
+}
+
+/// An interface whose subnet contains the destination wins over the routing table.
+///
+/// `csp_send_direct` tries **local subnets first** (`csp_iflist_get_by_subnet`), and if any
+/// interface matches it sends there and `return`s — the routing table is never consulted.
+/// The routing table is the *fallback* for destinations no local interface owns, and the
+/// default interfaces are the fallback after that.
+///
+/// `Node::resolve` started at the routing table. The whole local-subnet precedence level
+/// was absent, so a route could divert traffic that the C would have put straight onto the
+/// interface owning that subnet. This is the same class as the forwarding bug: read from
+/// the C correctly at the level I looked at, wrong about the level above it.
+///
+/// The test makes the two distinguishable: destination 18 lives in EGRESS's subnet
+/// (16..23), and a routing-table entry points it at ROUTED (24..31) instead. Local-subnet
+/// precedence sends it out EGRESS; routing-table precedence sends it out ROUTED.
+#[test]
+fn a_local_subnet_beats_the_routing_table() {
+    let _g = LOCK.lock().unwrap();
+    let version = Version::V1;
+    c_set_version(version);
+    assert!(c_node_init(version, NODE_ADDR, 2, EGRESS_ADDR, 26));
+    assert_eq!(c_node_bind(10), 0);
+
+    // Point 18 at ROUTED even though EGRESS owns its subnet.
+    assert_eq!(
+        c_node_route(18, 5, 2, 0xFFFF),
+        0,
+        "route installed on the C"
+    );
+
+    let id = Id {
+        pri: 2,
+        flags: 0,
+        src: 3,
+        dst: 18,
+        dport: 10,
+        sport: 4,
+    };
+    let frame = framed(version, id, b"which interface?");
+
+    let c = c_node_exchange(&frame, &[10]);
+    assert_eq!(c.tx.len(), 1, "the C sends it exactly once");
+    assert_eq!(
+        c.tx_via[0].0, "EGRESS",
+        "the C ignores the routing table when a local interface owns the subnet"
+    );
+
+    // Same topology and the same route on the Rust side.
+    let r = rust_node_exchange_routed(version, &frame, &[10], &[10], &[(18, 5, 2, 0xFFFF)]);
+    assert_eq!(r.tx.len(), 1, "the port must send it exactly once too");
+    assert_eq!(c.tx[0], r.tx[0], "and the frame must be byte-identical");
+    assert_eq!(
+        r.tx_via[0].0, c.tx_via[0].0,
+        "and must leave by the same interface -- comparing only the bytes would pass \
+         while the port sent it out of the wrong link, since the frame is identical \
+         either way"
     );
 }
