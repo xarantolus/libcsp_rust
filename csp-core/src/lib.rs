@@ -24,6 +24,7 @@
 #![deny(missing_docs)]
 
 pub mod crc32;
+pub mod security;
 pub mod id;
 
 #[cfg(feature = "sha1")]

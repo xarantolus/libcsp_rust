@@ -445,3 +445,46 @@ packet on a full queue too, and the difference is that `Qfifo::dropped` is a rea
 rather than a `uint8_t` written from two contexts without synchronisation.
 
 **Tests:** 166 in `csp`, up from 160.
+
+---
+
+## `csp::router` + `dedup` + promisc + bridge
+
+Against `src/csp_route.c`, `csp_dedup.c`, `csp_promisc.c`, `csp_bridge.c`.
+
+**The most security-relevant gap of the whole audit: the endpoint security check was
+missing entirely.**
+
+`csp_route_security_check` runs before a packet reaches the application and does two
+things:
+
+- a packet that **claims** a protection must pass it — a wrong CRC or a wrong MAC is
+  rejected;
+- a packet that **omits** a protection the endpoint requires (`CSP_SO_CRC32REQ`,
+  `CSP_SO_HMACREQ`, `CSP_SO_RDPREQ`) is rejected even though nothing about the packet
+  itself is malformed.
+
+The second is the one that is easy to leave out and silent when you do: every packet still
+arrives, the endpoint has simply stopped requiring anything. A node configured to demand
+HMAC would have accepted unauthenticated traffic. `csp_route_check_options` is the
+companion — a packet using a feature the build lacks is dropped, because delivering it
+would mean delivering it *unverified*.
+
+Added `csp-core::security`, a pure function over `(endpoint_opts, id, payload)`. Beyond the
+C it also: refuses a packet claiming HMAC when **no key is configured** (accepting would
+mean treating an unverifiable packet as authentic), enforces the `*PROHIB` options the C
+declares but never checks, and keeps authentication failures on a separate counter from
+link errors — a rising `autherr` means someone is talking to you who should not be, a
+rising `rx_error` usually means a bad link, and conflating them hides both.
+
+**Also confirmed during this audit:** HMAC is verified **before** CRC32 on receive, because
+it authenticates the bytes the checksum then covers.
+
+**Dedup, promisc, bridge:** already audited and fixed earlier in this work — the clock-wrap
+defect (`SCOPE.md` 10), the tap counting what it could not hold, and the bridge refusing a
+frame from neither side (`SCOPE.md` 12).
+
+**Still open:** wiring `security::check` into `Router::deliver_local`, and the
+default-interface fallback. Both tracked in the `csp::node` audit.
+
+**Tests:** 13 in `security`; 410 in total.
