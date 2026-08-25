@@ -220,7 +220,16 @@ whoever maintains the fork can see what was found and decide for themselves.
     opposing interface with `if (input.iface == bif_a) destif = bif_b; else destif = bif_a;`
     — no third branch. A frame arriving on an interface that is neither side of the bridge
     is injected into side A as though it had come from side B. The port refuses it.
-13. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
+13. **`csp_hmac_verify` compares the tag with `memcmp`.** Not constant time. With a
+    32-bit tag, stopping at the first wrong byte reduces a 2^32 forgery to roughly
+    4 × 2^8 attempts, and a spacecraft link has no rate limit an attacker must respect.
+    The port compares in constant time.
+14. **`csp_hmac_verify`'s length check guards the wrong field.** It tests
+    `packet->length < CSP_HMAC_LENGTH` and then, in the `include_header` branch, computes
+    `packet->frame_length - CSP_HMAC_LENGTH`. A packet with `length >= 4` but
+    `frame_length < 4` underflows that subtraction to about four billion and hashes far
+    past the buffer.
+15. **`csp_conf.version` is silently unsafe to change after `csp_init()`.** Found while
    building the oracle. `host_bits` (5 for v1, 14 for v2) is baked into the routing and
    broadcast maths at init, so flipping the version afterwards misroutes every packet
    into the qfifo where nothing drains it. Measured: 18/18 sends clean under v1, then the

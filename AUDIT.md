@@ -48,3 +48,53 @@ field widths instead of shifting an oversized value into its neighbour (`SCOPE.m
 an oversized buffer must not clobber past the header, decoding must ignore trailing
 payload bytes, the flags field is 8 bits in v1 and 6 in v2, and broadcast detection across
 every netmask rather than only the all-ones case. 11 tests → 16.
+
+---
+
+## `csp-core::{crc32, sha1, hmac}` — checksums and authentication
+
+Against `src/csp_crc32.c`, `src/crypto/csp_sha1.c`, `src/crypto/csp_hmac.c` (14 functions).
+
+| C | Rust | |
+|---|---|---|
+| `csp_crc32_init` / `update` / `final` | `Crc32::new` / `update` / `finalize` | ✅ |
+| `csp_crc32_memory` | `crc32::checksum` | ✅ |
+| `csp_crc32_append` / `verify` | `crc32::append` / `verify` with `Coverage` | ✅ |
+| `csp_sha1_init` / `process` / `done` | `Sha1::new` / `update` / `finalize` | ✅ |
+| `csp_sha1_memory` | `sha1::digest` | ✅ |
+| `csp_hmac_memory` | `hmac::mac_full` / `mac` | ✅ returns a sized array |
+| `csp_hmac_set_key` | `hmac::derive_key` | ✅ |
+| `csp_hmac_append` / `verify` | `hmac::append` / `verify_over` | ✅ **added during this audit** |
+
+**Faithful:** yes. The differential suite checks CRC-32C over random buffers, SHA-1 with
+lengths clustered on the 55/56 and 64-byte padding boundaries, and HMAC with key lengths
+straddling the 64-byte block where the key is hashed rather than padded — all byte-identical.
+
+**Rusty:** yes. Sized return arrays instead of unsized out-parameters, `Result` instead of
+an int code, and `Coverage` as an explicit enum rather than a `bool include_header`.
+
+**Found during the audit — a real gap in the port.** `csp_hmac_append` and
+`csp_hmac_verify` take an `include_header` flag, exactly the two-coverage structure CRC32
+has, and the port only ever authenticated the payload. Mismatching coverage makes **every
+packet fail authentication with no indication why**. Added `mac_over`, `append` and
+`verify_over` taking [`Coverage`], with tests that the two are not interchangeable, that
+header coverage actually covers the header (otherwise the flag is decorative and a tampered
+header authenticates), and that payload-only genuinely ignores it.
+
+**Three defects in the C, recorded not reported:**
+
+1. **`csp_hmac_verify` uses `memcmp`.** With a 32-bit tag, a comparison that stops at the
+   first wrong byte reduces a 2^32 forgery to roughly 4 × 2^8 attempts, and a spacecraft
+   link has no rate limit an attacker must respect. The port compares in constant time.
+2. **`csp_hmac_verify`'s length check does not match the branch it guards.** It tests
+   `packet->length < CSP_HMAC_LENGTH`, then in the `include_header` branch computes
+   `frame_length - CSP_HMAC_LENGTH`. A packet with `length >= 4` but `frame_length < 4`
+   underflows that subtraction to roughly 4 billion and hashes far past the buffer.
+3. **`csp_hmac_memory` writes 20 bytes through an unsized pointer** while
+   `CSP_HMAC_LENGTH` is 4 (`SCOPE.md` 4), and an empty key leaves the output untouched
+   (`SCOPE.md` 5).
+
+**Deviations:** `SCOPE.md` 4, 5, plus `crc32::Coverage` being explicit where the C's
+verifier silently falls back (`SCOPE.md`, KISS/`CSP_21` note).
+
+**Tests:** 183 in `csp-core`, up from 174.
