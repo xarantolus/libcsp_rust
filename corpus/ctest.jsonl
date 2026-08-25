@@ -1,1 +1,5 @@
 {"suite":"rdp","case":"isn_is_a_function_of_the_clock","verdict":"c_only","observed":{"clock_ms":1234567,"snd_iss":17867,"snd_nxt":17868,"snd_una":17867}}
+{"suite":"dedup","case":"off_suppresses_nothing","verdict":"must_match","observed":{"delivered_of_two":2,"forwarded_of_two":2}}
+{"suite":"dedup","case":"fwd_suppresses_only_forwarded","verdict":"must_match","observed":{"delivered_of_two":2,"forwarded_of_two":1}}
+{"suite":"dedup","case":"incoming_suppresses_only_local","verdict":"must_match","observed":{"delivered_of_two":1,"forwarded_of_two":2}}
+{"suite":"dedup","case":"all_suppresses_both","verdict":"must_match","observed":{"delivered_of_two":1,"forwarded_of_two":1}}

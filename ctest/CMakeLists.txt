@@ -48,6 +48,7 @@ target_sources(ctest PRIVATE
   suite_hmac.c
   suite_rdp.c
   suite_promisc.c
+  suite_dedup.c
 )
 
 target_sources(ctest PRIVATE
