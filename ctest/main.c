@@ -12,6 +12,8 @@
  * second test to call csp_promisc_enable() gets CSP_ERR_NOMEM, because the queue from
  * the first is still registered. Pair it with CK_RUN_CASE.
  */
+#include "trace.h"
+
 #include <check.h>
 #include <getopt.h>
 #include <stdio.h>
@@ -25,6 +27,7 @@ Suite * promisc_suite(void);
 
 static struct option long_options[] = {
 	{"verbose", no_argument, 0, 'V'},
+	{"trace", required_argument, 0, 't'},
 	{"help", no_argument, 0, 'h'},
 	{0, 0, 0, 0},
 };
@@ -32,19 +35,24 @@ static struct option long_options[] = {
 static void print_help(void) {
 	printf("Usage: ctest [options]\n");
 	printf("Run the C oracle suites against the real libcsp.\n\n");
-	printf("  -V, --verbose   print each test as it runs\n");
-	printf("  -h, --help      print this help\n\n");
+	printf("  -V, --verbose      print each test as it runs\n");
+	printf("  -t, --trace PATH   record what the C did, as JSON Lines\n");
+	printf("  -h, --help         print this help\n\n");
 	printf("Environment: CK_FORK=no, CK_RUN_SUITE=<name>, CK_RUN_CASE=<name>\n");
 }
 
 int main(int argc, char * argv[]) {
 	enum print_output verbosity = CK_NORMAL;
+	const char * trace_path = NULL;
 	int opt;
 
-	while ((opt = getopt_long(argc, argv, "Vh", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "Vt:h", long_options, NULL)) != -1) {
 		switch (opt) {
 			case 'V':
 				verbosity = CK_VERBOSE;
+				break;
+			case 't':
+				trace_path = optarg;
 				break;
 			case 'h':
 				print_help();
@@ -54,6 +62,10 @@ int main(int argc, char * argv[]) {
 				return EXIT_FAILURE;
 		}
 	}
+
+	/* Opened before any test forks, so every child inherits the descriptor and appends to
+	 * the same file. */
+	ctest_trace_open(trace_path);
 
 	SRunner * sr = srunner_create(NULL);
 	srunner_add_suite(sr, queue_suite());

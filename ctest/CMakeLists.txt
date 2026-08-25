@@ -41,6 +41,7 @@ add_executable(ctest)
 target_sources(ctest PRIVATE
   clock.c
   hooks.c
+  trace.c
   main.c
   suite_queue.c
   suite_buffer.c
