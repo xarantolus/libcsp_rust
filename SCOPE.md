@@ -269,6 +269,50 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### One spoofed RST dropped the link — the port had no blind-reset defence
+
+2026-08-26. Thirty tests in `suite_rdp.c` and not one sent a reset: teardown was the half of
+the protocol nothing measured, on either side.
+
+`csp_rdp.c` honours a reset only **in sequence** — `rx_header->seq_nr == conn->rdp.rcv_cur +
+1`. Then it moves to CLOSE-WAIT, answers `ACK|RST`, and `discard_close`s into
+`csp_conn_close`, which releases what the connection was holding. An RST with any other
+sequence number takes the branch spelled *"RST out of sequence, keep connection open"*.
+
+`Connection::on_packet` honoured **any** reset, in any live state, and answered nothing.
+Three defects, worst first:
+
+1. **A blind reset dropped the connection.** An injector who could put a CSP packet on the
+   wire with the right addresses and ports — and no knowledge of the sequence number — ended
+   the link with one frame. On a spacecraft that is a pass terminated by a single spoofed
+   packet. `rdp::an_out_of_sequence_rst_is_ignored` measures it: against the C the next data
+   packet still gets a plain `ACK`; against the port as it stood, nothing came back at all.
+2. **An in-sequence reset was never acknowledged.** The C replies `ACK|RST` so the peer
+   learns its close arrived; the port closed silently.
+3. **In CLOSE-WAIT the C answers everything with `ACK|RST`** (`case RDP_CLOSE_WAIT`, "Send
+   back a reset"); the port said nothing, leaving a peer that kept transmitting with no
+   indication the connection was over.
+
+The records compare flags rather than booleans, because "something came back" cannot separate
+an `ACK` on a live connection from an `ACK|RST` on a dead one — the first version of this test
+did exactly that, and also read `tx_flags` after a case where nothing was sent, reporting the
+handshake's stale `SYN|ACK` as the reply to a reset.
+
+**A fourth unit test asserted the hole.** `rst_closes_from_every_live_state` used `seq_nr: 0`
+— out of sequence — and required a close, so it pinned the vulnerability in place and would
+have blocked the fix. It is now `a_reset_is_honoured_only_in_sequence` and checks both halves.
+That is the fourth test written from my reading of the C that had to be corrected alongside
+the code it was guarding, and the second in two days.
+
+**The sweep caught a coverage regression in the fix itself.** Routing an established reset to
+`SendControl` left the `Action::Closed` arm's drain reachable only by connections with nothing
+queued, so `drain: the rst path sizes by RXQ` silently stopped testing anything. Re-pointed at
+the new drain, where `router::a_reset_connection_returns_every_buffer_it_held` notices it.
+
+**Not reproduced, and said so rather than added from reading:** in CLOSE-WAIT the C
+range-checks `ack_nr` against the send window before replying and discards silently if it is
+outside. No record distinguishes that, so the port does not implement it.
+
 ### The port reaped idle RDP connections; libcsp does not
 
 2026-08-26, from the one gap the untraced sweep left open — `conn_timeout` adoption.
@@ -1166,7 +1210,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**104 of 132**.
+**106 of 134**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that

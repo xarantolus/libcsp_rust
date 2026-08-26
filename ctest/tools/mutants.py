@@ -167,9 +167,13 @@ MUTANTS = [
   # Scratch arrays for draining a connection's receive queue. Every one of these APIs
   # refuses rather than partially draining -- a slot removed but not reported is a slot
   # nobody releases -- so an array shorter than one queue silently frees nothing.
-  ("drain: the rst path sizes by RXQ", "csp/src/router.rs",
-   "                let mut drained = [0u16; RXQ];\n                match self.conns.close(handle, &mut drained) {",
-   "                let mut drained = [0u16; 8];\n                match self.conns.close(handle, &mut drained) {"),
+  # Re-pointed 2026-08-26. This used to shrink the array in the `Action::Closed` arm, which
+  # an in-sequence RST reached; a reset now answers `ACK|RST` and drains from `SendControl`
+  # instead, so that arm only ever sees connections with nothing queued and the old mutation
+  # went dead. The sweep is what noticed.
+  ("drain: an answered reset releases what was queued", "csp/src/router.rs",
+   "                if reset_established {\n                    while let Ok(Some(slot)) = self.conns.dequeue_rx(handle) {",
+   "                if false {\n                    while let Ok(Some(slot)) = self.conns.dequeue_rx(handle) {"),
   ("drain: the idle sweep sizes by RXQ", "csp/src/router.rs",
    "        let mut drained = [0u16; RXQ];\n        let (closed, n) = self\n",
    "        let mut drained = [0u16; 1];\n        let (closed, n) = self\n"),
@@ -324,6 +328,14 @@ MUTANTS = [
   ("rdp: only an unestablished connection times out", "csp-core/src/rdp.rs",
    "                if self.state != State::Open\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout",
    "                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout"),
+  # The blind-reset defence. One injected frame with the right addresses and ports must
+  # not be able to drop a link when the sequence number is wrong.
+  ("rdp: a reset is honoured only in sequence", "csp-core/src/rdp.rs",
+   "                _ if h.seq_nr == self.rcv_cur.wrapping_add(1) => {",
+   "                _ if true => {"),
+  ("rdp: a reset is answered", "csp-core/src/rdp.rs",
+   "                    self.state = State::CloseWait;\n                    return Action::SendControl(Header {\n                        flags: ACK | RST,",
+   "                    self.state = State::CloseWait;\n                    return Action::SendControl(Header {\n                        flags: ACK,"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
