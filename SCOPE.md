@@ -676,6 +676,26 @@ a table to hand, which is what the C's parser does, and it is deliberately not i
 mutation suite since nothing could notice it. The netmask check is the one that mattered,
 because `set` clamps instead of refusing.
 
+### The tap's ownership rules were asserted eight times and recorded none
+
+`promisc_read_transfers_ownership` makes eight `ck_assert`s about what
+`csp_promisc_add`/`csp_promisc_read` do with buffers, and recorded nothing — so the port
+was never compared on any of it. Ownership is a leak on one side and a buffer handed out
+twice on the other, and neither shows in the `tapped`/`delivered`/`forwarded` counts the
+other `promisc::` records carry.
+
+Four properties, all counted in pool buffers and payload bytes rather than in queue state:
+the tap **clones** rather than aliasing, `read` gives ownership away so releasing the
+packet returns the buffer, a second read yields nothing, and the source stays the caller's.
+The port matches the C on all of them.
+
+`promisc::two_tapped_packets_come_back_once_each` exists because the single-packet case
+cannot see the interesting failure. A `read` that hands the packet over but leaves its slot
+occupied passes it — the queue count says empty, so the stale entry is never reached. It
+only shows on the second round, when the count rises again and the stale slot is handed out
+ahead of the new one, giving the application a buffer already released. That mutation was
+unnoticed until the two-packet record existed.
+
 ### The C asserted the SYN clamping and recorded none of it
 
 `rdp_syn_options_are_bounded_above`, `_below` and `keeps_valid_options` make twenty
