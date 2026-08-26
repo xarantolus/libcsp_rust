@@ -530,12 +530,13 @@ fn replay_eth(input: &EthInput) -> EthObserved {
         let bytes = unhex(hex);
         let outcome = (|| -> Result<(), ()> {
             let h = eth::Header::decode(&bytes).map_err(|_| ())?;
-            if !h.is_csp() {
-                return Err(());
-            }
+            // The whole payload, not a slice pre-trimmed to `seg_size`, and no ethertype
+            // test here. Both used to be done *in this closure* -- so removing either
+            // guard from `Reassembler::push` left every `eth::` record green, because the
+            // replay was still refusing the frame itself. The same shape that once hid a
+            // missing CMP server: the test contained the production logic.
             let payload = bytes.get(eth::HEADER_LEN..).ok_or(())?;
-            let seg = payload.get(..h.seg_size as usize).ok_or(())?;
-            r.push(&h, 0, seg, &mut out).map_err(|_| ())?;
+            r.push(&h, 0, payload, &mut out).map_err(|_| ())?;
             Ok(())
         })();
         if outcome.is_err() {
@@ -1502,6 +1503,13 @@ fn replay_rtable(case: &str) -> serde_json::Value {
     }
 }
 
+/// An application send, driven through `Node::sendto` the way the C drives `csp_sendto`.
+///
+/// This used to call `Node::resolve` and report `"buffers_lost": 0` as a literal. Two
+/// things were wrong with that: nothing was ever sent, so the send path was not exercised
+/// at all -- only the resolver -- and the buffer figure the C measures with
+/// `before - csp_buffer_remaining()` was a constant that could not move however badly the
+/// port leaked.
 fn replay_node_send(case: &str) -> serde_json::Value {
     type S = csp::CspStorage<8, 16, 264, 48, 32>;
     let storage = S::new();
@@ -1519,6 +1527,10 @@ fn replay_node_send(case: &str) -> serde_json::Value {
         other => panic!("no node-send replay for {other}"),
     };
 
+    let before = n.buffers_free();
+
+    // Every destination, as `csp_send_direct` fans out -- and then the actual send, so a
+    // buffer the send path fails to release shows up below.
     let dests = n.resolve(dst, None);
     let (frames, left_by, dst_on_wire) = match dests {
         Ok(d) => (
@@ -1539,11 +1551,17 @@ fn replay_node_send(case: &str) -> serde_json::Value {
         Err(_) => (0, Vec::new(), Vec::new()),
     };
 
+    let p = n.packet().expect("the pool is empty");
+    let out = n.sendto(2, dst, 12, 40, 0, p).expect("sendto");
+    // The caller owns the packet whatever the outcome; dropping it is what an interface
+    // driver does once the frame is on the wire.
+    drop(out.into_packet());
+
     serde_json::json!({
         "frames": frames,
         "left_by": left_by,
         "dst_on_wire": dst_on_wire,
-        "buffers_lost": 0,
+        "buffers_lost": before as i64 - n.buffers_free() as i64,
     })
 }
 

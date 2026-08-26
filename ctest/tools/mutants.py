@@ -18,7 +18,7 @@ Usage: `just mutants`. Each mutation is applied and reverted in turn; a crash mi
 the tree dirty, so check `git status` if it is interrupted.
 """
 
-import pathlib, re, subprocess
+import json, pathlib, re, subprocess
 
 MUTANTS = [
   ("cmp: request length gate", "csp-core/src/cmp.rs",
@@ -237,10 +237,35 @@ MUTANTS = [
   ("ifstats: a receive error is charged to its link", "csp/src/router.rs",
    "                        if let Some(e) = ifaces.get_mut(ingress) {\n                            e.stats.rx_error += 1;\n                        }",
    "                        {}"),
+  # The Ethernet receive path's refusals. Twelve `eth::` records existed that no mutation
+  # could move -- not because they measure nothing, but because nothing was breaking the
+  # guards they cover. A malformed frame is the one input a peer fully controls.
+  ("eth: a segment must be the length it claims", "csp-core/src/eth.rs",
+   "        if payload.len() != h.seg_size as usize {",
+   "        if false && payload.len() != h.seg_size as usize {"),
+  ("eth: a zero-length transfer is refused", "csp-core/src/eth.rs",
+   "                if h.packet_length == 0 {\n                    return Err(Error::ZeroTotal);\n                }",
+   "                if false {\n                    return Err(Error::ZeroTotal);\n                }"),
+  ("eth: a foreign ethertype is refused", "csp-core/src/eth.rs",
+   "        if !h.is_csp() {\n            return Err(Error::UnexpectedEtherType { got: h.ethertype });\n        }",
+   "        if false {\n            return Err(Error::UnexpectedEtherType { got: h.ethertype });\n        }"),
+  ("eth: a zero-length segment is refused", "csp-core/src/eth.rs",
+   "        if h.seg_size == 0 {\n            return Err(Error::EmptyFragment);\n        }",
+   "        if false {\n            return Err(Error::EmptyFragment);\n        }"),
+  ("eth: a transfer larger than the buffer is refused up front", "csp-core/src/eth.rs",
+   "                if h.packet_length as usize > out.len() {",
+   "                if false && h.packet_length as usize > out.len() {"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),
 ]
+
+# Every corpus record that some mutation made fail. A record that never appears here is
+# one no mutation in this suite can move -- either it is measuring something nothing
+# touches, or it is not measuring the port at all. `replay_node_send` reported
+# `"buffers_lost": 0` as a literal for months, so its two records were in the second
+# category and looked exactly like the first.
+fired = set()
 
 for name, path, old, new in MUTANTS:
     p = pathlib.Path(path)
@@ -262,7 +287,9 @@ for name, path, old, new in MUTANTS:
         print(f"{name:34s} did not compile")
         continue
     # Corpus divergences are the two-space-indented "suite::case" lines the runner prints.
-    records = len(re.findall(r"^  ([a-z_]+::[a-z_0-9]+)", out, re.M))
+    named = re.findall(r"^  ([a-z_]+::[a-z_0-9]+)", out, re.M)
+    fired.update(named)
+    records = len(named)
     # Any failing test, corpus or unit, opens a "---- <name> stdout ----" block. If the
     # corpus noticed, its block is one of them; otherwise every block is a unit test.
     blocks = len(re.findall(r"^---- (\S+) stdout ----", out, re.M))
@@ -276,3 +303,21 @@ for name, path, old, new in MUTANTS:
         where = "  0"
     flag = "   <-- NOTHING NOTICED" if (records == 0 and unit_only == 0) else ""
     print(f"{name:34s} {where} notice{flag}")
+
+# --- which records no mutation could move -------------------------------------------
+corpus = pathlib.Path(__file__).resolve().parents[2] / "corpus" / "ctest.jsonl"
+all_records = set()
+for line in corpus.read_text().splitlines():
+    if not line.strip():
+        continue
+    r = json.loads(line)
+    all_records.add(f"{r['suite']}::{r['case']}")
+
+never = sorted(all_records - fired)
+print()
+print(f"records moved by some mutation: {len(fired)}/{len(all_records)}")
+if never:
+    print("records no mutation could move -- each is either measuring something no")
+    print("mutation touches, or not measuring the port at all:")
+    for n in never:
+        print(f"    {n}")

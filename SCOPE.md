@@ -664,6 +664,38 @@ The rest of the parser is faithful, including the parts that surprise:
 
 Both are pinned by `rtable::` records rather than by reading.
 
+### Which records can actually fail, measured
+
+`just mutants` now reports **how many corpus records some mutation was able to move**, and
+lists the ones none could. The file header had long claimed "a replay that does not call
+into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
+only checks that a replay *exists*. The number turns that prose into a figure: currently
+**78 of 109**.
+
+It is a measure of the *mutation suite's* reach, not proof that the other 31 are vacuous —
+most are guards no mutation happens to break. But it found two that were:
+
+- **`replay_eth` contained its own copies of two production checks.** It tested
+  `!h.is_csp()` and sliced `payload.get(..seg_size)` inside the replay closure, before
+  calling `Reassembler::push`. Removing either guard from the port left every `eth::`
+  record green, because the *test* was still refusing the frame. This is the shape that
+  once hid a missing CMP server entirely: the test contained the production logic. Both
+  copies are gone; the replay hands `push` the whole payload and lets it judge.
+- **`replay_node_send` reported `"buffers_lost": 0` as a literal** and called
+  `Node::resolve` without ever sending anything, so the send path was not exercised and
+  the C's `before - csp_buffer_remaining()` figure could not move however badly the port
+  leaked. It now sends through `Node::sendto` and counts the pool; leaking the packet is
+  caught by both its records.
+
+Two caveats worth stating rather than leaving implied. `eth::a_foreign_ethertype_is_refused_before_the_length_check`
+sends a four-byte frame, so the header-length check refuses it whether or not the ethertype
+is examined — the record cannot observe the ordering its name claims;
+`eth::only_the_ethertype_makes_an_otherwise_valid_frame_refused` was added to do that, and
+does. And `eth::a_zero_length_transfer_is_refused` still does not discriminate: with
+`packet_length == 0` the `< min_len` guard refuses the frame anyway, so removing the
+zero-total check is caught by a different record, not by the one named after it. The guard
+is covered; that record is not what covers it.
+
 ### Per-interface counters existed as a field and were never written
 
 `IfList::Entry::stats` is public, has the ten counters `csp_iface_t` has, and nothing
