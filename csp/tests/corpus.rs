@@ -858,6 +858,79 @@ fn replay_promisc(case: &str) -> serde_json::Value {
     })
 }
 
+// --- route ----------------------------------------------------------------------------
+
+/// Forwarding when more than one destination matches.
+///
+/// Counted as frames leaving and the interfaces they left by — the only thing a peer on a
+/// redundant link can observe about whether the redundancy is being used.
+fn replay_route(case: &str) -> serde_json::Value {
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+
+    const INGRESS: u16 = 40;
+    const LINK_A: u16 = 8;
+    const LINK_B: u16 = 9;
+    const TARGET: u16 = 10;
+
+    let (two_links, defaults, dst) = match case {
+        "one_owning_link_sends_one_frame" => (false, false, TARGET),
+        "two_owning_links_send_two_frames" => (true, false, TARGET),
+        "two_default_interfaces_send_two_frames" => (true, true, 3000),
+        other => panic!("no route replay for {other}"),
+    };
+
+    let pool = P::new();
+    let mut r = R::new(9999, Version::V2); // an address no interface has
+    let ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", INGRESS, 12, false).unwrap();
+        l.add("LINK_A", LINK_A, 12, defaults).unwrap();
+        if two_links {
+            let b = if defaults { 200 } else { LINK_B };
+            l.add("LINK_B", b, 12, defaults).unwrap();
+        }
+        l
+    };
+
+    let before = pool.available();
+    let mut p = pool.acquire(0).unwrap();
+    p.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: PEER_ADDR,
+        dst,
+        dport: TEST_PORT,
+        sport: 40,
+    });
+    p.set_payload(b"onward").unwrap();
+    r.receive(p, 0);
+
+    // `work` is a step: drain it until it stops producing, so a router that fans out over
+    // several calls is counted the same as one that reports them together.
+    let mut left_by: Vec<String> = Vec::new();
+    loop {
+        match r.work(&pool, &ifaces, 0) {
+            Routed::Forwarded { iface, packet, .. } => {
+                let name = ifaces
+                    .get(iface)
+                    .map(|e| e.name.to_lowercase())
+                    .unwrap_or_default();
+                left_by.push(name);
+                drop(pool.from_index(packet));
+            }
+            Routed::Idle => break,
+            _ => break,
+        }
+    }
+
+    serde_json::json!({
+        "frames": left_by.len(),
+        "left_by": left_by,
+        "buffers_lost": before as i64 - pool.available() as i64,
+    })
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -1117,6 +1190,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 ))
             }
         }
+        "route" => Some((replay_route(&rec.case), rec.case.clone())),
         "promisc" => Some((replay_promisc(&rec.case), rec.case.clone())),
         "security" => {
             let input: SecurityInput = serde_json::from_value(rec.input.clone()).unwrap();

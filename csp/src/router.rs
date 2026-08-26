@@ -105,6 +105,12 @@ pub enum DropReason {
     Refused(Refusal),
 }
 
+/// How many interfaces one packet can be forwarded to at once.
+///
+/// `csp_send_direct` has no limit — it walks the whole interface list. Four is what a node
+/// with redundant links plausibly has, and exceeding it is counted rather than ignored.
+pub const MAX_FANOUT: usize = 4;
+
 /// Counters the router keeps.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(missing_docs)]
@@ -146,6 +152,16 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     promisc_len: usize,
     promisc_enabled: bool,
     promisc_missed: u32,
+    /// Forwards produced by one packet but not yet handed to the caller.
+    ///
+    /// `csp_send_direct` does not choose an interface: it iterates every match and clones
+    /// the packet for each, so two links owning a destination carry two frames. `Routed`
+    /// has nowhere to put a set, so the extras wait here and [`Router::work`] hands them
+    /// out one per call — a step at a time, like everything else it does.
+    pending_tx: [Option<(u8, u16, u16)>; MAX_FANOUT],
+    pending_len: usize,
+    /// Fan-out destinations dropped because the pool had no buffer to clone into.
+    pending_missed: u32,
     /// Counters.
     pub counters: Counters,
     /// Options every bound port requires of incoming packets.
@@ -196,6 +212,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             promisc_len: 0,
             promisc_enabled: false,
             promisc_missed: 0,
+            pending_tx: [None; MAX_FANOUT],
+            pending_len: 0,
+            pending_missed: 0,
             counters: Counters::default(),
             endpoint_opts: 0,
             hmac_key: None,
@@ -358,6 +377,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ifaces: &crate::iflist::IfList<N, A>,
         now_ms: u32,
     ) -> Routed {
+        // A packet that fanned out to several interfaces is reported one at a time, so the
+        // extras come out before the next input is looked at.
+        if let Some(r) = self.pop_pending() {
+            return r;
+        }
+
         let Some((packet, ingress)) = self.qfifo.pop(pool) else {
             return Routed::Idle;
         };
@@ -565,9 +590,18 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ifaces: &crate::iflist::IfList<N, A>,
         ingress: u8,
     ) -> Routed {
+        // Every match, not the last one seen. `csp_send_direct` sends to all of them.
+        let mut dests: [(u8, u16); MAX_FANOUT] = [(0, 0); MAX_FANOUT];
+        let mut n_dests = 0usize;
+        let mut push = |d: (u8, u16), n: &mut usize| {
+            if *n < MAX_FANOUT {
+                dests[*n] = d;
+                *n += 1;
+            }
+        };
+
         // 1. A local subnet owns the destination.
         let mut local_found = false;
-        let mut chosen: Option<(u8, u16)> = None;
         for idx in ifaces.indices() {
             if !ifaces.is_within_subnet(id.dst, idx) {
                 continue;
@@ -576,10 +610,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if Self::split_horizon(ifaces, idx, ingress) {
                 continue;
             }
-            chosen = Some((idx, rtable::NO_VIA));
+            push((idx, rtable::NO_VIA), &mut n_dests);
         }
         if local_found {
-            return self.finish_forward(chosen, packet);
+            return self.finish_forward(&dests[..n_dests], packet);
         }
 
         // 2. The routing table.
@@ -597,10 +631,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if Self::split_horizon(ifaces, r.iface, ingress) {
                 continue;
             }
-            chosen = Some((r.iface, r.via));
+            push((r.iface, r.via), &mut n_dests);
         }
         if route_found {
-            return self.finish_forward(chosen, packet);
+            return self.finish_forward(&dests[..n_dests], packet);
         }
 
         // 3. Default interfaces.
@@ -609,9 +643,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if !e.is_default || Self::split_horizon(ifaces, idx, ingress) {
                 continue;
             }
-            chosen = Some((idx, rtable::NO_VIA));
+            push((idx, rtable::NO_VIA), &mut n_dests);
         }
-        self.finish_forward(chosen, packet)
+        self.finish_forward(&dests[..n_dests], packet)
     }
 
     /// `is_same_subnet`: the same interface, or one whose address falls inside the
@@ -632,25 +666,61 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     }
 
     #[cfg(feature = "rtable")]
+    fn push_pending(&mut self, iface: u8, via: u16, slot: u16) {
+        if self.pending_len < MAX_FANOUT {
+            self.pending_tx[self.pending_len] = Some((iface, via, slot));
+            self.pending_len += 1;
+        } else {
+            self.pending_missed += 1;
+        }
+    }
+
+    /// The next forward waiting to be reported, in the order the destinations matched.
+    fn pop_pending(&mut self) -> Option<Routed> {
+        if self.pending_len == 0 {
+            return None;
+        }
+        let (iface, via, packet) = self.pending_tx[0]?;
+        self.pending_tx.copy_within(1..self.pending_len, 0);
+        self.pending_tx[self.pending_len - 1] = None;
+        self.pending_len -= 1;
+        self.counters.forwarded += 1;
+        Some(Routed::Forwarded { iface, via, packet })
+    }
+
+    /// Fan-out destinations that had no buffer to be cloned into.
+    pub const fn fanout_missed(&self) -> u32 {
+        self.pending_missed
+    }
+
+    // Only the routing path fans out; without `rtable` `forward` refuses immediately, so
+    // this and `push_pending` would be dead code there. `pop_pending` stays unconditional
+    // because `work` calls it either way and simply finds nothing queued.
+    #[cfg(feature = "rtable")]
+    /// Queue one forward per destination and report the first.
+    ///
+    /// The last destination takes the original packet and the earlier ones take clones,
+    /// which is what `csp_send_direct` does with its one-behind `next_iface`. A clone that
+    /// cannot be made is counted, not silently dropped — and unlike the C, which passes the
+    /// result of `csp_buffer_clone` to `send_packet` with no NULL check, running out of
+    /// buffers here costs a destination rather than the node.
     fn finish_forward<'p, const B: usize, const SZ: usize>(
         &mut self,
-        chosen: Option<(u8, u16)>,
+        dests: &[(u8, u16)],
         packet: Packet<'p, B, SZ>,
     ) -> Routed {
-        match chosen {
-            Some((iface, via)) => {
-                self.counters.forwarded += 1;
-                Routed::Forwarded {
-                    iface,
-                    via,
-                    packet: packet.into_index(),
-                }
-            }
-            None => {
-                self.counters.no_route += 1;
-                Routed::Dropped(DropReason::NoRoute)
+        let Some((&last, rest)) = dests.split_last() else {
+            self.counters.no_route += 1;
+            return Routed::Dropped(DropReason::NoRoute);
+        };
+        for &(iface, via) in rest {
+            match packet.deep_copy() {
+                Some(c) => self.push_pending(iface, via, c.into_index()),
+                None => self.pending_missed += 1,
             }
         }
+        self.push_pending(last.0, last.1, packet.into_index());
+        self.pop_pending().expect("a destination was just queued")
     }
 
     #[cfg(not(feature = "rtable"))]

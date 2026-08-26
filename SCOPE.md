@@ -862,15 +862,28 @@ biased above 31 so the cases could not have been carried by a v1 header.
 C shim would need `csp_alias_add` wired up. It rides on `find_by_addr`, which the
 interface-address test does exercise.
 
-**Still open:** `Routed::Forwarded` carries one destination, so the fan-out — a clone to
-every tied route, or to every default interface — is still single-path even though
-`find_all` and the default scan now both run. Closing it needs `Routed` to carry a set,
-which is a design change rather than a patch.
+**Closed on 2026-08-26.** `csp_send_direct` never picks an interface: it walks every match
+and **clones the packet for each**, keeping one behind so the last match gets the original.
+Measured on the real libcsp by `ctest/suite_route.c`, counting frames and the interfaces
+they left by:
 
-A smaller thing inside it, noticed on 2026-08-25: when several destinations tie,
-`Router::forward` keeps the **last** one its loop saw, while `Node::resolve` returns them
-in interface-index order for the caller to pick from — normally the first. So a node with
-two tied routes can forward a packet out one interface and send an identical one out the
-other, depending on which path it took. Neither is wrong against the C, which sends to
-both; they should at least agree with each other, and the test that would catch it is a
-node-level one with two tied routes, which does not exist yet.
+| | frames | left by |
+|---|---|---|
+| one link owning the destination | 1 | `LINK_A` |
+| two links owning it | **2** | `LINK_A`, `LINK_B` |
+| two default interfaces | **2** | `LINK_A`, `LINK_B` |
+
+The port sent **one frame where the C sends two**, in both the subnet scan and the default
+scan, and the one it sent was the *last* match — `chosen = Some(..)` overwrote on each
+iteration. That is the entire point of a redundant link quietly not happening: every test
+asking "did it forward" passed, because it did forward, once.
+
+`Router` now keeps a small pending-forward queue. `finish_forward` takes the whole
+destination list, clones for all but the last, and `work` hands them out one per call — a
+step at a time, like everything else it does. A clone the pool cannot supply is counted in
+`fanout_missed` rather than dropped silently; the C passes `csp_buffer_clone`'s result
+straight to `send_packet` with no NULL check, so there running out of buffers costs the
+node rather than a destination.
+
+`just mutants` keeps it honest: collapsing the fan-out back to a single destination is
+caught by two records.
