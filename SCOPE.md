@@ -1926,3 +1926,38 @@ emits the frame *before* it blocks on the semaphore its router task would releas
 frame is comparable even though the call is not. Flags, acknowledgement and option-block
 length match. The sequence number is excluded on purpose — it is the ISN, and the port
 deliberately does not reproduce `rand_r(csp_get_ms())`.
+
+**Closed on 2026-08-26: the C node could not answer.** Every node-level differential test
+drove the *server* direction — a frame in, a delivery or a forward out. `shim_node_recv`
+accepts a connection, reads the packet and closes; nothing in the harness could make a real
+C node **reply**. That is the structural reason the client direction shipped broken: there
+was no way to observe it.
+
+`shim_node_serve` closes it. It accepts on a bound well-known-service port and hands the
+packet to `csp_service_handler`, which answers with `csp_sendto_reply` — so the reply is
+composed by libcsp, not by the harness. Linking it pulled in `csp_cmp/*.c`,
+`arch/posix/csp_system.c` and `arch/posix/csp_clock.c`, which had been compiled and
+dead-stripped because nothing referenced the handler.
+
+Two round-trips now run the port as a client against a real C server:
+
+- `a_reply_from_a_real_c_node_reaches_the_connection_that_asked` — the port connects, sends,
+  libcsp's `CSP_PING` handler echoes, and the reply is read off the connection that asked.
+  Reverting the endpoint fix above makes it fail with nothing delivered.
+- `the_cmp_client_understands_what_a_real_c_node_answers` — `client::cmp_request` builds an
+  `IDENT`, `csp_cmp_handler` answers, `client::check_cmp_reply` and `cmp::Ident::decode`
+  read it. Both halves of the CMP client had only ever been tested against bytes this
+  repository composed. The reply is exactly `Ident::LEN` (93), and the assertion is on
+  `date`/`time` — the *last* two fields — because one byte of drift in any earlier field
+  width makes those unreadable. Narrowing `len::MODEL` by one byte fails the test.
+
+**Corrections along the way.** The ping test first read the request with `with_frame`
+without calling `prepend_header`, so it sent an empty frame and blamed the C node for
+answering nothing — `send` decides where a packet goes and does not frame it. And
+`cmp::Ident::decode` takes the whole message, header included (`Ident::LEN` counts those
+two bytes); passing only the body made a correct decoder look truncated. Both were mistakes
+in the test, and both initially looked like defects in the port.
+
+The CMP test also carried a `#[cfg(feature = "cmp")]` that `difftest` does not define, so it
+compiled to nothing and the run reported 7 passing tests as though all 8 had run. Caught by
+counting, not by reading the output.
