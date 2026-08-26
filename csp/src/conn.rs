@@ -330,6 +330,38 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         (closed, n)
     }
 
+    /// Close every open connection, releasing whatever each still holds.
+    ///
+    /// For teardown. Unlike [`close_port`](Self::close_port) and
+    /// [`expire_idle`](Self::expire_idle) this takes no predicate, because a node shutting
+    /// down has no reason to keep any of them — and a connection left open holds the
+    /// packets on its receive queue, which are pool buffers nobody will ever return.
+    ///
+    /// Stops when `drained` cannot hold another connection's queue; call again to continue.
+    pub fn close_all(&mut self, drained: &mut [u16]) -> (usize, usize) {
+        let mut closed = 0;
+        let mut n = 0;
+        for c in self.conns.iter_mut() {
+            if c.state != State::Open {
+                continue;
+            }
+            if drained.len() - n < c.rx_len {
+                break;
+            }
+            while c.rx_len > 0 {
+                if let Some(idx) = c.rx[c.rx_head].take() {
+                    drained[n] = idx;
+                    n += 1;
+                }
+                c.rx_head = (c.rx_head + 1) % RXQ;
+                c.rx_len -= 1;
+            }
+            c.reset();
+            closed += 1;
+        }
+        (closed, n)
+    }
+
     /// Close every connection idle for longer than `timeout_ms`, returning how many.
     ///
     /// Connection slots are the scarcest resource on the node; without this a peer that
