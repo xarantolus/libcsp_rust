@@ -606,6 +606,27 @@ int shim_node_serve(uint8_t port) {
  */
 void shim_node_set_dedup(int mode) { csp_conf.dedup = (uint8_t)mode; }
 
+/*
+ * The promiscuous tap: enable it, and drain what it saw.
+ *
+ * `csp_promisc_add` sits at `csp_route.c:252` -- *after* the deduplication check and
+ * *before* the `is_to_me` branch -- so the tap sees forwarded traffic as well as traffic
+ * for this node, and does not see a frame deduplication already suppressed. Both of those
+ * are orderings a port can get wrong while every individual piece works.
+ */
+int shim_node_promisc_enable(void) { return csp_promisc_enable(16); }
+
+/* Take one tapped packet, if any. Returns its payload length, or -1 when the tap is empty. */
+int shim_node_promisc_read(uint8_t * out, uint16_t * dst) {
+	csp_packet_t * p = csp_promisc_read(0);
+	if (p == NULL) { return -1; }
+	int n = (int)p->length;
+	memcpy(out, p->data, (size_t)n);
+	*dst = p->id.dst;
+	csp_buffer_free(p);
+	return n;
+}
+
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 
