@@ -65,6 +65,11 @@ MUTANTS = [
   ("conn: a connection is an endpoint too", "csp/src/router.rs",
    "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
    "        if !self.is_bound(id.dport) {"),
+  # An unacknowledged packet must be resent, and the resent frame has to be one a real C
+  # peer accepts -- only a peer notices a malformed retransmission.
+  ("rdp: an unacknowledged packet is resent", "csp/src/router.rs",
+   "                    TxAction::Retransmit { token, .. } => {",
+   "                    TxAction::Retransmit { token, .. } => { let _ = token; continue; }\n                    #[allow(unreachable_patterns)]\n                    TxAction::Retransmit { token, .. } => {"),
   # If the port stops acknowledging, a C peer's send window shuts after `window_size` and
   # never reopens -- so its later messages simply never arrive. Only a peer that originates
   # more than one window of data can see it.
