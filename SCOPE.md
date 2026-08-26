@@ -1983,3 +1983,32 @@ then a data packet. Restoring `Action::Opened` fails it on the third leg. The un
 `three_way_handshake_as_the_initiator` had asserted `Action::Opened` — encoding the missing
 frame as though it were correct, which is the self-referential shape this whole exercise
 exists to remove. It now asserts the `ACK` and cites the C line that sends it.
+
+**Closed on 2026-08-26: a reset connection was reported as back-pressure.** `Node::send`
+returned `Error::SendWindowFull` whenever `begin_send` declined, and `begin_send` declines
+for two unrelated reasons — the window is full, or the connection is not open.
+`csp_rdp_send` (`csp_rdp.c:863`) separates them: `CSP_ERR_RESET` when the state is not
+open, and it blocks only for the window. The two need different handling, and the port gave
+the caller no way to tell: `SendWindowFull` says "retry", so an application would retry for
+ever against a peer that had hung up.
+
+The variant's own documentation carried the contradiction in plain sight — "Either it is
+not open, or `snd_nxt` has reached …" one sentence, "*temporary*: the same packet on the
+same connection succeeds once an acknowledgement arrives" the next. Both were written here,
+and only one can be true. `Error::ConnectionReset` now covers the permanent half.
+
+Found while checking something else: whether a burst larger than one window survives, i.e.
+whether the peer's acknowledgements are consumed. **They are** — ten packets over a window
+of four, with `snd_una` advancing throughout, so that half was already right. The burst only
+exposed the error-reporting defect because the first attempt closed the C's connection
+underneath, and the port then reported "window full" for a connection that had been reset.
+
+`an_rdp_connection_sustains_traffic_and_reports_a_reset_as_a_reset` covers both halves.
+
+**A harness constraint this made explicit.** RDP leaves durable state on the C node — an
+open or half-closed connection, packets queued on it, buffers held — and libcsp has no
+per-test reset. Sharing a process with `node_v2.rs` made tests interfere: a SYN landed on a
+connection an earlier test had opened, and the buffer-accounting test counted connections it
+had never made. The RDP tests now live in `difftest/tests/node_rdp.rs`, a third binary, for
+the same reason `node_v2.rs` is separate from `diff.rs`. Each binds its own destination port
+so the two cannot alias each other's connections either.
