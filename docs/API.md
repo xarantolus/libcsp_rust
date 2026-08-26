@@ -247,10 +247,22 @@ for d in dests.as_slice() {
 
 `route_from` keeps the single-destination shape for the common case and returns the first.
 
-`resolve` applies **split horizon** to both paths: a destination on the interface the
-packet arrived on is skipped, or a forwarded packet goes straight back where it came from.
-And a routing-table match suppresses the default fallback entirely — even when split
-horizon leaves that match unusable — because the C returns as soon as `route_found` is set.
+`resolve` follows `csp_send_direct`'s order: an interface whose **subnet owns** the
+destination, then the routing table, then the defaults. Each stage that matches suppresses
+the ones after it — even when split horizon leaves the match unusable — because the C
+returns as soon as `local_found` or `route_found` is set. Skipping the subnet stage sends
+locally-attached traffic out a default link instead of the link it is attached to.
+
+**Split horizon** applies to all three: a destination on the interface the packet arrived
+on is skipped, or a forwarded packet goes straight back where it came from.
+
+Each `Destination` carries a `dst`, which is not always the address you asked for.
+`convert_broadcast` turns a routed (L3) broadcast into the local (L2) one — the maximum
+node id — as it reaches the interface, so a peer whose subnet is masked differently still
+recognises it. The rewrite is **sticky across a fan-out**: `csp_send_direct` keeps one
+`idout_copy` for the whole loop and only ever writes to it, so two interfaces owning a
+destination that is the broadcast of only the first put the rewritten address on both
+wires. That is measured, not inferred — `corpus/ctest.jsonl` records `[16383, 16383]`.
 
 Note how this composes with `IfList::check_default` (`csp_iflist_check_dfl`): if nothing is
 marked as a default, **every** interface except loopback becomes one. A node with no routes
