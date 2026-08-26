@@ -76,3 +76,6 @@
 {"suite":"conn","case":"a_closed_connection_can_be_used_again","verdict":"must_match","input":{"conn_max":8,"buffer_count":15,"rounds":3},"observed":{"accepted_total":24,"accepted_per_round":[8,8,8],"buffers_lost":0}}
 {"suite":"conn","case":"a_second_packet_reuses_the_same_connection","verdict":"must_match","input":{"packets_from_one_peer":2},"observed":{"connections":1,"packets_on_it":2}}
 {"suite":"conn","case":"a_connection_is_offered_to_the_application_only_once","verdict":"must_match","input":{"packets_after_accept":3},"observed":{"extra_offers":0}}
+{"suite":"route","case":"one_owning_link_sends_one_frame","verdict":"must_match","observed":{"frames":1,"left_by":["link_a"],"buffers_lost":0}}
+{"suite":"route","case":"two_owning_links_send_two_frames","verdict":"must_match","observed":{"frames":2,"left_by":["link_a","link_b"],"buffers_lost":0}}
+{"suite":"route","case":"two_default_interfaces_send_two_frames","verdict":"must_match","observed":{"frames":2,"left_by":["link_a","link_b"],"buffers_lost":0}}
