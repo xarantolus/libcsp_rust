@@ -56,6 +56,14 @@ cov:
 #
 # A mutation nothing notices is a hole. See ctest/tools/mutants.py for why counting
 # records is not the same as measuring anything.
+# Every public libcsp function is accounted for in ctest/tools/api_map.tsv.
+#
+# Module-name comparison is what produced the first false "the port is complete", missing
+# ~35 functions including the whole socket API. This is the function-level version, and it
+# fails on an unmapped function rather than quietly not noticing one.
+api:
+    python3 ctest/tools/api_coverage.py
+
 mutants:
     python3 ctest/tools/mutants.py
 
@@ -118,6 +126,7 @@ test:
 
 # The full pre-commit gate.
 check: canonical
+    python3 ctest/tools/api_coverage.py
     cargo test --workspace --all-features
     cargo clippy --workspace --all-features --tests -- -D warnings
     cargo fmt --all --check
