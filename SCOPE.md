@@ -664,6 +664,27 @@ The rest of the parser is faithful, including the parts that surprise:
 
 Both are pinned by `rtable::` records rather than by reading.
 
+### Per-interface counters existed as a field and were never written
+
+`IfList::Entry::stats` is public, has the ten counters `csp_iface_t` has, and nothing
+outside its own constructor ever touched it. An application reading it — or answering CMP
+`IF_STATS` from it, which is what it is for — got a permanent zero. That reads as "this link
+is idle", not as "this node does not count", which is the worse of the two failures.
+
+`csp_route_work` keeps three of them itself: `rx` and `rxbytes` for every packet it handles
+(`csp_route.c:229`, above the deduplication check, so a duplicate counts as received *and*
+then as dropped) and `drop` for one deduplication discards (`:244`). These are the router's,
+not the driver's — a driver only sees frames it handed up, and the drop happens after the
+packet has left it, so there is no other place they can come from.
+
+`Router::work` now takes `&mut IfList` and keeps all three. Measured against the C:
+`cmp::if_stats_counters_after_three_packets` (rx 4, rxbytes 31 — three six-byte packets plus
+the thirteen-byte `IF_STATS` request, which the router counts too) and the `ingress_drop`
+field now on all four `dedup::` records (0, 1, 1, 2 across the modes).
+
+`tx`/`txbytes` stay with `iface::Iface`, which already keeps them, because that is where the
+C keeps them too (`csp_io.c:287`).
+
 ### The minimal build was compiled, never run
 
 `just check` built `--no-default-features` for the embedded target and stopped there. Nothing

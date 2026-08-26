@@ -141,6 +141,12 @@ static void measure(unsigned int mode, const char * mode_name,
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("delivered_of_two", (int64_t)*delivered);
 		ctest_trace_int("forwarded_of_two", (int64_t)*forwarded);
+		/* The ingress interface's own drop counter. `csp_route_work` bumps it for every
+		   packet deduplication discards (csp_route.c:244), which is the only place a
+		   dropped duplicate is visible per link -- the driver never sees it, because the
+		   packet has already left the driver. A record carrying only the delivered and
+		   forwarded counts cannot tell a node that counts from one that does not. */
+		ctest_trace_int("ingress_drop", (int64_t)ingress_if.drop);
 		ctest_trace_obj_end();
 		ctest_trace_end();
 	}

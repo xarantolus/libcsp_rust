@@ -416,7 +416,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     pub fn work<const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         pool: &Pool<B, SZ>,
-        ifaces: &crate::iflist::IfList<N, A>,
+        ifaces: &mut crate::iflist::IfList<N, A>,
         now_ms: u32,
     ) -> Routed {
         // A packet that fanned out to several interfaces is reported one at a time, so the
@@ -429,6 +429,20 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             return Routed::Idle;
         };
 
+        // Count the packet on the interface it arrived on, before anything can discard it.
+        // `csp_route_work` does this at `csp_route.c:229` -- above the deduplication check,
+        // so a duplicate still counts as received and then also as dropped.
+        //
+        // These are the *router's* counters, not the driver's: a driver only sees frames it
+        // handed up, while `drop` happens here, after the packet has left it. Nothing wrote
+        // `IfList::Entry::stats` at all, so `IF_STATS` reported a permanent zero -- which
+        // reads as "this link is idle" rather than as "this node does not count".
+        let bytes = packet.with_payload(<[u8]>::len) as u32;
+        if let Some(e) = ifaces.get_mut(ingress) {
+            e.stats.rx += 1;
+            e.stats.rxbytes += bytes;
+        }
+
         // Deduplication happens inside route_one, after "is this for me?" — the mode says
         // *which* traffic to deduplicate, so the answer is needed first.
         self.route_one(pool, packet, ifaces, ingress, now_ms)
@@ -439,7 +453,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         &mut self,
         pool: &'p Pool<B, SZ>,
         packet: Packet<'p, B, SZ>,
-        ifaces: &crate::iflist::IfList<N, A>,
+        ifaces: &mut crate::iflist::IfList<N, A>,
         ingress: u8,
         now_ms: u32,
     ) -> Routed {
@@ -476,6 +490,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
             if framed.with_frame(|f| self.dedup.is_duplicate(f, now_ms)) {
                 self.counters.duplicates += 1;
+                // `csp_route.c:244`: the ingress interface counts it as dropped too.
+                if let Some(e) = ifaces.get_mut(ingress) {
+                    e.stats.drop += 1;
+                }
                 return Routed::Dropped(DropReason::Duplicate);
             }
             framed
@@ -1168,7 +1186,7 @@ mod tests {
     fn forwarding_does_not_need_the_routing_table() {
         let pool = P::new();
         let mut r = R::new(ME, Version::V2);
-        let ifaces = {
+        let mut ifaces = {
             let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
             l.add("INGRESS", 40, 12, false).unwrap();
             l.add("OWNS_IT", 8, 12, false).unwrap();
@@ -1176,7 +1194,7 @@ mod tests {
             l
         };
 
-        let send_to = |r: &mut R, dst: u16| -> Option<u8> {
+        let mut send_to = |r: &mut R, dst: u16| -> Option<u8> {
             let mut p = pool.acquire(0).unwrap();
             p.set_id(Id {
                 pri: 2,
@@ -1188,7 +1206,7 @@ mod tests {
             });
             p.set_payload(b"onward").unwrap();
             r.receive(p, 0);
-            match r.work(&pool, &ifaces, 0) {
+            match r.work(&pool, &mut ifaces, 0) {
                 Routed::Forwarded { iface, packet, .. } => {
                     drop(pool.from_index(packet));
                     Some(iface)
@@ -1226,7 +1244,7 @@ mod tests {
         let mut r = R::new(ME, Version::V2);
         r.bind(7).unwrap();
         // One interface, on a subnet that does not contain the peer, and not a default.
-        let ifaces = {
+        let mut ifaces = {
             let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
             l.add("LINK", 8, 12, false).unwrap();
             l
@@ -1262,7 +1280,7 @@ mod tests {
         p.set_payload(&f[..n]).unwrap();
         r.receive(p, 0);
 
-        match r.work(&pool, &ifaces, 0) {
+        match r.work(&pool, &mut ifaces, 0) {
             Routed::Respond { iface, packet, .. } => {
                 assert_eq!(iface, 0, "out the interface the route names");
                 let reply = pool.from_index(packet).expect("a live slot");
@@ -1295,7 +1313,7 @@ mod tests {
             let pool = P::new();
             let mut r = R::new(ME, Version::V1);
             r.bind(7).unwrap();
-            let ifaces = test_ifaces();
+            let mut ifaces = test_ifaces();
 
             let mut p = pool.acquire(0).unwrap();
             p.set_id(Id {
@@ -1318,7 +1336,7 @@ mod tests {
             p.set_payload(&framed[..n]).unwrap();
             r.receive(p, 0);
 
-            match r.work(&pool, &ifaces, now_ms) {
+            match r.work(&pool, &mut ifaces, now_ms) {
                 Routed::Respond { packet, .. } => {
                     let reply = pool.from_index(packet).expect("a live slot");
                     let hh = reply.with_payload(|b| rdp::Header::decode(b).unwrap());
@@ -1369,10 +1387,10 @@ mod tests {
         let pool = Pool::<24, 264>::new();
         let mut r = Deep::new(ME, Version::V1);
         r.bind(7).unwrap();
-        let ifaces = test_ifaces();
+        let mut ifaces = test_ifaces();
         let before = pool.available();
 
-        let feed = |r: &mut Deep, flags: u8, seq: u16, ack: u16, body: &[u8]| {
+        let mut feed = |r: &mut Deep, flags: u8, seq: u16, ack: u16, body: &[u8]| {
             let mut p = pool.acquire(0).unwrap();
             p.set_id(Id {
                 pri: 2,
@@ -1393,7 +1411,7 @@ mod tests {
             r.receive(p, 0);
             // Drain, releasing anything the node hands back for transmission.
             loop {
-                match r.work(&pool, &ifaces, 0) {
+                match r.work(&pool, &mut ifaces, 0) {
                     Routed::Respond { packet, .. } | Routed::Forwarded { packet, .. } => {
                         drop(pool.from_index(packet));
                     }
@@ -1463,7 +1481,7 @@ mod tests {
         let pool = Pool::<24, 264>::new();
         let mut r = Deep::new(ME, Version::V1);
         r.bind(7).unwrap();
-        let ifaces = test_ifaces();
+        let mut ifaces = test_ifaces();
         let before = pool.available();
 
         for _ in 0..10 {
@@ -1478,7 +1496,7 @@ mod tests {
             });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
-            let _ = r.work(&pool, &ifaces, 0);
+            let _ = r.work(&pool, &mut ifaces, 0);
         }
         assert!(
             pool.available() < before,
@@ -1503,7 +1521,7 @@ mod tests {
         let pool = Pool::<24, 264>::new();
         let mut r = Deep::new(ME, Version::V1);
         r.bind(7).unwrap();
-        let ifaces = test_ifaces();
+        let mut ifaces = test_ifaces();
         let before = pool.available();
 
         for _ in 0..10 {
@@ -1518,7 +1536,7 @@ mod tests {
             });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
-            let _ = r.work(&pool, &ifaces, 0);
+            let _ = r.work(&pool, &mut ifaces, 0);
         }
         assert!(pool.available() < before);
 
@@ -1538,8 +1556,8 @@ mod tests {
         // tick. SCOPE.md deviation 6.
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
-        assert_eq!(r.work(&pool, &test_ifaces(), 0), Routed::Idle);
-        assert_eq!(r.work(&pool, &test_ifaces(), 100), Routed::Idle);
+        assert_eq!(r.work(&pool, &mut test_ifaces(), 0), Routed::Idle);
+        assert_eq!(r.work(&pool, &mut test_ifaces(), 100), Routed::Idle);
     }
 
     #[test]
@@ -1549,7 +1567,7 @@ mod tests {
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"hello"), 0);
 
-        match r.work(&pool, &test_ifaces(), 0) {
+        match r.work(&pool, &mut test_ifaces(), 0) {
             Routed::Delivered { port, conn } => {
                 assert_eq!(port, 20);
                 assert_eq!(r.conns.rx_len(conn).unwrap(), 1);
@@ -1565,7 +1583,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.receive(pkt(&pool, ME, 39, b"nobody home"), 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::PortNotBound),
             "must say WHY, not just fail"
         );
@@ -1579,7 +1597,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.receive(pkt(&pool, 25, 20, b"elsewhere"), 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::NoRoute)
         );
         assert_eq!(r.counters.no_route, 1);
@@ -1593,7 +1611,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.routes.set(0, 0, 3, csp_core::rtable::NO_VIA).unwrap();
         r.receive(pkt(&pool, 25, 20, b"elsewhere"), 0);
-        match r.work(&pool, &test_ifaces(), 0) {
+        match r.work(&pool, &mut test_ifaces(), 0) {
             Routed::Forwarded { iface, .. } => assert_eq!(iface, 3),
             other => panic!("expected forwarding, got {other:?}"),
         }
@@ -1632,7 +1650,7 @@ mod tests {
             let mut delivered = 0;
             for _ in 0..2 {
                 r.receive(pkt(&pool, ME, 20, b"identical"), 0);
-                if let Routed::Delivered { .. } = r.work(&pool, &test_ifaces(), 10) {
+                if let Routed::Delivered { .. } = r.work(&pool, &mut test_ifaces(), 10) {
                     delivered += 1;
                 }
             }
@@ -1640,7 +1658,7 @@ mod tests {
             let mut forwarded = 0;
             for _ in 0..2 {
                 r.receive(pkt(&pool, 25, 20, b"identical"), 0);
-                if let Routed::Forwarded { packet, .. } = r.work(&pool, &test_ifaces(), 10) {
+                if let Routed::Forwarded { packet, .. } = r.work(&pool, &mut test_ifaces(), 10) {
                     forwarded += 1;
                     // Claim the slot the router handed over, or the pool drains and the
                     // second pair fails for a reason that has nothing to do with dedup.
@@ -1665,13 +1683,13 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"same"), 0);
         assert!(matches!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Delivered { .. }
         ));
 
         r.receive(pkt(&pool, ME, 20, b"same"), 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 10),
+            r.work(&pool, &mut test_ifaces(), 10),
             Routed::Dropped(DropReason::Duplicate)
         );
         assert_eq!(r.counters.duplicates, 1);
@@ -1685,7 +1703,7 @@ mod tests {
         for _ in 0..2 {
             r.receive(pkt(&pool, ME, 20, b"same"), 0);
             assert!(matches!(
-                r.work(&pool, &test_ifaces(), 0),
+                r.work(&pool, &mut test_ifaces(), 0),
                 Routed::Delivered { .. }
             ));
         }
@@ -1711,7 +1729,7 @@ mod tests {
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
             assert!(matches!(
-                r.work(&pool, &test_ifaces(), 0),
+                r.work(&pool, &mut test_ifaces(), 0),
                 Routed::Delivered { .. }
             ));
         }
@@ -1727,7 +1745,7 @@ mod tests {
         p.set_payload(b"x").unwrap();
         r.receive(p, 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::ConnectionTableFull)
         );
         assert_eq!(r.counters.conn_table_full, 1);
@@ -1742,13 +1760,13 @@ mod tests {
         for _ in 0..4 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
             assert!(matches!(
-                r.work(&pool, &test_ifaces(), 0),
+                r.work(&pool, &mut test_ifaces(), 0),
                 Routed::Delivered { .. }
             ));
         }
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::ReceiveQueueFull)
         );
         assert_eq!(r.counters.rx_queue_full, 1);
@@ -1763,7 +1781,7 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"tapped"), 0);
         assert!(matches!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Delivered { .. }
         ));
 
@@ -1782,7 +1800,7 @@ mod tests {
         r.set_promisc(true);
         for _ in 0..12 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
-            let _ = r.work(&pool, &test_ifaces(), 0);
+            let _ = r.work(&pool, &mut test_ifaces(), 0);
         }
         assert!(
             r.promisc_missed() > 0,
@@ -1797,7 +1815,7 @@ mod tests {
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
         assert!(matches!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Delivered { .. }
         ));
         assert_eq!(r.conns.open_count(), 1);
@@ -1814,7 +1832,7 @@ mod tests {
         let mut r = R::new(ME, Version::V1);
         r.bind(20).unwrap();
         r.receive(pkt(&pool, ME, 20, b"x"), 0);
-        r.work(&pool, &test_ifaces(), 0);
+        r.work(&pool, &mut test_ifaces(), 0);
         assert_eq!(
             pool.available(),
             15,
@@ -1834,7 +1852,7 @@ mod tests {
         for _ in 0..3 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
         }
-        r.work(&pool, &test_ifaces(), 0);
+        r.work(&pool, &mut test_ifaces(), 0);
         assert!(pool.available() < 16);
 
         // drain what is on connections too
@@ -1860,7 +1878,7 @@ mod tests {
         let before = pool.available();
         r.receive(pkt(&pool, ME, 20, b"unread"), 0);
         assert!(matches!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Delivered { .. }
         ));
         r.shutdown(&pool);
@@ -1873,7 +1891,7 @@ mod tests {
         // A packet fanning out to two links, with only the first collected.
         let pool = P::new();
         let mut r = R::new(9999, Version::V2);
-        let ifaces = {
+        let mut ifaces = {
             let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
             l.add("IN", 40, 12, false).unwrap();
             l.add("A", 8, 12, false).unwrap();
@@ -1882,7 +1900,7 @@ mod tests {
         };
         let before = pool.available();
         r.receive(pkt(&pool, 10, 20, b"onward"), 0);
-        match r.work(&pool, &ifaces, 0) {
+        match r.work(&pool, &mut ifaces, 0) {
             Routed::Forwarded { packet, .. } => drop(pool.from_index(packet)),
             other => panic!("expected forwarding, got {other:?}"),
         }
@@ -1959,7 +1977,7 @@ mod tests {
         assert!(r.accept().is_none(), "nothing delivered yet");
 
         r.receive(pkt(&pool, ME, 20, b"hello"), 0);
-        let conn = match r.work(&pool, &test_ifaces(), 0) {
+        let conn = match r.work(&pool, &mut test_ifaces(), 0) {
             Routed::Delivered { conn, .. } => conn,
             other => panic!("{other:?}"),
         };
@@ -1976,7 +1994,7 @@ mod tests {
         r.bind(20).unwrap();
         for _ in 0..3 {
             r.receive(pkt(&pool, ME, 20, b"x"), 0);
-            r.work(&pool, &test_ifaces(), 0);
+            r.work(&pool, &mut test_ifaces(), 0);
         }
         assert!(r.accept().is_some());
         assert!(r.accept().is_none(), "one connection, one accept");
@@ -1999,7 +2017,7 @@ mod tests {
             });
             p.set_payload(b"x").unwrap();
             r.receive(p, 0);
-            r.work(&pool, &test_ifaces(), 0);
+            r.work(&pool, &mut test_ifaces(), 0);
         }
         assert!(r.accept_missed() > 0, "backlog overflow must be counted");
     }
@@ -2015,7 +2033,7 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"unprotected"), 0);
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::ChecksumRequired))
         );
         assert_eq!(r.counters.rx_error, 1);
@@ -2050,7 +2068,7 @@ mod tests {
         p.set_payload(&buf[..n]).unwrap();
         r.receive(p, 0);
 
-        let conn = match r.work(&pool, &test_ifaces(), 0) {
+        let conn = match r.work(&pool, &mut test_ifaces(), 0) {
             Routed::Delivered { conn, .. } => conn,
             other => panic!("expected delivery, got {other:?}"),
         };
@@ -2093,7 +2111,7 @@ mod tests {
         r.receive(p, 0);
 
         assert_eq!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::BadChecksum))
         );
     }
@@ -2107,7 +2125,7 @@ mod tests {
 
         r.receive(pkt(&pool, ME, 20, b"unauthenticated"), 0);
         assert!(matches!(
-            r.work(&pool, &test_ifaces(), 0),
+            r.work(&pool, &mut test_ifaces(), 0),
             Routed::Dropped(DropReason::Refused(Refusal::AuthenticationRequired))
         ));
         assert_eq!(
@@ -2127,11 +2145,11 @@ mod tests {
 
         a.receive(pkt(&pa, 11, 20, b"for a"), 0);
         assert!(matches!(
-            a.work(&pa, &test_ifaces(), 0),
+            a.work(&pa, &mut test_ifaces(), 0),
             Routed::Delivered { .. }
         ));
         assert_eq!(
-            b.work(&pb, &test_ifaces(), 0),
+            b.work(&pb, &mut test_ifaces(), 0),
             Routed::Idle,
             "b saw nothing"
         );
