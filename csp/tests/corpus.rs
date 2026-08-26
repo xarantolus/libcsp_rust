@@ -1236,6 +1236,102 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// A peer proposing a window of two must get two packets out.
+///
+/// The overflow is not comparable -- `csp_rdp_send` loops around a semaphore whose only
+/// exits need another thread, so the third call never returns in a single-threaded harness
+/// (measured, not assumed: the probe was killed by libcheck's timeout). The boundary is.
+#[cfg(feature = "rdp")]
+fn replay_rdp_window_boundary() -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 2,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    let inject = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                  body: &[u8],
+                  flags: u8,
+                  seq: u16,
+                  ack: u16| {
+        let mut buf = [0u8; 64];
+        buf[..body.len()].copy_from_slice(body);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hl = h.encode(&[], &mut buf[body.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..body.len() + hl]).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(x)) = n.read(conn) {
+                        drop(x);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    inject(&mut n, &syn[..olen], rdp::SYN, 1000, 0);
+    let Some(h) = n.accept() else {
+        return serde_json::json!({ "frames": 0, "sequential": 0 });
+    };
+    let iss = n.router.conns.rdp(h).map(|r| r.snd_iss).unwrap_or(0);
+    inject(&mut n, &[], rdp::ACK, 1001, iss);
+
+    let mut frames = 0u32;
+    let mut seqs = [0u16; 2];
+    for (i, seq) in seqs.iter_mut().enumerate() {
+        let Some(mut p) = n.packet() else { break };
+        p.set_payload(&[b'a' + i as u8]).unwrap();
+        if let Ok(out) = n.send(h, p, CLOCK) {
+            frames += 1;
+            let pk = out.into_packet();
+            *seq = pk.with_payload(|b| rdp::Header::decode(b).map(|x| x.seq_nr).unwrap_or(0));
+            drop(pk);
+        }
+    }
+
+    serde_json::json!({
+        "frames": frames,
+        "sequential": u8::from(seqs[0] == iss.wrapping_add(1) && seqs[1] == iss.wrapping_add(2)),
+    })
+}
+
 /// Three sends in a row, then one acknowledgement covering all of them.
 ///
 /// Consecutive sends must take consecutive sequence numbers, and an acknowledgement must
@@ -3732,6 +3828,11 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "rdp" if rec.case == "malformed_syns_do_not_exhaust_the_table" => Some((
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_window_of_two_admits_exactly_two" => Some((
+            replay_rdp_window_boundary(),
+            "window 2, two offered".to_string(),
         )),
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "three_sends_are_sequential_and_an_ack_releases_them" => {
