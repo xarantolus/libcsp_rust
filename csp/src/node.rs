@@ -47,6 +47,15 @@ pub enum Unroutable {
     },
 }
 
+/// No next hop: send straight to the destination address.
+///
+/// The same value either way; named once so the subnet and default paths cannot disagree
+/// about it when the routing table is compiled out.
+#[cfg(feature = "rtable")]
+const NO_VIA_ADDR: u16 = rtable::NO_VIA;
+#[cfg(not(feature = "rtable"))]
+const NO_VIA_ADDR: u16 = 0xFFFF;
+
 /// Every interface a packet should go out on.
 ///
 /// `csp_send_direct` does **not** pick one destination. It collects every routing-table
@@ -86,6 +95,12 @@ pub struct Destination {
     pub iface: u8,
     /// Next hop, or [`rtable::NO_VIA`] to send straight to the destination address.
     pub via: u16,
+    /// The destination the frame should carry, which is not always the one asked for.
+    ///
+    /// `convert_broadcast` turns a routed (L3) broadcast into the local (L2) one -- the
+    /// maximum node id -- as it reaches the interface, so a peer whose subnet is masked
+    /// differently still recognises it as a broadcast.
+    pub dst: u16,
 }
 
 impl Destinations {
@@ -630,20 +645,75 @@ impl<
 
     /// Every interface a packet for `dst` should go out on.
     ///
-    /// Mirrors `csp_send_direct`'s full policy: all routes tied for the longest prefix
-    /// first, and only if none matched, every interface marked as a default. Split horizon
-    /// is applied to both — a destination on the interface the packet arrived on is
-    /// skipped, or a forwarded packet goes straight back where it came from and loops.
+    /// `csp_send_direct`'s policy, in its order: an interface whose **subnet owns** the
+    /// destination first, then all routing-table entries tied for the longest prefix, and
+    /// only if neither matched, every interface marked as a default. Each stage that finds
+    /// anything suppresses the ones after it, even when split horizon leaves the match
+    /// unusable — the C returns as soon as its `local_found` or `route_found` is set.
+    ///
+    /// Split horizon applies to all three: a destination on the interface the packet
+    /// arrived on is skipped, or a forwarded packet goes straight back where it came from
+    /// and loops.
+    ///
+    /// Each [`Destination`] carries the address its frame should be sent to, which differs
+    /// from `dst` for a subnet broadcast — see [`Destination::dst`].
     pub fn resolve(
         &self,
         #[cfg_attr(not(feature = "rtable"), allow(unused_variables))] dst: u16,
         routed_from: Option<u8>,
     ) -> core::result::Result<Destinations, Unroutable> {
         let mut out = Destinations {
-            entries: [Destination { iface: 0, via: 0 }; 4],
+            entries: [Destination {
+                iface: 0,
+                via: 0,
+                dst: 0,
+            }; 4],
             n: 0,
         };
         let mut skipped_self = false;
+
+        // A local subnet owns the destination. `csp_send_direct` tries this **first**, and
+        // a match returns before the routing table is consulted at all.
+        //
+        // This step was missing: resolve went straight to the table, so an application
+        // sending to an address on a directly attached link fell through to the default
+        // interfaces -- out the wrong link, or nowhere when no default was configured.
+        // Every test here used a netmask under which each interface owns only its own
+        // address, so none of them could tell.
+        {
+            let mut local_found = false;
+            let mut out_dst = dst;
+            for idx in self.ifaces.indices() {
+                if !self.ifaces.is_within_subnet(dst, idx) {
+                    continue;
+                }
+                local_found = true;
+                if routed_from == Some(idx) {
+                    skipped_self = true;
+                    continue;
+                }
+                if self.ifaces.is_broadcast_for(dst, idx) {
+                    out_dst = self.version.max_node_id();
+                }
+                if out.n < out.entries.len() {
+                    out.entries[out.n] = Destination {
+                        iface: idx,
+                        via: NO_VIA_ADDR,
+                        dst: out_dst,
+                    };
+                    out.n += 1;
+                }
+            }
+            if local_found {
+                return if out.n > 0 {
+                    Ok(out)
+                } else {
+                    Err(Unroutable::SplitHorizon {
+                        iface: routed_from.unwrap_or(0),
+                    })
+                };
+            }
+        }
 
         #[cfg(feature = "rtable")]
         {
@@ -664,6 +734,7 @@ impl<
                     out.entries[out.n] = Destination {
                         iface: r.iface,
                         via: r.via,
+                        dst,
                     };
                     out.n += 1;
                 }
@@ -695,11 +766,11 @@ impl<
                 continue;
             }
             if out.n < out.entries.len() {
-                #[cfg(feature = "rtable")]
-                let via = rtable::NO_VIA;
-                #[cfg(not(feature = "rtable"))]
-                let via = 0xFFFFu16;
-                out.entries[out.n] = Destination { iface: idx, via };
+                out.entries[out.n] = Destination {
+                    iface: idx,
+                    via: NO_VIA_ADDR,
+                    dst,
+                };
                 out.n += 1;
             }
         }
@@ -735,6 +806,12 @@ impl<
         match self.resolve(id.dst, routed_from) {
             Ok(d) => {
                 let first = d.as_slice()[0];
+                let mut packet = packet;
+                if id.dst != first.dst {
+                    let mut out_id = id;
+                    out_id.dst = first.dst;
+                    packet.set_id(out_id);
+                }
                 Outbound::Transmit {
                     iface: first.iface,
                     via: first.via,
@@ -1433,6 +1510,30 @@ mod tests {
             .expect("the default interface must be used");
         assert_eq!(d.len(), 1);
         assert_eq!(d.as_slice()[0].iface, 0, "only the default-marked one");
+    }
+
+    /// Split horizon on the subnet path, which the routing-table and default paths each
+    /// have their own test for. The C applies `is_same_subnet(iface, routed_from)` in all
+    /// three loops; only this one had no coverage.
+    #[test]
+    fn split_horizon_applies_to_the_local_subnet_too() {
+        let s = S::new();
+        let mut n = N::new(&s, Config::new(Version::V2).address(9999));
+        // 8/12 owns 8..11, so it owns 10.
+        n.ifaces.add("LINK_A", 8, 12, false).unwrap();
+
+        // Arriving on LINK_A itself: sending back out of it is the loop.
+        assert!(matches!(
+            n.resolve(10, Some(0)),
+            Err(Unroutable::SplitHorizon { iface: 0 })
+        ));
+        // A subnet match suppresses the default fallback even when split horizon left
+        // nothing usable, so adding a default does not rescue it.
+        n.ifaces.add("DFL", 40, 12, true).unwrap();
+        assert!(matches!(
+            n.resolve(10, Some(0)),
+            Err(Unroutable::SplitHorizon { iface: 0 })
+        ));
     }
 
     #[test]

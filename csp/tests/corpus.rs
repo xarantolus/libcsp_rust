@@ -873,6 +873,55 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 ///
 /// Counted as frames leaving and the interfaces they left by — the only thing a peer on a
 /// redundant link can observe about whether the redundancy is being used.
+/// An application send, resolved by a real `Node` rather than by the router's forward path.
+///
+/// The two are separate implementations of `csp_send_direct` in this port, and only the
+/// forward path had records. This drives the one an application actually calls.
+fn replay_node_send(case: &str) -> serde_json::Value {
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(9999));
+    n.ifaces.add("LINK_A", 8, 12, false).unwrap();
+
+    // LINK_A is 8/12, so it owns 8..11 and 11 is its broadcast address.
+    let dst = match case {
+        "a_local_subnet_beats_the_default_interface" => {
+            n.ifaces.add("DEFAULT", 40, 12, true).unwrap();
+            10
+        }
+        "an_application_send_to_a_broadcast_is_rewritten_too" => 11,
+        other => panic!("no node-send replay for {other}"),
+    };
+
+    let dests = n.resolve(dst, None);
+    let (frames, left_by, dst_on_wire) = match dests {
+        Ok(d) => (
+            d.len(),
+            d.as_slice()
+                .iter()
+                .map(|e| {
+                    n.ifaces
+                        .get(e.iface)
+                        .map(|i| i.name.to_lowercase())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>(),
+            // The destination each frame carries, read off the resolution rather than
+            // assumed from what was asked for.
+            d.as_slice().iter().map(|e| e.dst).collect::<Vec<_>>(),
+        ),
+        Err(_) => (0, Vec::new(), Vec::new()),
+    };
+
+    serde_json::json!({
+        "frames": frames,
+        "left_by": left_by,
+        "dst_on_wire": dst_on_wire,
+        "buffers_lost": 0,
+    })
+}
+
 fn replay_route(case: &str) -> serde_json::Value {
     type P = Pool<16, 264>;
     type R = Router<8, 16, 48, 32>;
@@ -882,10 +931,18 @@ fn replay_route(case: &str) -> serde_json::Value {
     const LINK_B: u16 = 9;
     const TARGET: u16 = 10;
 
+    // LINK_A is 8/12, so with 14 host bits it owns 8..11 and 11 is its broadcast address.
+    const LINK_A_BROADCAST: u16 = 11;
+
     let (two_links, defaults, dst) = match case {
         "one_owning_link_sends_one_frame" => (false, false, TARGET),
         "two_owning_links_send_two_frames" => (true, false, TARGET),
         "two_default_interfaces_send_two_frames" => (true, true, 3000),
+        "a_routed_broadcast_leaves_as_the_local_broadcast" => (false, false, LINK_A_BROADCAST),
+        "an_ordinary_destination_is_not_rewritten" => (false, false, TARGET),
+        "a_broadcast_rewrite_carries_to_the_other_interface" => (true, false, LINK_A_BROADCAST),
+        // Reached through the routing table, not a subnet: no interface owns 3000.
+        "a_table_routed_destination_leaves_unchanged" => (false, false, 3000),
         other => panic!("no route replay for {other}"),
     };
 
@@ -895,12 +952,28 @@ fn replay_route(case: &str) -> serde_json::Value {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", INGRESS, 12, false).unwrap();
         l.add("LINK_A", LINK_A, 12, defaults).unwrap();
-        if two_links {
+        if case == "a_broadcast_rewrite_carries_to_the_other_interface" {
+            // Same address, one bit wider: owns 8..15, so 11 is inside it but is not its
+            // broadcast.
+            l.add("LINK_C", LINK_A, 11, false).unwrap();
+        } else if two_links {
             let b = if defaults { 200 } else { LINK_B };
             l.add("LINK_B", b, 12, defaults).unwrap();
         }
         l
     };
+
+    if case == "a_table_routed_destination_leaves_unchanged" {
+        let a = ifaces.find_by_name("LINK_A").expect("LINK_A is registered");
+        r.routes
+            .set(
+                3000,
+                Version::V2.host_bits() as u16,
+                a,
+                csp_core::rtable::NO_VIA,
+            )
+            .unwrap();
+    }
 
     let before = pool.available();
     let mut p = pool.acquire(0).unwrap();
@@ -918,6 +991,7 @@ fn replay_route(case: &str) -> serde_json::Value {
     // `work` is a step: drain it until it stops producing, so a router that fans out over
     // several calls is counted the same as one that reports them together.
     let mut left_by: Vec<String> = Vec::new();
+    let mut dst_on_wire: Vec<u16> = Vec::new();
     loop {
         match r.work(&pool, &ifaces, 0) {
             Routed::Forwarded { iface, packet, .. } => {
@@ -926,16 +1000,24 @@ fn replay_route(case: &str) -> serde_json::Value {
                     .map(|e| e.name.to_lowercase())
                     .unwrap_or_default();
                 left_by.push(name);
-                drop(pool.from_index(packet));
+                let fwd = pool
+                    .from_index(packet)
+                    .expect("the router named a live slot");
+                // The destination the frame actually carries, read off the packet rather
+                // than assumed from what was sent -- the two differ for a routed broadcast.
+                dst_on_wire.push(fwd.id().dst);
+                drop(fwd);
             }
             Routed::Idle => break,
             _ => break,
         }
     }
 
+    // The two broadcast cases look at the destination field; the rest look at fan-out.
     serde_json::json!({
         "frames": left_by.len(),
         "left_by": left_by,
+        "dst_on_wire": dst_on_wire,
         "buffers_lost": before as i64 - pool.available() as i64,
     })
 }
@@ -1224,6 +1306,15 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                     format!("{} offered", input.offered),
                 ))
             }
+        }
+        "route"
+            if matches!(
+                rec.case.as_str(),
+                "a_local_subnet_beats_the_default_interface"
+                    | "an_application_send_to_a_broadcast_is_rewritten_too"
+            ) =>
+        {
+            Some((replay_node_send(&rec.case), rec.case.clone()))
         }
         "route" => Some((replay_route(&rec.case), rec.case.clone())),
         "promisc" => Some((replay_promisc(&rec.case), rec.case.clone())),
