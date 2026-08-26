@@ -676,6 +676,30 @@ a table to hand, which is what the C's parser does, and it is deliberately not i
 mutation suite since nothing could notice it. The netmask check is the one that mattered,
 because `set` clamps instead of refusing.
 
+### The C asserted the SYN clamping and recorded none of it
+
+`rdp_syn_options_are_bounded_above`, `_below` and `keeps_valid_options` make twenty
+`ck_assert`s between them about what `csp_rdp_new_packet` does to a peer's proposed options
+— and **record nothing**, so `SynOptions::decode_clamped` had never been compared against
+libcsp. It was verified by reading, which is what this check exists to catch.
+
+Found by sweeping every C test for assertions-without-a-record; those three were the largest
+gap. `rdp::a_hostile_syn_cannot_suppress_acknowledgement` now measures it, and the port
+matches the C exactly: a SYN proposing `0xFFFFFFFF` for every field is clamped to a window
+of 5 and an ack delay count of 5, and the node still acknowledges.
+
+Framed as acks reaching the wire rather than as the connection's fields: an unclamped
+`ack_delay_count` means the node waits four billion packets before acknowledging, so the
+peer retransmits until it gives up. The clamp is only observable as acks appearing at all.
+
+**The first version of this test measured the wrong thing.** With the application not
+reading, the C emitted one ack and the port two — not a clamping difference but the
+receive-queue gate in `csp_rdp_check_ack`, the separate divergence recorded at
+`acks_stop_when_the_application_is_not_reading`. The test now drains the connection as
+packets arrive, so the clamp is what decides. Left as a caution: a `must_match` record
+placed where a known divergence is live will fail for a reason that has nothing to do with
+its name.
+
 ### Which records can actually fail, measured
 
 `just mutants` now reports **how many corpus records some mutation was able to move**, and
