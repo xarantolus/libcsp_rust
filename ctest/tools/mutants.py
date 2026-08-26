@@ -215,6 +215,19 @@ MUTANTS = [
   ("drain: close sizes by RXQ", "csp/src/node.rs",
    "        let mut drained = [0u16; RXQ];\n        let n = self.router.conns.close(conn, &mut drained)?;",
    "        let mut drained = [0u16; 32];\n        let n = self.router.conns.close(conn, &mut drained)?;"),
+  # Which broadcasts a node treats as its own. The C names the *ingress* interface, so a
+  # broadcast for another subnet is relayed, not delivered -- and "widen it to every
+  # interface" is the plausible wrong fix.
+  ("broadcast: only the ingress interface's", "csp/src/router.rs",
+   "            || ifaces.is_broadcast_for(id.dst, ingress)",
+   "            || ifaces.indices().any(|i| ifaces.is_broadcast_for(id.dst, i))"),
+  ("broadcast: is recognised at all", "csp/src/router.rs",
+   "            || ifaces.is_broadcast_for(id.dst, ingress)", ""),
+  ("broadcast: all-ones is always broadcast", "csp-core/src/id.rs",
+   "        addr == self.max_node_id()\n    }", "        false\n    }"),
+  ("broadcast: a delivered one is not relayed on", "csp/src/router.rs",
+   "        if for_us {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }",
+   "        if for_us && id.dst == self.address {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),

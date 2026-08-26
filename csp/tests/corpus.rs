@@ -1253,6 +1253,69 @@ fn replay_cmp_through_a_node() -> serde_json::Value {
     })
 }
 
+/// Which broadcast addresses a node treats as its own, and what happens to the rest.
+///
+/// The C's condition names the **ingress** interface: `csp_id_is_broadcast(dst,
+/// input.iface)`. A broadcast for a different subnet is therefore not for this node and is
+/// relayed. Driven through a real `Router` so both halves are visible -- what the
+/// application receives, and how many frames leave.
+fn replay_broadcast(case: &str) -> serde_json::Value {
+    const LOCAL: u16 = 10;
+    const NETMASK: u16 = 12;
+
+    let dst: u16 = match case {
+        "the_ingress_subnets_broadcast_is_delivered_and_not_relayed" => 11,
+        "the_all_ones_address_is_delivered_and_not_relayed" => 16383,
+        "another_subnets_broadcast_is_relayed_not_delivered" => 43,
+        other => panic!("no broadcast replay for {other}"),
+    };
+
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+    let pool = P::new();
+    let mut r = R::new(LOCAL, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    let ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL, NETMASK, true).unwrap();
+        l.add("OTHER", 40, NETMASK, false).unwrap();
+        l
+    };
+
+    let mut p = pool.acquire(0).unwrap();
+    p.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: 11,
+        dst,
+        dport: TEST_PORT,
+        sport: 40,
+    });
+    p.set_payload(b"hi").unwrap();
+    r.receive(p, 0);
+
+    let mut delivered = 0;
+    let mut frames_out = 0;
+    loop {
+        match r.work(&pool, &ifaces, 0) {
+            Routed::Delivered { conn, .. } => {
+                delivered = 1;
+                if let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
+                    drop(pool.from_index(slot));
+                }
+            }
+            Routed::Forwarded { packet, .. } | Routed::Respond { packet, .. } => {
+                frames_out += 1;
+                drop(pool.from_index(packet));
+            }
+            Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    serde_json::json!({ "delivered": delivered, "frames_out": frames_out })
+}
+
 fn replay_rtable(case: &str) -> serde_json::Value {
     use csp_core::rtable;
 
@@ -1699,6 +1762,16 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             ))
         }
         // How many times the application is offered a connection it already holds.
+        "conn"
+            if matches!(
+                rec.case.as_str(),
+                "the_ingress_subnets_broadcast_is_delivered_and_not_relayed"
+                    | "the_all_ones_address_is_delivered_and_not_relayed"
+                    | "another_subnets_broadcast_is_relayed_not_delivered"
+            ) =>
+        {
+            Some((replay_broadcast(&rec.case), rec.case.clone()))
+        }
         "conn" if rec.case == "a_connection_is_offered_to_the_application_only_once" => {
             let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
             type P = Pool<16, 264>;
