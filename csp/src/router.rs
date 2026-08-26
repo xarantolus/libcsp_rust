@@ -522,7 +522,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
 
         if for_us {
-            return self.deliver_local(pool, packet, id, ifaces, now_ms);
+            return self.deliver_local(pool, packet, id, ifaces, ingress, now_ms);
         }
         self.forward(pool, packet, id, ifaces, ingress)
     }
@@ -532,10 +532,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         #[cfg_attr(not(feature = "rdp"), allow(unused_variables))] pool: &'p Pool<B, SZ>,
         mut packet: Packet<'p, B, SZ>,
         id: Id,
-        #[cfg_attr(not(feature = "rdp"), allow(unused_variables))] ifaces: &crate::iflist::IfList<
-            N,
-            A,
-        >,
+        ifaces: &mut crate::iflist::IfList<N, A>,
+        ingress: u8,
         now_ms: u32,
     ) -> Routed {
         if !self.is_bound(id.dport) {
@@ -565,9 +563,25 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 packet.with_payload_mut(|_| (n, ()));
             }
             Err(refusal) => {
+                // Node-wide *and* on the interface it arrived by.
+                // `csp_route_security_check` takes the ingress interface and charges it
+                // directly (`csp_route.c:39`, `:83`, `:87`), which is what CMP `IF_STATS`
+                // reports: `autherr` on a link is how an operator sees that link being
+                // probed. Only the node-wide totals were kept, so a node under attack
+                // answered `IF_STATS` with a zero for every interface.
                 match refusal.counter() {
-                    security::Counter::AuthError => self.counters.auth_error += 1,
-                    security::Counter::RxError => self.counters.rx_error += 1,
+                    security::Counter::AuthError => {
+                        self.counters.auth_error += 1;
+                        if let Some(e) = ifaces.get_mut(ingress) {
+                            e.stats.autherr += 1;
+                        }
+                    }
+                    security::Counter::RxError => {
+                        self.counters.rx_error += 1;
+                        if let Some(e) = ifaces.get_mut(ingress) {
+                            e.stats.rx_error += 1;
+                        }
+                    }
                 }
                 return Routed::Dropped(DropReason::Refused(refusal));
             }

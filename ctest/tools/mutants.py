@@ -218,8 +218,8 @@ MUTANTS = [
   ("broadcast: all-ones is always broadcast", "csp-core/src/id.rs",
    "        addr == self.max_node_id()\n    }", "        false\n    }"),
   ("broadcast: a delivered one is not relayed on", "csp/src/router.rs",
-   "        if for_us {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }",
-   "        if for_us && id.dst == self.address {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }"),
+   "        if for_us {\n            return self.deliver_local(pool, packet, id, ifaces, ingress, now_ms);\n        }",
+   "        if for_us && id.dst == self.address {\n            return self.deliver_local(pool, packet, id, ifaces, ingress, now_ms);\n        }"),
   # Per-interface counters. The C's router keeps them (csp_route.c:229, :244) and CMP
   # IF_STATS is how the ground reads them; `IfList::Entry::stats` was never written.
   ("ifstats: the router counts a received packet", "csp/src/router.rs",
@@ -231,6 +231,12 @@ MUTANTS = [
   ("ifstats: a suppressed duplicate counts as dropped", "csp/src/router.rs",
    "                if let Some(e) = ifaces.get_mut(ingress) {\n                    e.stats.drop += 1;\n                }",
    "                {}"),
+  ("ifstats: an auth failure is charged to its link", "csp/src/router.rs",
+   "                        if let Some(e) = ifaces.get_mut(ingress) {\n                            e.stats.autherr += 1;\n                        }",
+   "                        {}"),
+  ("ifstats: a receive error is charged to its link", "csp/src/router.rs",
+   "                        if let Some(e) = ifaces.get_mut(ingress) {\n                            e.stats.rx_error += 1;\n                        }",
+   "                        {}"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),
