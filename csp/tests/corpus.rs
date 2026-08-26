@@ -2784,6 +2784,48 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        "rdp" if rec.case == "a_nonzero_delayed_acks_is_on_not_a_count" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // The option block is written word by word, because the value under test is a
+            // raw wire word the port's `SynOptions` stores as a `bool` -- encoding from the
+            // struct would drop the very thing being checked. Word 3 is `delayed_acks`.
+            let words: [u32; 6] = [
+                3,
+                20_000,
+                500,
+                u32::from(input.delayed_acks),
+                250,
+                input.ack_delay_count,
+            ];
+            let mut wire = [0u8; csp_core::rdp::SYN_OPTIONS_LEN];
+            for (i, w) in words.iter().enumerate() {
+                wire[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+            }
+            let opts =
+                csp_core::rdp::SynOptions::decode_clamped(&wire, csp::router::RDP_MAX_WINDOW)
+                    .expect("a complete option block");
+
+            let mut c = csp_core::rdp::Connection::new(1000, opts);
+            c.state = csp_core::rdp::State::Open;
+            c.rcv_cur = 1000;
+            c.rcv_lsa = 1000;
+            let mut running = Vec::new();
+            let mut acks = 0;
+            for i in 1..=5u16 {
+                c.rcv_cur = 1000 + i;
+                if c.poll_ack(0).is_some() {
+                    acks += 1;
+                }
+                running.push(acks);
+            }
+            Some((
+                serde_json::json!({
+                    "normalised_to_on": u8::from(opts.delayed_acks),
+                    "acks_after_n_packets": running,
+                }),
+                format!("delayed_acks proposed as {}", input.delayed_acks),
+            ))
+        }
         "rdp" if rec.case == "a_delay_count_beyond_the_window_is_bound_by_it" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             // Through `decode_clamped`, not by constructing `SynOptions` directly. The
