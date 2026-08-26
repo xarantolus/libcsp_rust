@@ -39,6 +39,8 @@
 //! by reference and may copy it, but cannot consume it.
 
 use crate::pool::Packet;
+#[cfg(feature = "cmp")]
+use csp_core::cmp::IfStats;
 use csp_core::Id;
 
 /// Wall-clock time, seconds and nanoseconds since the epoch.
@@ -84,6 +86,26 @@ pub enum PowerAction {
     Shutdown,
     /// Refuse. The request is dropped.
     Refuse,
+}
+
+#[cfg(feature = "cmp")]
+impl From<csp_core::cmp::Timestamp> for Timestamp {
+    fn from(t: csp_core::cmp::Timestamp) -> Self {
+        Timestamp {
+            tv_sec: t.tv_sec,
+            tv_nsec: t.tv_nsec,
+        }
+    }
+}
+
+#[cfg(feature = "cmp")]
+impl From<Timestamp> for csp_core::cmp::Timestamp {
+    fn from(t: Timestamp) -> Self {
+        csp_core::cmp::Timestamp {
+            tv_sec: t.tv_sec,
+            tv_nsec: t.tv_nsec,
+        }
+    }
 }
 
 /// Application callbacks. Every method has a default, so an application implements only
@@ -189,6 +211,30 @@ pub trait Hooks<const B: usize, const SZ: usize> {
     /// implementation lets a peer write arbitrary memory.
     fn mem_write(&mut self, addr: u64, _data: &[u8]) -> csp_core::Result<()> {
         Err(csp_core::Error::AddressRefused { addr })
+    }
+
+    /// Counters for the named interface, for CMP `IF_STATS`. **Defaults to refusing.**
+    ///
+    /// `None` means "no such interface", which the C answers by discarding the request
+    /// rather than replying with zeros — a peer asking about an interface that does not
+    /// exist gets silence, not a plausible-looking all-zero reply.
+    #[cfg(feature = "cmp")]
+    fn if_stats(&self, _name: &str) -> Option<IfStats> {
+        None
+    }
+
+    /// Install a route, for CMP `ROUTE_SET`. **Defaults to refusing.**
+    ///
+    /// Refusing by default is the deliberate part. `csp_cmp_route_set_v2_handler` installs
+    /// whatever an unauthenticated peer asks for, so one packet can point a node's default
+    /// route at an interface that goes nowhere — and the node has then lost the route it
+    /// would need to be told otherwise. An application that wants remote route management
+    /// opts in.
+    ///
+    /// `netmask` is a prefix length. Return `false` to refuse, which sends no reply.
+    #[cfg(feature = "cmp")]
+    fn route_set(&mut self, _dest: u16, _netmask: u16, _iface: &str, _via: u16) -> bool {
+        false
     }
 
     /// A routing decision was made for an ingress packet.

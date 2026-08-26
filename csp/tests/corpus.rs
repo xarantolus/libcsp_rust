@@ -300,6 +300,12 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
 struct CmpInput {
     /// The exact request bytes the C node was given, as lowercase hex.
     request: String,
+    /// Whether the C node's clock accepted a `CLOCK` set, when the case turns it off.
+    ///
+    /// The refused and accepted cases send byte-identical requests, so without this the
+    /// replay would have to assume one of them.
+    #[serde(default)]
+    clock_set_accepted: Option<u8>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -346,12 +352,82 @@ fn peek_window(addr: u64, len: usize, wide: bool) -> Option<Vec<u8>> {
     Some((off..off + len).map(|i| 0xA0 + (i & 0x0f) as u8).collect())
 }
 
+/// The oracle node's own answers, as `ctest/suite_cmp.c` configured it.
+///
+/// This exists so the replay drives [`csp::service::respond_cmp`] rather than a second copy
+/// of the dispatcher. It used to be the latter: the arms below -- unknown interface means
+/// silence, a peek outside the window means silence -- were written out longhand *in this
+/// file*, so the C's 26 records checked the codec and the test's own reimplementation while
+/// the library had no dispatcher at all. The test contained the missing production code,
+/// which is exactly why nothing reported it missing.
+struct OracleNode {
+    /// Whether `set_clock` accepts, mirroring `ctest_clock_set_accepts`.
+    clock_accepts: bool,
+}
+
+impl csp::hooks::Hooks<16, 264> for OracleNode {
+    fn if_stats(&self, name: &str) -> Option<csp_core::cmp::IfStats> {
+        // The oracle registers INGRESS; anything else is an interface the C does not have,
+        // and it answers those with nothing rather than with zeros.
+        if name == "INGRESS" {
+            Some(csp_core::cmp::IfStats::default())
+        } else {
+            None
+        }
+    }
+
+    fn route_set(&mut self, _dest: u16, _netmask: u16, iface: &str, _via: u16) -> bool {
+        iface == "INGRESS" || iface == "ROUTED"
+    }
+
+    fn mem_read(&self, addr: u64, out: &mut [u8]) -> csp_core::Result<()> {
+        match peek_window(addr, out.len(), false) {
+            Some(src) => {
+                out.copy_from_slice(&src);
+                Ok(())
+            }
+            None => Err(csp_core::Error::AddressRefused { addr }),
+        }
+    }
+
+    fn mem_write(&mut self, addr: u64, data: &[u8]) -> csp_core::Result<()> {
+        match peek_window(addr, data.len(), false) {
+            Some(_) => Ok(()),
+            None => Err(csp_core::Error::AddressRefused { addr }),
+        }
+    }
+
+    fn clock(&self) -> csp::hooks::Timestamp {
+        csp::hooks::Timestamp::UNSET
+    }
+
+    fn set_clock(&mut self, _t: csp::hooks::Timestamp) -> bool {
+        self.clock_accepts
+    }
+}
+
+/// What `ctest/suite_cmp.c` puts in `csp_conf` before every case.
+fn oracle_identity() -> csp::service::Identity<'static> {
+    csp::service::Identity {
+        hostname: "oracle-node",
+        model: "ctest-model",
+        revision: "rev-1",
+        // The C fills these from __DATE__/__TIME__; only their length matters here and
+        // they are deliberately absent from the corpus.
+        date: "Jan  1 2026",
+        time: "00:00:00",
+    }
+}
+
+/// The IDENT reply up to `date` -- the part that comes from configuration rather than the
+/// build. Derived from the field lengths so it tracks the wire format, not a literal.
+const IDENT_PREFIX_LEN: usize = csp_core::cmp::Header::LEN
+    + csp_core::cmp::len::HOSTNAME
+    + csp_core::cmp::len::MODEL
+    + csp_core::cmp::len::REVISION;
+
 fn replay_cmp(input: &CmpInput) -> CmpObserved {
     use csp_core::cmp;
-
-    const HOSTNAME: &str = "oracle-node";
-    const MODEL: &str = "ctest-model";
-    const REVISION: &str = "rev-1";
 
     let req = unhex(&input.request);
     let none = CmpObserved {
@@ -364,91 +440,24 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
     let Ok(query) = cmp::parse_request(&req) else {
         return none;
     };
-    let code = req[1];
-    let h = cmp::Header {
-        kind: cmp::REPLY,
-        code,
-    };
+    let identity = oracle_identity();
 
     let mut out = [0u8; 256];
-    let n = match query {
-        cmp::Query::Ident => cmp::Ident {
-            hostname: HOSTNAME,
-            model: MODEL,
-            revision: REVISION,
-            // The C fills these from __DATE__/__TIME__; only the length matters here and
-            // they are deliberately absent from the corpus.
-            date: "Jan  1 2026",
-            time: "00:00:00",
-        }
-        .encode(h, &mut out),
-        cmp::Query::IfStats { interface } => {
-            // The C answers only for an interface it has. "INGRESS" is the one the oracle
-            // registers; anything else gets no reply.
-            if interface != "INGRESS" {
-                return none;
-            }
-            cmp::IfStatsMsg {
-                interface,
-                stats: cmp::IfStats::default(),
-            }
-            .encode(h, &mut out)
-        }
-        cmp::Query::Clock { .. } => cmp::Timestamp {
-            tv_sec: 0,
-            tv_nsec: 0,
-        }
-        .encode(h, &mut out),
-        // Both route forms answer only for an interface the node has, and the C looks the
-        // name up before touching the table — so an unknown name changes nothing *and*
-        // says nothing. "INGRESS" and "ROUTED" are the two the oracle registers.
-        cmp::Query::RouteSet(r) => {
-            if r.interface != "INGRESS" && r.interface != "ROUTED" {
-                return none;
-            }
-            r.encode(h, &mut out)
-        }
-        cmp::Query::RouteSetV1(r) => {
-            if r.interface != "INGRESS" && r.interface != "ROUTED" {
-                return none;
-            }
-            r.encode(h, &mut out)
-        }
-        cmp::Query::Peek { addr, len, wide } => {
-            let Some(src) = peek_window(addr, len as usize, wide) else {
-                return none;
-            };
-            cmp::Peek {
-                addr: addr as u32,
-                len,
-                data: &src,
-            }
-            .encode(h, &mut out)
-        }
-        cmp::Query::Poke { addr, data, wide } => {
-            if peek_window(addr, data.len(), wide).is_none() {
-                return none;
-            }
-            cmp::Peek {
-                addr: addr as u32,
-                len: data.len() as u8,
-                data,
-            }
-            .encode(h, &mut out)
-        } // No catch-all: every `Query` variant now has an encoder, so exhaustiveness does
-          // what the old `panic!` did and does it at compile time. Adding a variant to
-          // `Query` without teaching this replay about it becomes a build error rather than
-          // a record that silently scores zero.
+    let mut hooks = OracleNode {
+        clock_accepts: input.clock_set_accepted.unwrap_or(1) != 0,
     };
-
-    match n {
-        Ok(n) => CmpObserved {
+    match csp::service::respond_cmp(query, &identity, Version::V1, &mut hooks, &mut out) {
+        // Read the type and code back out of the encoded reply rather than restating what
+        // they were meant to be. They were literals here, so a dispatcher that never
+        // flipped `type` to REPLY -- the one line `csp_cmp_dispatch.c` runs after every
+        // successful handler -- reproduced the C's records perfectly.
+        Ok(Some(n)) => CmpObserved {
             replies: 1,
             reply_len: n as u32,
-            reply_type: cmp::REPLY as i32,
-            reply_code: code as i32,
+            reply_type: out[0] as i32,
+            reply_code: out[1] as i32,
         },
-        Err(_) => none,
+        Ok(None) | Err(_) => none,
     }
 }
 
@@ -1012,6 +1021,32 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "sfp" => {
             let input: SfpInput = serde_json::from_value(rec.input.clone()).unwrap();
             Some((replay_sfp(&input), format!("{input:?}")))
+        }
+        "cmp" if rec.case == "an_ident_reply_carries_the_configured_identity" => {
+            // The identity fields only. The C's `date`/`time` come from __DATE__/__TIME__
+            // and the trace stops before them, so this compares exactly the part a node
+            // is configured with -- and it is the only record that looks at an IDENT
+            // reply's *contents* rather than its length.
+            let input: CmpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let req = unhex(&input.request);
+            let query = csp_core::cmp::parse_request(&req).expect("the C answered it");
+            let identity = oracle_identity();
+            let mut out = [0u8; 256];
+            let mut hooks = OracleNode {
+                clock_accepts: true,
+            };
+            let n = csp::service::respond_cmp(query, &identity, Version::V1, &mut hooks, &mut out)
+                .unwrap()
+                .expect("IDENT is answered");
+            assert!(n >= IDENT_PREFIX_LEN);
+            let hex: String = out[..IDENT_PREFIX_LEN]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            Some((
+                serde_json::json!({ "identity": hex }),
+                "ident reply".to_string(),
+            ))
         }
         "cmp" if rec.case == "the_peek_tail_when_the_request_did_not_cover_it" => {
             // The C declares a PEEK reply three bytes longer than the data it wrote. What

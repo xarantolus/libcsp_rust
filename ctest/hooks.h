@@ -10,6 +10,8 @@
 #include <stdbool.h>
 #include <inttypes.h>
 
+#include <csp/csp_types.h>
+
 /** True once csp_reboot_hook() has been called. Cleared by ctest_hooks_reset(). */
 bool ctest_rebooted(void);
 
@@ -44,3 +46,18 @@ void ctest_hooks_reset(void);
 
 /** Fill the region with a known pattern and return a pointer to it. */
 uint8_t * ctest_peek_region(void);
+
+/**
+ * @brief Decide whether `csp_clock_set_time` accepts the next request.
+ *
+ * `csp_cmp_clock_handler` returns the *set* result, so a refused set makes
+ * `csp_service_handler` discard a reply it has already filled in. Nothing else in the
+ * suite can reach that path, and a port that replied anyway would look correct in every
+ * test that only ever sets the clock successfully.
+ *
+ * @param accept  non-zero to accept, zero to refuse with `CSP_ERR_INVAL`.
+ */
+void ctest_clock_set_accepts(int accept);
+
+/** The last timestamp a successful `csp_clock_set_time` was given. */
+csp_timestamp_t ctest_clock_last_set(void);
