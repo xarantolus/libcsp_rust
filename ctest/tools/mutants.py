@@ -371,6 +371,9 @@ MUTANTS = [
   ("rdp: consecutive sends take consecutive sequences", "csp-core/src/rdp.rs",
    "        self.snd_nxt = self.snd_nxt.wrapping_add(1);\n        Some(h)",
    "        Some(h)"),
+  ("rdp: the send window admits exactly window_size", "csp-core/src/rdp.rs",
+   "            .wrapping_add(self.opts.window_size as u16)\n            .wrapping_sub(1);",
+   "            .wrapping_add(self.opts.window_size as u16)\n            .wrapping_sub(2);"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

@@ -860,6 +860,59 @@ static void deliver_byte(uint16_t seq, uint16_t ack_nr, char byte) {
  * actually release what it covers? `csp_rdp_check_timeouts` frees a queued packet whose
  * sequence is before `snd_una`; if that never happens the sender retransmits data the peer
  * already has, for as long as the connection lives. */
+/* The send window's boundary: a peer that proposes a window of two must get two packets.
+ *
+ * Measured before this was written: `csp_send` returns for both of them and then, on the
+ * third, never returns at all. `csp_rdp_send` loops `while (1)` around
+ * `csp_bin_sem_wait(&conn->rdp.tx_wait, conn->rdp.conn_timeout)`, and its only exits are the
+ * window opening -- which needs an acknowledgement from the router task -- or the state
+ * becoming CLOSE_WAIT. In a single-threaded harness neither happens, so the call hangs; the
+ * probe that established this was killed by libcheck's timeout.
+ *
+ * So the *boundary* is comparable and the overflow is not. This records the boundary: two
+ * proposed, two on the wire, sequential. A receiver whose window arithmetic is off by one
+ * would send one or three. */
+START_TEST(test_a_window_of_two_admits_exactly_two)
+{
+	setup_stack();
+	const uint32_t o[6] = { 2 /* window */, 20000, 1000, 0 /* immediate acks */, 250, 2 };
+	send_syn(o);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	const uint16_t iss = conn->rdp.snd_iss;
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+
+	const unsigned int before = test_tx_count;
+	uint16_t seqs[2];
+	for (int i = 0; i < 2; i++) {
+		csp_packet_t * out = csp_buffer_get(0);
+		ck_assert_ptr_nonnull(out);
+		out->data[0] = (uint8_t)('a' + i);
+		out->length = 1;
+		csp_send(accepted, out);
+		seqs[i] = tx_seq;
+	}
+	const unsigned int frames = test_tx_count - before;
+	const int sequential = (seqs[0] == (uint16_t)(iss + 1)) &&
+						   (seqs[1] == (uint16_t)(iss + 2));
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_window_of_two_admits_exactly_two", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("window_size", 2);
+		ctest_trace_int("offered", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("frames", (int64_t)frames);
+		ctest_trace_int("sequential", sequential);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_three_sends_are_sequential_and_an_ack_releases_them)
 {
 	setup_stack();
@@ -1684,6 +1737,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_window_of_two_admits_exactly_two);
 	tcase_add_test(tc_ack, test_three_sends_are_sequential_and_an_ack_releases_them);
 	tcase_add_test(tc_ack, test_one_retransmission_after_the_packet_timeout);
 	tcase_add_test(tc_ack, test_unacknowledged_data_is_retransmitted_then_given_up_on);
