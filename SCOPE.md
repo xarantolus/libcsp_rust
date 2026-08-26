@@ -269,6 +269,33 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### Three C tests that measured the dedup window and recorded none of it
+
+2026-08-26. `suite_dedup.c` had seven tests: four traced the mode matrix, three asserted the
+window boundary against a real libcsp node and traced nothing. So the port's dedup window
+was compared to no oracle at all — the mode matrix pinned *which* packets are candidates,
+never *for how long*. The three now record, plus two new cases at the 32-bit clock wrap, and
+all five replay.
+
+**And the wrap entry (SCOPE 10) was wrong.** It has said since this began that after the
+wrap `time` is small, every entry looks expired, and dedup stops suppressing. Measured on the
+real library, a duplicate 60 ms apart *spanning* the wrap is suppressed exactly as it is at
+any other time. The reason is arithmetic I had not done: `stamp + 100` overflows to a small
+number **and** `time` wraps to a small number, and the two cancel.
+
+The real failure is the last 100 ms *before* the counter turns over, where the addition
+overflows but `time` has not wrapped yet and is still huge — so every entry looks expired.
+Both points are now records: `a_duplicate_in_the_last_window_before_the_wrap` (C delivers 2,
+port suppresses, `diverges`) and `a_duplicate_across_the_clock_wrap` (both deliver 1,
+`must_match`).
+
+"Dedup dies at 49 days" and "dedup drops one 100 ms window every 49 days" are different
+operational claims and only the second is true. The first is what a reader would have taken
+away, and it came from reading the comparison rather than evaluating it.
+
+`clock.h` has documented since it was written that the wrap is "reachable by assignment".
+Nothing had used it. The capability existing is not the same as the case being covered.
+
 ### The panic that hid mutations was a class, not an instance
 
 2026-08-26, following straight on from the promiscuous-tap finding below. If one `expect` in
@@ -894,7 +921,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**93 of 118**.
+**96 of 123**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
@@ -1124,12 +1151,25 @@ whoever maintains the fork can see what was found and decide for themselves.
    user left there. Not a remote reboot primitive — matching a 32-bit magic by accident is
    unlikely — but an out-of-bounds read on the one port whose job is recovery, reachable
    by anyone who can send a packet. The port requires the four bytes.
-10. **Deduplication stops working at the 49-day clock wrap.** `csp_dedup.c` compares
+10. **Deduplication stops working for the last 100 ms before the 49-day clock wrap** —
+    not, as this entry said until 2026-08-26, *after* the wrap. `csp_dedup.c:32` compares
     `time > csp_dedup_timestamp[i] + CSP_DEDUP_WINDOW_MS` on a free-running 32-bit
-    millisecond counter. After the wrap `time` is small, the comparison is false for every
-    entry, the scan breaks on the first one, and duplicates stop being suppressed. The
-    addition can also overflow near the wrap. The port uses wrapping subtraction, with a
-    test that fails on the naive form.
+    millisecond counter. Two things can go wrong: `stamp + 100` can overflow, and `time`
+    can wrap. **Where both happen they cancel**, so the naive comparison is correct across
+    the wrap itself. Where only the addition overflows — the last window before the counter
+    turns over — `stamp + 100` is a small number while `time` is still huge, every entry
+    looks expired, the scan breaks on the first one, and duplicates are delivered.
+
+    Both sides are now measured on a real libcsp node rather than reasoned about, the
+    virtual clock being what makes 2^32 reachable by assignment:
+    `dedup::a_duplicate_in_the_last_window_before_the_wrap` (40 ms apart, both before the
+    wrap — the C delivers **2**, the port suppresses, `diverges`) and
+    `dedup::a_duplicate_across_the_clock_wrap` (60 ms apart, spanning the wrap — both
+    deliver **1**, `must_match`). The port ages by wrapping subtraction throughout.
+
+    The correction matters beyond the wording: "dedup dies at 49 days" and "dedup drops one
+    100 ms window every 49 days" are very different operational claims, and only the second
+    one is true.
 11. **`csp_if_eth_unpack_header` is asymmetric with its packer and shifts into a sign
     bit.** The packer writes `packet_id`/`src_addr` with `htobe16`; the unpacker does
     `*packet_id = buf->packet_id << 16 | buf->src_addr` with no `be16toh` on either. The

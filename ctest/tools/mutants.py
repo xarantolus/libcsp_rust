@@ -296,6 +296,14 @@ MUTANTS = [
   ("eth: a transfer larger than the buffer is refused up front", "csp-core/src/eth.rs",
    "                if h.packet_length as usize > out.len() {",
    "                if false && h.packet_length as usize > out.len() {"),
+  # The dedup window. Its boundary and its behaviour at the 32-bit clock wrap are the two
+  # things a record can pin here; before 2026-08-26 the C suite measured both and traced
+  # neither, so the port's window was compared to nothing.
+  ("dedup: the window is 100ms", "csp/src/dedup.rs",
+   "pub const DEDUP_WINDOW_MS: u32 = 100;", "pub const DEDUP_WINDOW_MS: u32 = 50;"),
+  ("dedup: entries age by wrapping subtraction", "csp/src/dedup.rs",
+   "            if now_ms.wrapping_sub(self.stamps[i]) > DEDUP_WINDOW_MS {",
+   "            if now_ms > self.stamps[i].wrapping_add(DEDUP_WINDOW_MS) {"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
