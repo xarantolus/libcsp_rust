@@ -747,11 +747,17 @@ mod tests {
     #[test]
     fn the_router_tick_drives_rdp_timeouts() {
         // The RDP machine reads no clock on purpose, so something has to step it.
+        //
+        // Driven with a half-finished handshake, not an established connection: libcsp only
+        // reaps the former on `conn_timeout` (`csp_rdp.c`'s CONNECTION TIMEOUT is guarded by
+        // `dest_socket != NULL`), and this used the latter, which is the behaviour that
+        // turned out to be wrong. The property under test is that the tick reaches the
+        // timers at all, and a `SynSent` connection shows that just as well.
         let mut t = T::new();
         let h = t.alloc(id(10), 0, 0).unwrap();
         {
             let c = t.rdp_mut(h).unwrap();
-            c.state = rdp::State::Open;
+            c.state = rdp::State::SynSent;
             c.last_activity = 0;
         }
         assert_eq!(t.tick_rdp(5_000, 5, |_, _| {}), 0, "not yet timed out");

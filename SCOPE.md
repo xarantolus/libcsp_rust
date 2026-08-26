@@ -269,6 +269,40 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The port reaped idle RDP connections; libcsp does not
+
+2026-08-26, from the one gap the untraced sweep left open — `conn_timeout` adoption.
+
+I wrote the test expecting to show that a peer's proposed `conn_timeout` closes an idle
+connection sooner than the compiled-in default. **The measurement said the connection was
+still open and still answering.** `csp_rdp_check_timeouts` guards its CONNECTION TIMEOUT with
+`if (conn->dest_socket != NULL)`, and `dest_socket` is cleared the moment the connection is
+*announced* to the socket — `csp_rdp.c:695`, "the connection handle has been passed to
+userspace" — not when the application accepts it. So that branch only ever reaps a handshake
+that never finished. **libcsp does not idle-expire an established RDP connection at all**;
+`conn_timeout` survives as the CLOSE-WAIT bound and as the upper bound on `ack_timeout`.
+
+`Connection::step`'s `Event::Tick` closed on `conn_timeout` in **any** state. Two
+consequences, and the second is the serious one:
+
+- a connection that is merely quiet — a telemetry link between passes — was dropped while
+  the C kept answering on it, so the peer's next packet went unanswered; and
+- `conn_timeout` is **proposed by the peer**, so it was a lever a peer could pull to make
+  this node discard its own connection early.
+
+Now gated on `state != Open`. Idle expiry as resource management still happens, in
+`ConnTable::expire_idle`, against the timeout the *node* chooses rather than one a peer sent.
+`rdp::a_proposed_conn_timeout_is_adopted` pins it end to end: 3000 ms proposed, 4000 ms idle,
+and the peer still gets an answer.
+
+**Two unit tests asserted the behaviour I removed** — `rdp::idle_connections_time_out` and
+`conn::the_router_tick_drives_rdp_timeouts`. Both encoded my reading rather than the C's, and
+both would have blocked the fix. The first is now
+`only_an_unestablished_connection_times_out` and pins both halves; the second keeps its real
+subject (that the tick reaches the timers) and drives it with a `SynSent` connection instead.
+That is the third time a unit test written from my reading of the C had to be corrected
+alongside the code it was guarding.
+
 ### The seventeen untraced C tests, justified one at a time
 
 2026-08-26. `just untraced` reports 128 of 145 C tests recording something. I had been
@@ -1132,7 +1166,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**103 of 131**.
+**104 of 132**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
