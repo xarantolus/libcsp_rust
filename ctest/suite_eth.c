@@ -51,6 +51,13 @@ static uint8_t sent[MAX_FRAMES][512];
 static size_t sent_len[MAX_FRAMES];
 static unsigned int sent_n;
 
+/* What the application got. `refused`/`frame`/`drop` say a frame was rejected; they say
+   nothing about whether reassembly put the right bytes together, which is the only thing
+   the peer actually cares about. */
+static unsigned int delivered_n;
+static uint8_t delivered_body[CSP_BUFFER_SIZE];
+static size_t delivered_body_len;
+
 static void setup_stack(bool promisc) {
 	csp_init();
 
@@ -65,6 +72,8 @@ static void setup_stack(bool promisc) {
 
 	memset(framebuf, 0, sizeof(framebuf));
 	sent_n = 0;
+	delivered_n = 0;
+	delivered_body_len = 0;
 	ctest_clock_set(CTEST_CLOCK_EPOCH_MS);
 }
 
@@ -102,7 +111,14 @@ static unsigned int drain_qfifo(void) {
 		if (item.packet == NULL) {
 			break;
 		}
+		if (delivered_n == 0) {
+			delivered_body_len = item.packet->length > sizeof(delivered_body)
+									 ? sizeof(delivered_body)
+									 : item.packet->length;
+			memcpy(delivered_body, item.packet->data, delivered_body_len);
+		}
 		csp_buffer_free(item.packet);
+		delivered_n++;
 		n++;
 	}
 	return n;
@@ -118,7 +134,11 @@ static uint16_t whole_packet(uint8_t * out, size_t payload_len, uint16_t dst) {
 	p->id.dport = TEST_PORT;
 	p->id.sport = 40;
 	p->id.flags = 0;
-	memset(p->data, 0xD5, payload_len);
+	/* Positional, not a constant fill: with every byte the same, a reassembly that put the
+	   segments back in the wrong order would produce identical bytes and pass. */
+	for (size_t i = 0; i < payload_len; i++) {
+		p->data[i] = (uint8_t)(0xD5 ^ i);
+	}
 	p->length = (uint16_t)payload_len;
 	csp_id_prepend(p);
 
@@ -129,6 +149,9 @@ static uint16_t whole_packet(uint8_t * out, size_t payload_len, uint16_t dst) {
 }
 
 static void record(const char * name, int ret, int before) {
+	/* Sweep anything the test did not drain itself, so `delivered` is the whole truth and
+	   not just the part the test happened to look at. */
+	(void)drain_qfifo();
 	if (!ctest_tracing()) {
 		return;
 	}
@@ -139,12 +162,15 @@ static void record(const char * name, int ret, int before) {
 		ctest_trace_hex(NULL, sent[i], sent_len[i]);
 	}
 	ctest_trace_arr_end();
+	ctest_trace_int("promisc", ifdata.promisc);
 	ctest_trace_obj_end();
 	ctest_trace_obj_begin("observed");
 	ctest_trace_int("refused", ret != CSP_ERR_NONE);
 	ctest_trace_int("frame", (int64_t)ifdata.iface.frame);
 	ctest_trace_int("drop", (int64_t)ifdata.iface.drop);
 	ctest_trace_int("buffers_consumed", before - csp_buffer_remaining());
+	ctest_trace_int("delivered", (int64_t)delivered_n);
+	ctest_trace_hex("delivered_body", delivered_body, delivered_body_len);
 	ctest_trace_obj_end();
 	ctest_trace_end();
 }
@@ -310,6 +336,28 @@ START_TEST(test_a_packet_length_below_the_csp_header_is_refused)
 END_TEST
 
 /* Longer than any buffer could hold. */
+/* The same floor, but on a segment that does not complete the packet. The existing case
+   declares a length below the header *and* fills it, so a receiver that only noticed when
+   it came to parse the reassembled bytes would refuse it too, and the two are
+   indistinguishable. Here the transfer is left incomplete: refusing up front is the only
+   way to refuse at all. */
+START_TEST(test_a_packet_length_below_the_csp_header_is_refused_before_it_completes)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body[8] = {0};
+	int ret = deliver(CSP_ETH_TYPE_CSP, 3, PEER_ADDR, 2, 5, ETH_HDR + 2, body, 2);
+
+	ck_assert_int_ne(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(ifdata.iface.frame, 1);
+	ck_assert_uint_eq(drain_qfifo(), 0);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+	record("a_packet_length_below_the_csp_header_is_refused_before_it_completes", ret,
+		   before);
+}
+END_TEST
+
 START_TEST(test_a_packet_length_beyond_the_buffer_is_refused)
 {
 	setup_stack(false);
@@ -344,6 +392,32 @@ START_TEST(test_a_whole_packet_in_one_segment_is_delivered)
 	ck_assert_uint_eq(drain_qfifo(), 1);
 	ck_assert_int_eq(csp_buffer_remaining(), before);
 	record("a_whole_packet_in_one_segment_is_delivered", ret, before);
+}
+END_TEST
+
+/* Ethernet pads every frame below 60 bytes, so a small CSP packet reaches `csp_eth_rx`
+   with trailing bytes past `seg_size`. The C bounds `ETH_HDR + seg_size` against what
+   arrived and copies `seg_size` -- the padding is surplus, not a malformed frame. Any
+   receiver that instead required the frame to be exactly `ETH_HDR + seg_size` long would
+   refuse every small packet on a real link. */
+START_TEST(test_a_frame_padded_to_the_ethernet_minimum_is_delivered)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body[CSP_BUFFER_SIZE];
+	const uint16_t frame_length = whole_packet(body, 4, LOCAL_ADDR);
+	const uint32_t padded = 60;
+	ck_assert_uint_lt(ETH_HDR + frame_length, padded);
+
+	int ret = deliver(CSP_ETH_TYPE_CSP, 9, PEER_ADDR, frame_length, frame_length, padded,
+					  body, frame_length);
+
+	ck_assert_int_eq(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(ifdata.iface.frame, 0);
+	ck_assert_uint_eq(drain_qfifo(), 1);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+	record("a_frame_padded_to_the_ethernet_minimum_is_delivered", ret, before);
 }
 END_TEST
 
@@ -554,11 +628,13 @@ Suite * eth_suite(void)
 	tcase_add_test(tc_guard, test_a_segment_larger_than_its_packet_is_refused);
 	tcase_add_test(tc_guard, test_a_segment_longer_than_the_bytes_received_is_refused);
 	tcase_add_test(tc_guard, test_a_packet_length_below_the_csp_header_is_refused);
+	tcase_add_test(tc_guard, test_a_packet_length_below_the_csp_header_is_refused_before_it_completes);
 	tcase_add_test(tc_guard, test_a_packet_length_beyond_the_buffer_is_refused);
 	suite_add_tcase(s, tc_guard);
 
 	TCase * tc_rx = tcase_create("reassembly");
 	tcase_add_test(tc_rx, test_a_whole_packet_in_one_segment_is_delivered);
+	tcase_add_test(tc_rx, test_a_frame_padded_to_the_ethernet_minimum_is_delivered);
 	tcase_add_test(tc_rx, test_two_segments_are_reassembled);
 	tcase_add_test(tc_rx, test_segments_disagreeing_on_the_packet_length_are_refused);
 	tcase_add_test(tc_rx, test_segments_totalling_more_than_the_packet_are_refused);

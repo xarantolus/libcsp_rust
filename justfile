@@ -8,6 +8,7 @@ default:
 
 # Configure + build the C oracle.
 ctest-build:
+    python3 ctest/tools/registered.py
     cmake -S ctest -B build/ctest -G Ninja -DCMAKE_BUILD_TYPE=Debug
     cmake --build build/ctest
 

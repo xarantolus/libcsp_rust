@@ -248,29 +248,29 @@ impl Reassembler {
         self.key.is_some() && self.received >= self.total
     }
 
-    /// Accept one segment, copying its payload into `out` at `offset`.
+    /// Accept one segment, appending its payload to `out`.
     ///
-    /// `offset` is where this segment belongs; EFP carries no explicit offset field, so a
-    /// receiver derives it from arrival order or a higher-layer convention. Passing it in
-    /// keeps that policy out of here.
+    /// EFP carries no offset field, so segments belong in arrival order and land at the
+    /// running byte count -- `csp_eth_rx` copies to `frame_begin + rx_count`. There is no
+    /// `offset` parameter for the same reason: the wire cannot express one, and a caller
+    /// that supplied its own could place a segment where no peer could have asked for.
+    ///
+    /// `payload` is the whole of the frame after the header. Ethernet pads frames to a
+    /// 60-byte minimum, so it may be longer than `seg_size`; the surplus is ignored, as
+    /// the C ignores anything past `sizeof(header) + seg_size`. Shorter is an error.
     ///
     /// Returns `true` when the packet is complete.
-    pub fn push(
-        &mut self,
-        h: &Header,
-        offset: usize,
-        payload: &[u8],
-        out: &mut [u8],
-    ) -> Result<bool> {
+    pub fn push(&mut self, h: &Header, payload: &[u8], out: &mut [u8]) -> Result<bool> {
         if !h.is_csp() {
             return Err(Error::UnexpectedEtherType { got: h.ethertype });
         }
-        if payload.len() != h.seg_size as usize {
+        if payload.len() < h.seg_size as usize {
             return Err(Error::InconsistentTotal {
                 expected: h.seg_size as u32,
                 got: payload.len() as u32,
             });
         }
+        let payload = &payload[..h.seg_size as usize];
         // A zero-length segment cannot advance reassembly, so a peer sending nothing but
         // those holds a transfer open forever without ever failing — a stall rather than an
         // error, which is the harder kind to diagnose. `csp_eth_rx` refuses it up front;
@@ -319,21 +319,14 @@ impl Reassembler {
             }
         }
 
+        // The running total is the whole bound, matching `rx_count + seg_size >
+        // frame_length`. Segments that each fit on their own can still add up to more than
+        // the packet claimed.
+        let offset = self.received as usize;
         let end = offset + payload.len();
         if end > self.total as usize {
             return Err(Error::OffsetBeyondTotal {
                 offset: offset as u32,
-                total: self.total as u32,
-            });
-        }
-        // The *running* total, not just this segment's extent. `csp_eth_rx` bounds
-        // `rx_count + seg_size` against the declared length, which is a different check:
-        // segments that each fit on their own can still add up to more than the packet
-        // claimed. Only the per-segment bound was here, so two overlapping segments were
-        // accepted and the second silently overwrote the first.
-        if self.received as usize + payload.len() > self.total as usize {
-            return Err(Error::OffsetBeyondTotal {
-                offset: self.received as u32,
                 total: self.total as u32,
             });
         }
@@ -533,7 +526,7 @@ mod tests {
         };
         let mut out = [0u8; 64];
         assert_eq!(
-            r.push(&h, 0, &[0u8; 4], &mut out),
+            r.push(&h, &[0u8; 4], &mut out),
             Err(Error::UnexpectedEtherType { got: 0x0800 })
         );
     }
@@ -599,20 +592,22 @@ mod tests {
             let data = &payload[..total];
             let mut r = Reassembler::new();
             let mut out = [0u8; 3000];
-            let mut offset = 0usize;
             let mut done = false;
             for (h, chunk) in Segmenter::new(data, 1500, B, A, 11, 3).unwrap() {
-                done = r.push(&h, offset, chunk, &mut out).unwrap();
-                offset += chunk.len();
+                done = r.push(&h, chunk, &mut out).unwrap();
             }
             assert!(done, "total={total} never completed");
             assert_eq!(&out[..total], data, "total={total}");
         }
     }
 
+    /// `csp_eth_rx` copies to `frame_begin + rx_count`, so segments are assembled in the
+    /// order they arrive and the wire carries no offset to say otherwise. This used to
+    /// assert that reordered segments still reassembled correctly -- it passed only because
+    /// `push` took an offset the *sender* had computed, which no receiver has. Delivered in
+    /// arrival order is what the C does, so it is what the port does.
     #[test]
-    fn out_of_order_segments_are_accepted() {
-        // EFP explicitly permits this, unlike SFP and CFP.
+    fn segments_are_assembled_in_arrival_order() {
         let payload: [u8; 3000] = core::array::from_fn(|i| (i & 0xff) as u8);
         let segs: heapless::Vec4<(Header, usize)> = {
             let mut v = heapless::Vec4::new();
@@ -627,14 +622,20 @@ mod tests {
 
         let mut r = Reassembler::new();
         let mut out = [0u8; 3000];
-        // last segment first
         for i in (0..segs.len()).rev() {
             let (h, off) = segs.get(i);
             let chunk = &payload[off..off + h.seg_size as usize];
-            r.push(&h, off, chunk, &mut out).unwrap();
+            r.push(&h, chunk, &mut out).unwrap();
         }
-        assert!(r.is_complete(), "reordered segments must still complete");
-        assert_eq!(&out[..3000], &payload[..]);
+        assert!(r.is_complete(), "every byte still arrived");
+
+        let (last_h, last_off) = segs.get(segs.len() - 1);
+        assert_eq!(
+            &out[..last_h.seg_size as usize],
+            &payload[last_off..last_off + last_h.seg_size as usize],
+            "the segment that arrived first is at the front, whatever it was"
+        );
+        assert_ne!(&out[..3000], &payload[..], "reordering is not repaired");
     }
 
     mod heapless {
@@ -674,7 +675,7 @@ mod tests {
             packet_length: 8,
             ..hdr()
         };
-        assert!(!r.push(&h1, 0, &[0u8; 4], &mut out).unwrap());
+        assert!(!r.push(&h1, &[0u8; 4], &mut out).unwrap());
         let h2 = Header {
             packet_id: 2,
             seg_size: 4,
@@ -682,7 +683,7 @@ mod tests {
             ..hdr()
         };
         assert!(matches!(
-            r.push(&h2, 4, &[0u8; 4], &mut out),
+            r.push(&h2, &[0u8; 4], &mut out),
             Err(Error::IdentMismatch { .. })
         ));
     }
@@ -697,7 +698,7 @@ mod tests {
             ..hdr()
         };
         assert!(matches!(
-            r.push(&h, 0, &[0u8; 4], &mut out),
+            r.push(&h, &[0u8; 4], &mut out),
             Err(Error::InconsistentTotal { .. })
         ));
     }
@@ -715,7 +716,7 @@ mod tests {
             packet_length: 0,
             ..hdr()
         };
-        assert_eq!(r.push(&h, 0, &[], &mut out), Err(Error::EmptyFragment));
+        assert_eq!(r.push(&h, &[], &mut out), Err(Error::EmptyFragment));
 
         // A real segment, but a packet that declares no length at all.
         let mut r = Reassembler::new();
@@ -724,7 +725,7 @@ mod tests {
             packet_length: 0,
             ..hdr()
         };
-        assert_eq!(r.push(&h, 0, &[0; 4], &mut out), Err(Error::ZeroTotal));
+        assert_eq!(r.push(&h, &[0; 4], &mut out), Err(Error::ZeroTotal));
     }
 
     /// A packet declaring more than the caller's buffer can ever hold is refused on the
@@ -741,22 +742,25 @@ mod tests {
             ..hdr()
         };
         assert_eq!(
-            r.push(&h, 0, &[0; 4], &mut out),
+            r.push(&h, &[0; 4], &mut out),
             Err(Error::BufferTooSmall { needed: 5000 })
         );
     }
 
+    /// The running total is the bound. Each segment fits the declared length on its own;
+    /// together they exceed it, which is what `rx_count + seg_size > frame_length` catches.
     #[test]
-    fn a_segment_past_the_declared_length_is_refused() {
+    fn segments_totalling_more_than_the_declared_length_are_refused() {
         let mut r = Reassembler::new();
         let mut out = [0u8; 64];
         let h = Header {
             seg_size: 4,
-            packet_length: 4,
+            packet_length: 6,
             ..hdr()
         };
+        assert!(!r.push(&h, &[0u8; 4], &mut out).unwrap());
         assert!(matches!(
-            r.push(&h, 8, &[0u8; 4], &mut out),
+            r.push(&h, &[0u8; 4], &mut out),
             Err(Error::OffsetBeyondTotal { .. })
         ));
     }

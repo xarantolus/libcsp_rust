@@ -745,7 +745,15 @@ impl Connection {
                     return Action::SendControl(Header {
                         flags: SYN | ACK,
                         seq_nr: self.snd_iss,
-                        ack_nr: self.rcv_irs,
+                        // `rcv_cur`, not `rcv_irs`. `csp_rdp_check_timeouts` refreshes the
+                        // acknowledgement on every retransmission -- "Update to latest
+                        // outgoing ACK" -- keeping the sequence number as it was.
+                        //
+                        // The two are equal throughout `SynRcvd`, since nothing advances
+                        // `rcv_cur` before the handshake completes, so no record can tell
+                        // them apart here and none is claimed to. Written this way because
+                        // it is the quantity the C takes, not because a test caught it.
+                        ack_nr: self.rcv_cur,
                     });
                 }
                 Action::Nothing

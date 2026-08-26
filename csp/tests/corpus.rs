@@ -341,6 +341,10 @@ struct CmpObserved {
     reply_code: i32,
 }
 
+fn tohex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 fn unhex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -492,6 +496,8 @@ struct EthInput {
     /// Every frame the C's receive path saw, in order, each already truncated to the
     /// `received_len` a NIC would have delivered.
     frames: Vec<String>,
+    /// Whether the interface accepts packets addressed elsewhere.
+    promisc: u8,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -501,6 +507,11 @@ struct EthObserved {
     frame: u32,
     drop: u32,
     buffers_consumed: u32,
+    /// How many packets reached the application, and the body of the first. Without these
+    /// the record said only whether a frame was refused -- identical whether reassembly
+    /// put the right bytes together or none at all.
+    delivered: u32,
+    delivered_body: String,
 }
 
 /// The port's equivalent of `csp_eth_rx`, applied to the same frames in the same order.
@@ -525,6 +536,8 @@ fn replay_eth(input: &EthInput) -> EthObserved {
     let mut out = [0u8; CSP_BUFFER_SIZE + V2_HEADER];
     let mut refused = 0;
     let mut frame = 0;
+    let mut delivered = 0;
+    let mut body = String::new();
 
     for hex in &input.frames {
         let bytes = unhex(hex);
@@ -535,8 +548,23 @@ fn replay_eth(input: &EthInput) -> EthObserved {
             // guard from `Reassembler::push` left every `eth::` record green, because the
             // replay was still refusing the frame itself. The same shape that once hid a
             // missing CMP server: the test contained the production logic.
+            // The frame as it arrived, padding included -- `push` takes `seg_size` from
+            // the header and ignores the rest, as `csp_eth_rx` does. Trimming here would
+            // put the guard in the test again.
             let payload = bytes.get(eth::HEADER_LEN..).ok_or(())?;
-            r.push(&h, 0, payload, &mut out).map_err(|_| ())?;
+            if r.push(&h, payload, &mut out).map_err(|_| ())? {
+                let total = h.packet_length as usize;
+                let id = csp_core::id::Id::decode(Version::V2, &out[..total]).map_err(|_| ())?;
+                // Only what is addressed to this node reaches the application; the C suite
+                // sends some frames to a peer to exercise the address filter.
+                if id.dst == LOCAL_ADDR || input.promisc != 0 {
+                    delivered += 1;
+                    if body.is_empty() {
+                        body = tohex(&out[V2_HEADER..total]);
+                    }
+                }
+                r.reset();
+            }
             Ok(())
         })();
         if outcome.is_err() {
@@ -550,6 +578,8 @@ fn replay_eth(input: &EthInput) -> EthObserved {
         frame,
         drop: 0,
         buffers_consumed: 0,
+        delivered,
+        delivered_body: body,
     }
 }
 
@@ -1148,8 +1178,12 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     if case == "an_unacknowledged_syn_ack_is_retransmitted_then_reset" {
         // The peer never acknowledges. `Router::tick` drives the RDP timers; every frame
         // it produces has to reach the caller or the peer hears nothing.
+        // What the original SYN|ACK carried, before any repeat.
+        let first = replies.first().copied().unwrap_or((0, 0, 0, 0));
+        let (first_seq, first_ack) = (first.1, first.2);
         let mut frames = 0usize;
         let mut closed = false;
+        let mut repeat: Option<(u8, u16, u16)> = None;
         let mut t = CLOCK;
         for _ in 0..1000 {
             t += 20;
@@ -1160,7 +1194,14 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
                 match n.work(t) {
                     csp::Routed::Respond { packet, .. } => {
                         frames += 1;
-                        drop(n.take_forwarded(packet));
+                        let p = n.take_forwarded(packet).expect("a live slot");
+                        if repeat.is_none() {
+                            repeat = Some(p.with_payload(|b| {
+                                let h = rdp::Header::decode(b).unwrap();
+                                (h.flags, h.seq_nr, h.ack_nr)
+                            }));
+                        }
+                        drop(p);
                     }
                     csp::Routed::Idle => break,
                     other => {
@@ -1176,10 +1217,14 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
                 break;
             }
         }
+        let r = repeat.unwrap_or((0, 0, 0));
         return serde_json::json!({
             "more_than_one_frame": u8::from(frames > 1),
             "at_least_max_retransmits": u8::from(frames as u32 >= csp_core::rdp::MAX_RETRANSMITS),
             "connection_gone": u8::from(closed),
+            "repeat_is_syn_ack": u8::from(r.0 == rdp::SYN | rdp::ACK),
+            "repeat_seq_matches_first": u8::from(r.1 == first_seq),
+            "repeat_ack_matches_first": u8::from(r.2 == first_ack),
         });
     }
 
@@ -2403,6 +2448,8 @@ struct EthJson {
     frame: u32,
     drop: u32,
     buffers_consumed: u32,
+    delivered: u32,
+    delivered_body: String,
 }
 impl From<EthObserved> for EthJson {
     fn from(o: EthObserved) -> Self {
@@ -2411,6 +2458,8 @@ impl From<EthObserved> for EthJson {
             frame: o.frame,
             drop: o.drop,
             buffers_consumed: o.buffers_consumed,
+            delivered: o.delivered,
+            delivered_body: o.delivered_body,
         }
     }
 }

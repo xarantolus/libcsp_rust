@@ -148,7 +148,14 @@ comparing `packet->conn`, so a busy connection crowds out a quiet one.
 **Deviations:** `SCOPE.md` — SYN option clamping is treated as a security control, and the
 give-up counter bounds retransmission.
 
-**Tests:** 48 in `rdp`, up from 33.
+Handshake retransmission is checked against the C rather than against a reading of it: a
+corpus record drives a peer that never acknowledges and compares the flags, sequence number
+and acknowledgement of the first repeat against the original `SYN|ACK`. Both agree. The C
+refreshes `ack_nr` to `rcv_cur` on each repeat (`csp_rdp.c`, "Update to latest outgoing
+ACK"); `SynRcvd` cannot advance `rcv_cur`, so the record cannot distinguish that from any
+other equal-valued field and does not claim to.
+
+**Tests:** 49 in `rdp`, up from 33.
 
 ---
 
@@ -244,7 +251,7 @@ Against `src/interfaces/csp_if_kiss.c` and `csp_if_eth.c` / `csp_if_eth_pbuf.c`.
 | `csp_kiss_tx` escaping | `kiss::encode` | ✅ 6 golden frames, incl. the escape cases |
 | `csp_kiss_rx` state machine | `kiss::Decoder` | ✅ |
 | ETH header pack/unpack | `eth::Header` | ✅ |
-| ETH segmentation / reassembly | `Segmenter` / `Reassembler` | ✅ out-of-order tolerated |
+| ETH segmentation / reassembly | `Segmenter` / `Reassembler` | ✅ arrival order, padding tolerated |
 | ARP | `ArpTable` | ✅ added earlier in this work |
 
 **Found during the audit — an interop difference.** The C's `KISS_MODE_ESCAPED` appends
@@ -275,7 +282,14 @@ the KISS CRC enabled a checksum disagreement too. Now matched, with a test feedi
 **Rusty:** yes. The decoder is a fixed-capacity state machine returning borrowed frames,
 with over-long frames counted rather than truncated into something that would still parse.
 
-**ETH:** the C's header does not match the bit-packed EFP layout its own file comment
+**ETH:** reassembly appends at the running byte count, as `csp_eth_rx` copies to
+`frame_begin + rx_count`; EFP carries no offset field, so segments belong in arrival order
+and `push` derives the position rather than taking it. A frame longer than
+`header + seg_size` is accepted and the surplus ignored — Ethernet pads to 60 bytes, and
+requiring an exact length refused every small packet (`SCOPE.md`). The corpus records what
+the application received, body included, not only whether a frame was refused.
+
+The C's header does not match the bit-packed EFP layout its own file comment
 specifies; the port follows the code, since that is what is on the wire. Its unpacker is
 also asymmetric with its packer and shifts a promoted `int` into the sign bit
 (`SCOPE.md` 11).

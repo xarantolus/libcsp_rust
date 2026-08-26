@@ -269,6 +269,60 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The Ethernet replay refused every padded frame, and no record could see it
+
+Found on 2026-08-26, starting from the mutation sweep rather than from reading. Removing
+`Reassembler`'s running-total bound left every record green, so either the guard was dead or
+something upstream refused the frame first. It was the second.
+
+`Reassembler::push` required `payload.len() == seg_size`. `csp_eth_rx` requires only that
+`sizeof(header) + seg_size` fits in what arrived, copies `seg_size` bytes and ignores the
+rest. **Ethernet pads every frame to 60 bytes**, so a small CSP packet arrives with trailing
+bytes past `seg_size` — and the port refused it. On a real link the port would have dropped
+every packet small enough to be padded, which is most telemetry.
+
+`eth::segments_totalling_more_than_the_packet_are_refused` was green throughout. Its first
+frame carries 34 data bytes in a 38-byte region; the C accepts it and refuses the *second*
+frame on the running total, the port refused the *first* on its length. Both ended at
+`refused: 1`, and `refused` was all the record compared. `a_frame_padded_to_the_ethernet_minimum_is_delivered`
+now covers the padding directly.
+
+Three things changed:
+
+1. **`push` tolerates the surplus** and takes `seg_size` bytes, as the C does. A frame
+   shorter than its declared segment is still refused.
+2. **The `offset` parameter is gone.** EFP has no offset field; `csp_eth_rx` copies to
+   `frame_begin + rx_count`. The parameter let a caller place a segment where no peer could
+   have asked for one — and it is *why* this hid, because the replay passed `0` for every
+   segment, so the second segment overwrote the first and the running-total guard was the
+   only bound left standing. With the offset derived internally, the two bounds collapse
+   into one.
+3. **A unit test asserted a capability the C does not have.**
+   `out_of_order_segments_are_accepted` claimed "EFP explicitly permits this". It passed
+   only because it handed `push` an offset the *sender* had computed, which no receiver
+   has. libcsp assembles in arrival order and cannot do otherwise. Replaced by
+   `segments_are_assembled_in_arrival_order`, which asserts the arrival-order result.
+
+**The records observed no delivery at all.** All eighteen compared `refused`/`frame`/`drop`/
+`buffers_consumed` — nothing about whether reassembly produced the right bytes, which is why
+`two_segments_are_reassembled` was one of the records no mutation could move. They now carry
+`delivered` and `delivered_body`, and the C fills the payload positionally (`0xD5 ^ i`)
+rather than with a constant, so segments reassembled in the wrong order no longer match.
+
+### The mutation sweep did not run the tests for the crate it mutates
+
+Same day, and the reason the above took two cycles to surface. `ctest/tools/mutants.py` ran
+`cargo test -p csp`. Most mutations target `csp-core/src`, whose unit tests live in
+`csp-core` — never compiled. Four Ethernet guards were reported as noticed by nothing while
+`csp-core/src/eth.rs` held unit tests asserting the exact error each one raises.
+
+The sweep now runs `-p csp -p csp-core`. Three of the four were false; one was real and is
+the finding above.
+
+I had also been reporting "no mutation went unnoticed" from a grep for `UNNOTICED`, which is
+not the string the script prints (`<-- NOTHING NOTICED`). The grep matched nothing on every
+run and I read that as nothing to report.
+
 ### SCOPE 11's undefined behaviour is now observed, not just read
 
 The entry below has said `csp_if_eth_unpack_header` shifts a promoted `uint16_t` into the
