@@ -21,6 +21,11 @@ the same file whose own body does -- `suite_dedup.c` and `suite_rdp.c` both reco
 helpers, and an earlier version of this that only looked for the literal call reported two
 already-covered tests as gaps.
 
+Every test the current run reports is justified one by one in `SCOPE.md` -- covered
+elsewhere, structurally inapplicable, or a named gap. A count alone invites exactly the
+hand-wave this exists to prevent, so check that table before concluding the remainder is
+fine.
+
 Usage: `just untraced`.
 """
 

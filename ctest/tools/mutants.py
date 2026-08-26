@@ -318,6 +318,9 @@ MUTANTS = [
    "    inner.update(payload);"),
   ("rdp: delayed_acks is a flag, not a count", "csp-core/src/rdp.rs",
    "            delayed_acks: w(3) != 0,", "            delayed_acks: w(3) == 1,"),
+  ("rdp: a proposed ack_timeout is adopted", "csp-core/src/rdp.rs",
+   "            ack_timeout: clamp(w(4), MIN_ACK_TIMEOUT, conn_timeout),",
+   "            ack_timeout: 250,"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

@@ -715,6 +715,57 @@ END_TEST
    a different schedule, and the field assertion alone cannot tell the two apart. Proposed
    as 2 with a delay count of 2, so the cadence must match
    `the_delay_count_fires_one_packet_after_it`, which proposes 1. */
+/* `ack_timeout` is the other half of delayed acknowledgement: when the delay *count* has
+   not been reached, the acknowledgement still goes out once this much time has passed
+   (`csp_rdp.c` checks it from `csp_rdp_check_timeouts`). Every existing record fixes it at
+   the C helper's 250 ms, so whether the value a peer *proposes* is adopted was never
+   measured -- a receiver that ignored it and kept its own default would acknowledge on a
+   completely different schedule, and on a link with a long round trip that is the
+   difference between a working transfer and a sender that keeps retransmitting.
+
+   Proposed as 5000 against a default of 250, with one packet delivered so the delay count
+   cannot be what fires. What is recorded is how long the peer waits. */
+START_TEST(test_a_proposed_ack_timeout_is_adopted)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 4, 20000, 1000, 1 /* delayed */, 5000 /* ack_timeout */, 4 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+
+	/* One packet: well under the delay count, so only the timeout can produce an ack. */
+	const unsigned int before = test_tx_count;
+	deliver_data(1001, conn->rdp.snd_iss);
+	const int acked_at_once = (test_tx_count > before);
+
+	/* Advance until the acknowledgement appears, and report when. */
+	uint32_t waited = 0;
+	while ((test_tx_count == before) && (waited < 20000)) {
+		ctest_clock_advance(250);
+		waited += 250;
+		csp_conn_check_timeouts();
+	}
+	const int acked = (test_tx_count > before);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_proposed_ack_timeout_is_adopted", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("ack_timeout", 5000);
+		ctest_trace_int("delayed_acks", 1);
+		ctest_trace_int("ack_delay_count", 4);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acked_immediately", acked_at_once);
+		ctest_trace_int("acked", acked);
+		ctest_trace_int("waited_ms", (int64_t)waited);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_a_nonzero_delayed_acks_is_on_not_a_count)
 {
 	setup_stack();
@@ -1159,6 +1210,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_proposed_ack_timeout_is_adopted);
 	tcase_add_test(tc_ack, test_a_nonzero_delayed_acks_is_on_not_a_count);
 	tcase_add_test(tc_ack, test_a_delay_count_beyond_the_window_is_bound_by_it);
 	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
