@@ -1000,6 +1000,54 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
         return serde_json::json!({ "frames_after_final_ack": after });
     }
 
+    if case == "without_delayed_acks_every_packet_is_acknowledged" {
+        // Acknowledgements counted as frames leaving a node, which is the only place they
+        // are observable. This record used to be replayed by setting `rcv_cur` by hand and
+        // calling `poll_ack` -- so it measured the state machine, and the node delivered
+        // RDP data without acknowledging any of it while this stayed green.
+        let mut acks = 0usize;
+        let mut acked: Vec<u16> = Vec::new();
+        for i in 1..=3u16 {
+            let mut d = n.packet().expect("the pool is empty");
+            d.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP,
+                src: PEER,
+                dst: NODE,
+                dport: PORT,
+                sport: 40,
+            });
+            let dh = rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: 1000 + i,
+                ack_nr: own_iss,
+            };
+            let mut framed = [0u8; 1 + rdp::HEADER_LEN];
+            let k = dh.encode(b"x", &mut framed).unwrap();
+            d.set_payload(&framed[..k]).unwrap();
+            n.router.receive(d, 0);
+
+            loop {
+                match n.work(CLOCK) {
+                    csp::Routed::Respond { packet, .. } => {
+                        acks += 1;
+                        let p = n.take_forwarded(packet).expect("a live slot");
+                        acked.push(p.with_payload(|b| rdp::Header::decode(b).unwrap().ack_nr));
+                        drop(p);
+                    }
+                    csp::Routed::Delivered { conn, .. } => {
+                        while let Ok(Some(p)) = n.read(conn) {
+                            drop(p);
+                        }
+                    }
+                    csp::Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        }
+        return serde_json::json!({ "acks": acks, "acked": acked });
+    }
+
     // data_reaches_the_application_without_the_rdp_trailer: one data packet on the now-open
     // connection, read back the way an application would.
     let mut data = n.packet().expect("the pool is empty");
@@ -1507,6 +1555,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 "a_syn_is_answered_with_syn_ack"
                     | "the_handshakes_final_ack_is_not_itself_answered"
                     | "data_reaches_the_application_without_the_rdp_trailer"
+                    | "without_delayed_acks_every_packet_is_acknowledged"
             ) =>
         {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))

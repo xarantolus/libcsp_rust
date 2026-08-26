@@ -693,6 +693,25 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             })
         };
 
+        // `step` returns exactly one action, and for in-order data that action is
+        // `Deliver` -- so the acknowledgement can only come from `poll_ack`, which is a
+        // separate call. Nothing made it, so this node delivered RDP data to the
+        // application and never acknowledged any of it: the peer retransmits each packet
+        // until `MAX_RETRANSMITS` and gives up, and the connection stalls after the first
+        // one. Measured against the C, which puts one ack on the wire per packet with
+        // delayed acks off.
+        //
+        // Queued rather than returned, so it rides alongside whatever the action was; the
+        // caller sees it on the next `work` call, the same as a fan-out destination.
+        if let Some(ack) = self
+            .conns
+            .rdp_mut(handle)
+            .ok()
+            .and_then(|c| c.poll_ack(now_ms))
+        {
+            let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);
+        }
+
         match action {
             rdp::Action::Deliver => {
                 // Strip the trailer so the application sees only its own bytes.
@@ -764,6 +783,30 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         is_new: bool,
         handle: Handle,
     ) -> Routed {
+        match self.queue_rdp(pool, id, ifaces, header, body, is_new, handle) {
+            Ok(()) => self.pop_pending().expect("a response was just queued"),
+            Err(r) => r,
+        }
+    }
+
+    /// The same, but only queues: the caller decides what to report.
+    ///
+    /// An acknowledgement travels *alongside* a delivery -- `step` returns one action, and
+    /// for in-order data that action is `Deliver`, so the ack comes from the separate
+    /// `poll_ack`. Emitting it through `emit_rdp` would have returned `Respond` and thrown
+    /// the `Delivered` away.
+    #[cfg(feature = "rdp")]
+    #[allow(clippy::too_many_arguments)]
+    fn queue_rdp<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        id: Id,
+        ifaces: &crate::iflist::IfList<N, A>,
+        header: csp_core::rdp::Header,
+        body: &[u8],
+        is_new: bool,
+        handle: Handle,
+    ) -> core::result::Result<(), Routed> {
         if is_new {
             // The application is told about the connection as soon as the handshake starts,
             // the same as for a plain first packet -- otherwise a peer that only ever sends
@@ -773,7 +816,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
 
         let Some(mut reply) = pool.acquire(0) else {
             self.counters.rx_queue_full += 1;
-            return Routed::Dropped(DropReason::ReceiveQueueFull);
+            return Err(Routed::Dropped(DropReason::ReceiveQueueFull));
         };
         reply.set_id(Id {
             pri: id.pri,
@@ -783,14 +826,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             dport: id.sport,
             sport: id.dport,
         });
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; csp_core::rdp::SYN_OPTIONS_LEN + csp_core::rdp::HEADER_LEN];
         let Ok(n) = header.encode(body, &mut buf) else {
             self.counters.malformed += 1;
-            return Routed::Dropped(DropReason::Malformed);
+            return Err(Routed::Dropped(DropReason::Malformed));
         };
         if reply.set_payload(&buf[..n]).is_err() {
             self.counters.malformed += 1;
-            return Routed::Dropped(DropReason::Malformed);
+            return Err(Routed::Dropped(DropReason::Malformed));
         }
 
         // Route it the way any outgoing packet is routed -- the reply has to reach the peer,
@@ -800,12 +843,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             Some(d) => d,
             None => {
                 self.counters.no_route += 1;
-                return Routed::Dropped(DropReason::NoRoute);
+                return Err(Routed::Dropped(DropReason::NoRoute));
             }
         };
         let slot = reply.into_index();
         self.push_pending_tagged(iface, via, slot, true);
-        self.pop_pending().expect("a response was just queued")
+        Ok(())
     }
 
     /// The initial send sequence number for a connection opening at `now_ms`.
