@@ -220,6 +220,17 @@ MUTANTS = [
   ("broadcast: a delivered one is not relayed on", "csp/src/router.rs",
    "        if for_us {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }",
    "        if for_us && id.dst == self.address {\n            return self.deliver_local(pool, packet, id, ifaces, now_ms);\n        }"),
+  # Per-interface counters. The C's router keeps them (csp_route.c:229, :244) and CMP
+  # IF_STATS is how the ground reads them; `IfList::Entry::stats` was never written.
+  ("ifstats: the router counts a received packet", "csp/src/router.rs",
+   "            e.stats.rx += 1;\n            e.stats.rxbytes += bytes;",
+   "            let _ = bytes; let _ = &e;"),
+  ("ifstats: rxbytes is the payload length", "csp/src/router.rs",
+   "        let bytes = packet.with_payload(<[u8]>::len) as u32;",
+   "        let bytes = packet.with_payload(<[u8]>::len) as u32 + 6;"),
+  ("ifstats: a suppressed duplicate counts as dropped", "csp/src/router.rs",
+   "                if let Some(e) = ifaces.get_mut(ingress) {\n                    e.stats.drop += 1;\n                }",
+   "                {}"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),
