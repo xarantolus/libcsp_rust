@@ -269,6 +269,35 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### Function-level coverage, checked rather than claimed
+
+2026-08-26. The first "the port is complete" here compared module names and missed about
+thirty-five functions, the socket API among them. `ctest/tools/api_map.tsv` is the
+function-level answer: every `csp_*` declared in `libcsp/include/csp/**.h` — **199** of them
+— mapped to `ported`, `out-of-scope` or `deferred`, and `just api` (now part of `just check`)
+fails on any function missing from the map, any row naming a function that no longer exists,
+and any `ported` row naming a Rust item that does not.
+
+**199 = 152 ported + 42 out-of-scope + 5 deferred.**
+
+The five not ported, all by prior decision: `csp_yaml_init` (`yaml`, off, no C oracle),
+`csp_if_tun_init` with `csp_crypto_encrypt`/`csp_crypto_decrypt` (`if-tun` and its two
+hooks), and `csp_bind_callback`. The 42 are arch shims, `src/drivers`, the ZeroMQ hub, and
+the printf-style diagnostics SCOPE.md's own "deliberately not ported" section names.
+
+Writing the map found one wrong entry of mine immediately: I had `csp_hex_dump` as ported to
+`csp::print`, a module that does not exist — SCOPE.md line 148 puts it in the
+deliberately-not-ported set with `csp_print_func` and `csp_conn_print_table`. Two more
+failures were the tool's own fault, not the port's: a `const` alternative in the symbol regex
+swallowed the `fn` of `pub const fn`, so `Id::is_broadcast` and `sfp::max_mtu` were reported
+missing when both exist. Worth recording because the failure was in the direction that
+matters least — a tool that cries wolf gets ignored, and then the one real row is missed too.
+
+**What green here does not mean.** A Rust item existing under a name is not evidence it
+behaves like the C; a grep proves spelling. Equivalence is what the 126 corpus records, the
+510 golden vector lines and the 33 differential tests are for. The map answers "is anything
+unaccounted for", which is a different and previously unanswered question.
+
 ### A malformed SYN got an RST *and* an accepted connection
 
 2026-08-26, and the most serious thing this exercise has turned up since the forwarding bug.
