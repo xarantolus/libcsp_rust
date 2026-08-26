@@ -102,6 +102,8 @@ unsafe extern "C" {
     fn shim_node_inject(frame: *const u8, len: u32) -> c_int;
     fn shim_node_pump() -> c_int;
     fn shim_node_serve(port: u8) -> c_int;
+    fn shim_node_send_on(port: u8, body: *const u8, len: c_int) -> c_int;
+    fn shim_node_release(port: u8);
     fn shim_node_clear_tx();
     fn shim_node_tx_count() -> c_int;
     fn shim_node_tx_get(i: c_int, out: *mut u8) -> c_int;
@@ -235,6 +237,40 @@ pub fn c_node_serve(frame: &[u8], port: u8) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Have the C node **originate** data on a connection a peer opened to it, and hand back
+/// the frames it put on the wire.
+///
+/// The other direction from everything else here: the C accepts, keeps the connection, and
+/// calls `csp_send` on it, so an RDP connection's bytes are sequenced by libcsp itself.
+/// What comes back is a real C peer's data for the port to deliver and acknowledge.
+pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: `body` is a valid slice for the call; the shim bounds-checks `port` and the
+    // length against its own buffers. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        if shim_node_send_on(port, body.as_ptr(), body.len() as c_int) != 1 {
+            return frames;
+        }
+        shim_node_pump();
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
+}
+
+/// Close a connection the C node is holding, which resets the peer.
+pub fn c_node_release(port: u8) {
+    // SAFETY: bounds-checked on the C side; callers hold `LOCK`.
+    unsafe { shim_node_release(port) }
 }
 
 /// Feed `frame` to the C node, run its router to quiescence, and report only what an
