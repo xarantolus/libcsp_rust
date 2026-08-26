@@ -302,6 +302,47 @@ START_TEST(test_a_zero_total_transfer_is_refused)
 }
 END_TEST
 
+/* The largest payload a fragment may carry, per option set.
+ *
+ * This is what decides how a message is cut up, so an MTU one byte too large produces
+ * packets the peer's buffer cannot hold and one byte too small silently wastes a byte per
+ * fragment on a link that is metered in bytes. The port's own test carried these four
+ * numbers with a comment saying they were captured from `csp_sfp_opts_max_mtu` -- a
+ * provenance claim with nothing behind it. Recorded here so they are measured.
+ */
+START_TEST(test_the_fragment_mtu_for_each_option_set)
+{
+	setup_stack();
+
+	const uint32_t plain = csp_sfp_opts_max_mtu(0);
+	const uint32_t rdp = csp_sfp_opts_max_mtu(CSP_O_RDP);
+	const uint32_t crc = csp_sfp_opts_max_mtu(CSP_O_CRC32);
+	const uint32_t hmac = csp_sfp_opts_max_mtu(CSP_O_HMAC);
+	const uint32_t all = csp_sfp_opts_max_mtu(CSP_O_RDP | CSP_O_CRC32 | CSP_O_HMAC);
+
+	/* Every option only ever subtracts. */
+	ck_assert_uint_lt(rdp, plain);
+	ck_assert_uint_lt(crc, plain);
+	ck_assert_uint_lt(hmac, plain);
+	ck_assert_uint_lt(all, rdp);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("sfp", "the_fragment_mtu_for_each_option_set", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("buffer_size", CSP_BUFFER_SIZE);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("plain", (int64_t)plain);
+		ctest_trace_int("rdp", (int64_t)rdp);
+		ctest_trace_int("crc32", (int64_t)crc);
+		ctest_trace_int("hmac", (int64_t)hmac);
+		ctest_trace_int("all_three", (int64_t)all);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * sfp_suite(void)
 {
 	Suite * s = suite_create("SFP");
@@ -312,6 +353,7 @@ Suite * sfp_suite(void)
 	tcase_add_test(tc, test_a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape);
 	tcase_add_test(tc, test_a_fragment_at_the_wrong_offset_is_refused);
 	tcase_add_test(tc, test_a_zero_total_transfer_is_refused);
+	tcase_add_test(tc, test_the_fragment_mtu_for_each_option_set);
 	suite_add_tcase(s, tc);
 
 	return s;
