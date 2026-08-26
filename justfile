@@ -64,6 +64,11 @@ cov:
 api:
     python3 ctest/tools/api_coverage.py
 
+# C tests that assert against a real libcsp node and record nothing -- the lead that found
+# the dedup window, the malformed-SYN connection leak, and the unbounded delay count.
+untraced:
+    python3 ctest/tools/untraced.py
+
 mutants:
     python3 ctest/tools/mutants.py
 

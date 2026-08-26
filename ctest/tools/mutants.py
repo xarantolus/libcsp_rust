@@ -307,6 +307,9 @@ MUTANTS = [
   ("rdp: a refused SYN is not announced and not kept", "csp/src/router.rs",
    "                let refused = is_new && (h.flags & csp_core::rdp::RST) != 0;",
    "                let refused = false && is_new && (h.flags & csp_core::rdp::RST) != 0;"),
+  ("rdp: the delay count is bound by the negotiated window", "csp-core/src/rdp.rs",
+   "            ack_delay_count: clamp(w(5), 1, window_size),",
+   "            ack_delay_count: clamp(w(5), 1, max_window),"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
