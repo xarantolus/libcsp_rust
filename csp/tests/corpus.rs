@@ -713,6 +713,9 @@ fn replay_eth(input: &EthInput) -> EthObserved {
 #[serde(deny_unknown_fields)]
 struct RdpInput {
     delayed_acks: u8,
+    /// Only the ack-timeout case sets this.
+    #[serde(default)]
+    ack_timeout: u32,
     /// Only the clamp case sets this; the others open with the C helper's window of 4.
     #[serde(default)]
     window_size: u32,
@@ -2792,6 +2795,54 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        "rdp" if rec.case == "a_proposed_ack_timeout_is_adopted" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // Through `decode_clamped`, so the proposal is adopted the way a SYN's is.
+            let words: [u32; 6] = [
+                4,
+                20_000,
+                1_000,
+                u32::from(input.delayed_acks),
+                input.ack_timeout,
+                input.ack_delay_count,
+            ];
+            let mut wire = [0u8; csp_core::rdp::SYN_OPTIONS_LEN];
+            for (i, w) in words.iter().enumerate() {
+                wire[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+            }
+            let opts =
+                csp_core::rdp::SynOptions::decode_clamped(&wire, csp::router::RDP_MAX_WINDOW)
+                    .expect("a complete option block");
+
+            let mut c = csp_core::rdp::Connection::new(1000, opts);
+            c.state = csp_core::rdp::State::Open;
+            c.rcv_cur = 1000;
+            c.rcv_lsa = 1000;
+            c.ack_timestamp = 0;
+
+            // One packet, well under the delay count: only the timeout can produce an ack.
+            c.rcv_cur = 1001;
+            let acked_immediately = u32::from(c.poll_ack(0).is_some());
+
+            // The C's loop advances 250 ms at a time and calls `csp_conn_check_timeouts`.
+            let mut waited = 0u32;
+            let mut acked = 0u32;
+            while waited < 20_000 {
+                waited += 250;
+                if c.poll_ack(waited).is_some() {
+                    acked = 1;
+                    break;
+                }
+            }
+            Some((
+                serde_json::json!({
+                    "acked_immediately": acked_immediately,
+                    "acked": acked,
+                    "waited_ms": waited,
+                }),
+                format!("ack_timeout {}", input.ack_timeout),
+            ))
+        }
         "rdp" if rec.case == "a_nonzero_delayed_acks_is_on_not_a_count" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             // The option block is written word by word, because the value under test is a

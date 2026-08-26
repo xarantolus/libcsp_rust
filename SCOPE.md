@@ -269,6 +269,42 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The seventeen untraced C tests, justified one at a time
+
+2026-08-26. `just untraced` reports 128 of 145 C tests recording something. I had been
+calling the remainder "legitimate" in the aggregate without checking them individually,
+which is the same shape as the coverage claims this file exists to correct. Each is now
+either covered elsewhere, structurally inapplicable, or named as a real remaining gap.
+
+| test | basis |
+|---|---|
+| `buffer::alloc_clean_734` | Structural. `Slot::new()` sets `bytes: [0; SZ]` and `len: 0` on every `acquire`, and `with_payload` slices exactly `PADDING..PADDING + len` — a `Packet` cannot expose a byte past its payload, so issue 734's leak class does not exist to test. Read, not assumed. |
+| `buffer::clone_frame_begin_fixed` | Covered by `promisc::read_transfers_ownership`: `tapped_is_a_distinct_packet` and `buffers_back_after_free` are the clone-independence property, measured through the tap. |
+| `cmp::the_peek_tail_leaks_…_not_cleared` | Registered under `#if !CSP_BUFFER_ZERO_CLEAR`; runs in `just ctest-noclear`, not in the canonical build. Not a canonical gap. |
+| `promisc::leaves_a_buffer_reserve` | libcsp's tap allocates from the shared pool and must not starve it. The port's tap is a fixed array inside `Router` with `promisc_missed` counting overflow — no shared allocation to starve. |
+| `promisc::queue_size_argument_is_ignored` | `csp_promisc_enable(N)` ignoring `N` is a libcsp quirk. `Router::set_promisc` takes a bool; there is no argument to ignore. |
+| `promisc::disabled_consumes_nothing` | Covered by `promisc::delivery_is_the_same_with_the_tap_off`: `tapped: 0`, `buffers_lost: 0`. |
+| `promisc::csp1_id_layout_matches_the_binding` | Covered byte-for-byte by `vectors/v1.tsv` (270 lines of real wire bytes from the C) and the difftest header codec, which compare the layout rather than a hand-written formula for it. |
+| `queue::queue_free_707` | `csp_queue_*` is an arch shim, out of scope in this file's exclusion table and marked `out-of-scope` in `api_map.tsv`. Sans-io: the caller owns the queues. |
+| `rdp::syn_options_are_bounded_above` / `_below` | Behaviour covered by `a_hostile_syn_cannot_suppress_acknowledgement` (every field at its maximum) and `a_delay_count_beyond_the_window_is_bound_by_it`. The tests themselves read `conn->rdp.*`. |
+| `rdp::syn_keeps_valid_options` | **Partial.** `window_size`, `delayed_acks` and `ack_delay_count` adoption are covered by the two cadence records; `conn_timeout` and `ack_timeout` adoption are not, and no record varies them. The nearest thing is `packet_timeout`, exercised by the retransmission record. |
+| `rdp::isn_does_not_depend_on_history` | The ISN is a deliberate divergence — the port does not reproduce `rand_r` (entry above). `isn_is_a_function_of_the_clock` records the C's side; the port's is different by design. |
+| `rdp::delayed_acks_is_a_flag` | Covered by `a_nonzero_delayed_acks_is_on_not_a_count`, added the same day. |
+| `rdp::retransmit_count_resets_on_ack` | No observable consequence in the port; see the entry above. Aligned with the C anyway, and said there that no record can catch it. |
+| `rdp::queue_flush_all_releases_buffers` / `_receive_buffers` | libcsp's *global* RDP queue (`csp_rdp_queue.c`). The port's `TxQueue` is per connection. Release on close is covered by `conn::a_closed_connection_can_be_used_again` (`buffers_lost: 0`) and the `drain:` mutation family. |
+| `security::the_checksum_is_stripped_before_delivery` | Now redundant: `a_valid_checksum_is_accepted` is the same scenario and carries `delivered_body` since this cycle. |
+
+**One real gap fell out of this**, and it is smaller than the raw count suggested:
+`conn_timeout` and `ack_timeout` are adopted from a peer's SYN and no record varied either.
+`rdp::a_proposed_ack_timeout_is_adopted` now closes the `ack_timeout` half — it proposes
+5000 ms against the compiled-in 250 and measures how long the peer waits for the
+acknowledgement when the delay *count* has not been reached. Both sides wait 5250 ms
+(5000 plus one step of the 250 ms polling granularity). Ignoring the proposal and keeping
+the default acknowledges at 500 ms, a tenth of what the peer asked for — on a long
+round-trip link that is a sender retransmitting into a receiver that already had the data.
+`conn_timeout` adoption remains uncovered.
+Everything else is covered, structurally absent, or a divergence already written down.
+
 ### The untraced tool mis-reported, and a field that measured nothing new
 
 2026-08-26. Two corrections, one to a tool I built two cycles ago and one to a claim I was
@@ -1096,7 +1132,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**102 of 130**.
+**103 of 131**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
