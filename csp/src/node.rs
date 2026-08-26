@@ -294,10 +294,25 @@ impl<
     /// to the pool here, so nothing is left holding a buffer for a port that has stopped
     /// being served.
     pub fn unbind(&mut self, port: u8) -> usize {
-        let mut drained = [0u16; 32];
-        let (closed, n) = self.router.unbind(port, &mut drained);
-        for &idx in &drained[..n] {
-            drop(self.pool().from_index(idx));
+        // `close_port` stops as soon as the scratch array cannot hold another whole
+        // receive queue and expects to be called again, so this loops and sizes by `RXQ`
+        // -- the bound on one queue, which is what guarantees progress.
+        //
+        // It was a single call with a fixed `[0u16; 32]`. Past that point the remaining
+        // connections stayed **open on a port the application had stopped serving**,
+        // still matching incoming packets, each holding a buffer per unread packet with
+        // nothing left to release them.
+        let mut closed = 0usize;
+        loop {
+            let mut drained = [0u16; RXQ];
+            let (c, n) = self.router.unbind(port, &mut drained);
+            for &idx in &drained[..n] {
+                drop(self.pool().from_index(idx));
+            }
+            closed += c;
+            if c == 0 {
+                break;
+            }
         }
         closed
     }
@@ -332,7 +347,11 @@ impl<
 
     /// Close a connection, releasing anything still queued on it.
     pub fn close(&mut self, conn: Handle) -> Result<()> {
-        let mut drained = [0u16; 32];
+        // `RXQ`, not a literal: `Table::close` refuses rather than partially draining, so
+        // a shorter array made this return `BufferTooSmall` for a connection whose queue
+        // was deeper -- leaving it open, with every buffer still held, from the one call a
+        // caller makes when it has nothing left to try.
+        let mut drained = [0u16; RXQ];
         let n = self.router.conns.close(conn, &mut drained)?;
         for &idx in &drained[..n] {
             drop(self.pool().from_index(idx));
@@ -879,6 +898,104 @@ mod tests {
     /// the application had configured. Nothing noticed, because nothing joined the two
     /// ends up: the builder had tests, the encoder had tests, and no test went from one
     /// to the other.
+    /// An application closing a connection with unread packets gets its buffers back.
+    ///
+    /// `Table::close` refuses rather than partially draining, and `Node::close` passed a
+    /// fixed `[0u16; 32]` and propagated the error with `?`. So on a connection whose
+    /// queue is deeper than that, the application's own `close` **fails**, the connection
+    /// stays open and every buffer stays held -- an error return from a teardown call is
+    /// the one place a caller has no remaining move.
+    #[test]
+    fn closing_a_connection_with_a_deep_queue_returns_its_buffers() {
+        type S3 = CspStorage<4, 64, 264, 48, 32>;
+        type N3<'a> = Node<'a, 4, 64, 264, 48, 32, 40>;
+
+        let s = S3::new();
+        let mut n = N3::new(&s, Config::new(Version::V1).address(ME));
+        n.ifaces.add("IF0", ME, 5, true).unwrap();
+        n.bind(7).unwrap();
+        let before = n.buffers_free();
+
+        // 33 unread packets, one more than the fixed array held.
+        for _ in 0..33 {
+            let mut p = n.packet().expect("the pool is empty");
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 7,
+                sport: 40,
+            });
+            p.set_payload(b"x").unwrap();
+            n.router.receive(p, 0);
+            let _ = n.work(0);
+        }
+        let c = n.accept().expect("the connection is announced");
+        assert!(n.buffers_free() < before);
+
+        n.close(c)
+            .expect("closing a connection must not fail on a deep queue");
+        assert_eq!(
+            n.buffers_free(),
+            before,
+            "close must return every buffer the connection was holding"
+        );
+    }
+
+    /// Unbinding a port returns every buffer its connections were holding.
+    ///
+    /// `Table::close_port` stops as soon as its scratch array cannot hold another whole
+    /// receive queue and expects to be called again -- `Node::unbind` called it once with
+    /// a fixed `[0u16; 32]`. Past that point the remaining connections stay open, still
+    /// bound to a port the application has stopped serving, holding a buffer per unread
+    /// packet for good. `shutdown`, `tick` and the RST path were all corrected to size by
+    /// `RXQ` and loop; this one was missed.
+    ///
+    /// Counted in buffers, with three connections deep enough that 32 cannot hold them.
+    #[test]
+    fn unbinding_a_port_returns_every_buffer_its_connections_held() {
+        type S3 = CspStorage<4, 48, 264, 48, 32>;
+        type N3<'a> = Node<'a, 4, 48, 264, 48, 32, 12>;
+
+        let s = S3::new();
+        let mut n = N3::new(&s, Config::new(Version::V1).address(ME));
+        n.ifaces.add("IF0", ME, 5, true).unwrap();
+        n.bind(7).unwrap();
+        let before = n.buffers_free();
+
+        // Three peers, twelve unread packets each: 36 slots, more than the 32 the fixed
+        // array held.
+        for sport in 40u8..43 {
+            for _ in 0..12 {
+                let mut p = n.packet().expect("the pool is empty");
+                p.set_id(Id {
+                    pri: 2,
+                    flags: 0,
+                    src: 8,
+                    dst: ME,
+                    dport: 7,
+                    sport,
+                });
+                p.set_payload(b"x").unwrap();
+                n.router.receive(p, 0);
+                let _ = n.work(0);
+            }
+        }
+        assert!(
+            n.buffers_free() < before,
+            "the packets must actually be held, or this proves nothing"
+        );
+
+        let closed = n.unbind(7);
+        assert_eq!(closed, 3, "every connection on the port must be closed");
+        assert_eq!(
+            n.buffers_free(),
+            before,
+            "unbind must return every buffer the port's connections were holding"
+        );
+    }
+
     #[test]
     fn the_configured_identity_reaches_an_ident_reply() {
         let s = S::new();
