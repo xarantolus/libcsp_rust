@@ -1,4 +1,15 @@
+#![cfg(all(
+    feature = "sfp",
+    feature = "if-can",
+    feature = "if-kiss",
+    feature = "hmac"
+))]
+
 //! Differential tests against the golden vectors captured from the C library.
+//!
+//! The vectors were captured from a C build with every protocol compiled in, so this file
+//! needs the matching features. Without them it is empty rather than broken — comparing
+//! against bytes the other configuration never produced would not be a differential test.
 //!
 //! These are the load-bearing tests: `vectors/v{1,2}.tsv` are the real wire bytes the C
 //! produced, captured through a capture interface after `csp_id_prepend`, after SFP

@@ -899,7 +899,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// node-level differential test — and only after it was strengthened to compare
     /// *which interface* the frame left by, because the frame **bytes** are identical
     /// either way and the byte-only version of the test passed.
-    #[cfg(feature = "rtable")]
     fn forward<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         _pool: &'p Pool<B, SZ>,
@@ -929,7 +928,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         self.finish_forward(&hops[..n], packet)
     }
 
-    #[cfg_attr(not(feature = "rtable"), allow(dead_code))]
     fn push_pending(&mut self, iface: u8, via: u16, slot: u16) {
         self.push_pending_tagged(iface, via, slot, false);
     }
@@ -968,10 +966,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         self.pending_missed
     }
 
-    // Only the routing path fans out; without `rtable` `forward` refuses immediately, so
-    // this and `push_pending` would be dead code there. `pop_pending` stays unconditional
-    // because `work` calls it either way and simply finds nothing queued.
-    #[cfg(feature = "rtable")]
     /// Queue one forward per destination and report the first.
     ///
     /// The last destination takes the original packet and the earlier ones take clones,
@@ -1008,19 +1002,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             id.dst = dst;
             packet.set_id(id);
         }
-    }
-
-    #[cfg(not(feature = "rtable"))]
-    fn forward<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
-        &mut self,
-        _pool: &'p Pool<B, SZ>,
-        _packet: Packet<'p, B, SZ>,
-        _id: Id,
-        _ifaces: &crate::iflist::IfList<N, A>,
-        _ingress: u8,
-    ) -> Routed {
-        self.counters.no_route += 1;
-        Routed::Dropped(DropReason::NoRoute)
     }
 
     /// Periodic maintenance: expire idle connections and step the RDP timers.
@@ -1169,6 +1150,66 @@ mod tests {
     }
 
     use super::*;
+
+    /// Forwarding works with the routing table compiled out.
+    ///
+    /// `csp_send_direct` puts only its middle stage inside `#if CSP_USE_RTABLE`; the
+    /// local-subnet scan and the default-interface scan run either way. This port gated
+    /// the *whole* of `forward` on the `rtable` feature and substituted a stub that
+    /// refused everything, so a node built without the routing table relayed nothing at
+    /// all -- not to a directly attached subnet, not out a default link.
+    ///
+    /// Deliberately **not** gated on the feature: it is the same expected behaviour with
+    /// the table present but empty, so it should hold in both configurations. The C
+    /// records `route::one_owning_link_sends_one_frame` and
+    /// `route::two_default_interfaces_send_two_frames` measure exactly this, with
+    /// `CSP_USE_RTABLE=ON` and nothing in the table -- the same code path.
+    #[test]
+    fn forwarding_does_not_need_the_routing_table() {
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V2);
+        let ifaces = {
+            let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
+            l.add("INGRESS", 40, 12, false).unwrap();
+            l.add("OWNS_IT", 8, 12, false).unwrap();
+            l.add("DEFAULT", 200, 12, true).unwrap();
+            l
+        };
+
+        let send_to = |r: &mut R, dst: u16| -> Option<u8> {
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 11,
+                dst,
+                dport: 12,
+                sport: 40,
+            });
+            p.set_payload(b"onward").unwrap();
+            r.receive(p, 0);
+            match r.work(&pool, &ifaces, 0) {
+                Routed::Forwarded { iface, packet, .. } => {
+                    drop(pool.from_index(packet));
+                    Some(iface)
+                }
+                _ => None,
+            }
+        };
+
+        // 10 is inside OWNS_IT's subnet (8..11): the local-subnet stage.
+        assert_eq!(
+            send_to(&mut r, 10),
+            Some(1),
+            "a directly attached subnet must be reachable without a routing table"
+        );
+        // 3000 is in nobody's subnet: the default stage.
+        assert_eq!(
+            send_to(&mut r, 3000),
+            Some(2),
+            "a default interface must be usable without a routing table"
+        );
+    }
 
     /// An RDP handshake with a peer reachable only through the routing table.
     ///

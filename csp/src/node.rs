@@ -902,6 +902,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cmp")]
     #[test]
     fn the_configured_identity_reaches_an_ident_reply() {
         let s = S::new();
@@ -934,6 +935,7 @@ mod tests {
         assert_eq!(reply.revision, "v2.1");
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn connect_send_and_route() {
         let s = S::new();
@@ -976,6 +978,7 @@ mod tests {
         assert_eq!(n.buffers_free(), before + 1);
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn a_packet_to_ourselves_loops_back() {
         let s = S::new();
@@ -1225,6 +1228,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn reply_to_swaps_the_addresses_and_ports() {
         let s = S::new();
@@ -1298,6 +1302,7 @@ mod tests {
     ///
     /// Asserted on the emitted packet rather than on the connection, because the header is
     /// the only part the peer can see.
+    #[cfg(feature = "rtable")]
     #[test]
     fn connect_options_reach_the_header() {
         use csp_core::security::opts as o;
@@ -1344,6 +1349,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn send_prio_does_not_change_the_connection_permanently() {
         // csp_send_prio mutates conn->idout.pri as a side effect, so every later packet
@@ -1470,6 +1476,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn split_horizon_refuses_to_send_a_packet_back_where_it_came_from() {
         // csp_send_direct skips a route whose interface matches the one the packet
@@ -1505,6 +1512,7 @@ mod tests {
         assert!(n.route_from(p2, id, Some(1)).is_routed());
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn locally_originated_traffic_is_not_subject_to_split_horizon() {
         let s = S::new();
@@ -1605,6 +1613,7 @@ mod tests {
         assert_eq!(d.clones_needed(), 1, "the last gets the original");
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn redundant_routes_all_receive_a_copy() {
         let s = S::new();
@@ -1617,6 +1626,7 @@ mod tests {
         assert_eq!(d.clones_needed(), 1);
     }
 
+    #[cfg(feature = "rtable")]
     #[test]
     fn a_routing_table_match_suppresses_the_default_fallback() {
         // The C returns as soon as route_found is set; the defaults are a fallback, not an
