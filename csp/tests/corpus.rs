@@ -1417,21 +1417,15 @@ fn replay_rtable(case: &str) -> serde_json::Value {
         let mut t = rtable::Table::<8>::new(Version::V2);
         let host_bits = Version::V2.host_bits() as u16;
         let mut applied = 0i32;
-        let res = rtable::parse(text, |r| {
-            // The C's parser refuses a netmask wider than the address space *before*
-            // calling set, which would have clamped it. Both checks are its own.
-            if let Some(m) = r.netmask {
-                if m > host_bits {
-                    return Err(csp_core::Error::InvalidRoute {
-                        reason: csp_core::RouteError::BadNetmask,
-                    });
-                }
-            }
-            if r.address > Version::V2.max_node_id() {
-                return Err(csp_core::Error::InvalidRoute {
-                    reason: csp_core::RouteError::BadAddress,
-                });
-            }
+        // No range checks here: `parse` makes them, as `csp_rtable_stdio.c:44` does. They
+        // used to live in this closure, so `"3000/99 LINK_A"` was refused by the *test*
+        // while the port accepted it and `set` silently clamped the netmask -- the record
+        // passed and the divergence was invisible.
+        //
+        // The interface lookup stays with the caller: `parse` has no interface list, which
+        // is the sans-io boundary. Returning `Err` from the callback aborts the whole
+        // string, which is what the C does when `csp_iflist_get_by_name` returns NULL.
+        let res = rtable::parse(text, Version::V2, |r| {
             if r.iface != "LINK_A" {
                 return Err(csp_core::Error::InvalidRoute {
                     reason: csp_core::RouteError::MissingInterface,
@@ -1491,6 +1485,10 @@ fn replay_rtable(case: &str) -> serde_json::Value {
                 "load_result": res,
                 "via_on_tx": t.find(3000).map(|r| r.via).unwrap_or(0),
             })
+        }
+        "an_address_outside_the_address_space_is_refused" => {
+            let (res, t) = load("20000 LINK_A");
+            serde_json::json!({ "load_result": res, "frames": frames(&t, 20000) })
         }
         "a_one_character_entry_ends_the_parse_and_still_reports_success" => {
             let (res, t) = load("3000 LINK_A,x,3001 LINK_A");
