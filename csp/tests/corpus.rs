@@ -713,6 +713,11 @@ fn replay_eth(input: &EthInput) -> EthObserved {
 #[serde(deny_unknown_fields)]
 struct RdpInput {
     delayed_acks: u8,
+    /// Only the connection-timeout case sets these.
+    #[serde(default)]
+    conn_timeout: u32,
+    #[serde(default)]
+    idled_ms: u32,
     /// Only the ack-timeout case sets this.
     #[serde(default)]
     ack_timeout: u32,
@@ -1227,6 +1232,126 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// An established RDP connection left idle past its negotiated `conn_timeout`.
+///
+/// libcsp does not reap it: `csp_rdp_check_timeouts`'s CONNECTION TIMEOUT branch is guarded
+/// by `conn->dest_socket != NULL`, and `dest_socket` is cleared the moment the connection is
+/// *announced* to the socket, not when the application accepts it. So the branch only covers
+/// the window before announcement.
+///
+/// Driven through a real `Node` -- handshake, idle with `tick`, then one data packet -- so
+/// what is compared is whether the peer still gets an answer.
+#[cfg(feature = "rdp")]
+fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut body = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut body).unwrap();
+
+    // Drive the peer's half: SYN, then the handshake's final ACK, then one data packet.
+    let send = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                payload: &[u8],
+                flags: u8,
+                seq: u16,
+                ack: u16,
+                now: u32|
+     -> u32 {
+        let mut buf = [0u8; 64];
+        buf[..payload.len()].copy_from_slice(payload);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hlen = h.encode(&[], &mut buf[payload.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return 0 };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..payload.len() + hlen]).unwrap();
+        n.router.receive(p, 0);
+        let mut frames = 0;
+        loop {
+            match n.work(now) {
+                csp::Routed::Respond { packet, .. } => {
+                    frames += 1;
+                    drop(n.take_forwarded(packet));
+                }
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(pkt)) = n.read(conn) {
+                        drop(pkt);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+        frames
+    };
+
+    send(&mut n, &body[..olen], rdp::SYN, 1000, 0, CLOCK);
+    let iss = n
+        .accept()
+        .and_then(|h| n.router.conns.rdp(h).ok().map(|r| r.snd_iss))
+        .unwrap_or(0);
+    send(&mut n, &[], rdp::ACK, 1001, iss, CLOCK);
+
+    // Idle, the way the C's loop does: advance and tick, no traffic.
+    let mut t = CLOCK;
+    let mut step = 0;
+    while step < idled_ms {
+        step += 250;
+        t = CLOCK.wrapping_add(step);
+        // The *node's* idle policy, deliberately well past the test window, not the peer's
+        // proposal. Two different mechanisms: `ConnTable::expire_idle` is the node deciding
+        // how long to hold a slot, and libcsp has no counterpart for an established RDP
+        // connection -- its table is bounded and reused instead. What this record measures
+        // is whether the peer-proposed `conn_timeout` alone stops the answers, so the
+        // node-level reaper must not fire inside the window or it would answer a different
+        // question.
+        let _ = conn_timeout;
+        n.tick(t, 60_000);
+        loop {
+            match n.work(t) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    }
+
+    // Now the peer speaks. `answered` is the whole question: does anything come back?
+    let answered = u32::from(send(&mut n, b"x", rdp::ACK, 1001, iss, t) > 0);
+
+    // Only what the peer can see. Whether a table slot still exists is implementation.
+    serde_json::json!({ "answered_after_idle": answered })
+}
+
 #[cfg(feature = "rdp")]
 fn replay_rdp_malformed_syn(words: usize) -> serde_json::Value {
     use csp_core::rdp;
@@ -2795,6 +2920,17 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_proposed_conn_timeout_is_adopted" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((
+                replay_rdp_conn_timeout(input.conn_timeout, input.idled_ms),
+                format!(
+                    "conn_timeout {} idled {}",
+                    input.conn_timeout, input.idled_ms
+                ),
+            ))
+        }
         "rdp" if rec.case == "a_proposed_ack_timeout_is_adopted" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             // Through `decode_clamped`, so the proposal is adopted the way a SYN's is.

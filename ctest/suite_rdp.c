@@ -725,6 +725,60 @@ END_TEST
 
    Proposed as 5000 against a default of 250, with one packet delivered so the delay count
    cannot be what fires. What is recorded is how long the peer waits. */
+/* The last option a peer proposes that nothing measured: `conn_timeout`.
+ *
+ * It does **not** reap an established connection, which is what this test was written to
+ * show and what the measurement contradicted. `csp_rdp_check_timeouts`'s CONNECTION TIMEOUT
+ * branch is guarded by `conn->dest_socket != NULL`, and `dest_socket` is cleared the moment
+ * the connection is *announced* to the socket -- `csp_rdp.c:695`, "remember that the
+ * connection handle has been passed to userspace" -- not when the application accepts it.
+ * So the branch only covers the window before announcement. Once the handshake completes,
+ * `conn_timeout` no longer closes anything on this path; it survives as the CLOSE-WAIT
+ * bound and as the upper bound on `ack_timeout`.
+ *
+ * Proposed as 3000 ms and then idled for 4000: libcsp keeps the connection and still
+ * answers. A receiver that reaped it would drop a link that is merely quiet -- a telemetry
+ * connection between passes -- and the peer would find its next packet unanswered. */
+START_TEST(test_a_proposed_conn_timeout_is_adopted)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 4, 3000 /* conn_timeout */, 1000, 0 /* immediate acks */,
+							   250, 2 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* Idle well past the proposed timeout, but well inside the default. */
+	for (int i = 0; i < 16; i++) {
+		ctest_clock_advance(250);
+		csp_conn_check_timeouts();
+	}
+
+	/* Now the peer speaks. Does anything come back? */
+	const unsigned int before = test_tx_count;
+	deliver_data(1001, iss);
+	const int answered = (test_tx_count > before);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_proposed_conn_timeout_is_adopted", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("conn_timeout", 3000);
+		ctest_trace_int("idled_ms", 4000);
+		/* Immediate acknowledgement, so a missing answer means the connection is gone
+		   rather than merely waiting for a delayed ack to come due. */
+		ctest_trace_int("delayed_acks", 0);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("answered_after_idle", answered);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_a_proposed_ack_timeout_is_adopted)
 {
 	setup_stack();
@@ -1210,6 +1264,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_proposed_conn_timeout_is_adopted);
 	tcase_add_test(tc_ack, test_a_proposed_ack_timeout_is_adopted);
 	tcase_add_test(tc_ack, test_a_nonzero_delayed_acks_is_on_not_a_count);
 	tcase_add_test(tc_ack, test_a_delay_count_beyond_the_window_is_bound_by_it);

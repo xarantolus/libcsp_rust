@@ -710,7 +710,24 @@ impl Connection {
                 if self.state == State::Closed {
                     return Action::Nothing;
                 }
-                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout {
+                // Only before the connection is established. `csp_rdp_check_timeouts`
+                // guards its CONNECTION TIMEOUT with `conn->dest_socket != NULL`, and
+                // `dest_socket` is cleared the moment the connection is *announced* to the
+                // socket (`csp_rdp.c:695`, "the connection handle has been passed to
+                // userspace") -- not when the application accepts it. So libcsp reaps a
+                // half-finished handshake and never an established connection.
+                //
+                // This closed any state, so an idle-but-alive connection was dropped while
+                // the C kept answering on it: a telemetry link quiet between passes, whose
+                // next packet then goes unanswered. Worse, `conn_timeout` is *proposed by
+                // the peer*, so it was a lever a peer could pull to make this node discard
+                // its own connection early.
+                //
+                // Idle expiry as resource management still happens, in
+                // `ConnTable::expire_idle`, against the timeout the *node* chooses.
+                if self.state != State::Open
+                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout
+                {
                     self.state = State::Closed;
                     return Action::Closed(ClosedBy::Timeout);
                 }
@@ -1170,17 +1187,33 @@ mod tests {
         assert_eq!(c.rcv_cur, 10);
     }
 
+    /// Measured against libcsp on 2026-08-26, and the opposite of what this test asserted
+    /// before: an **established** connection is not reaped on `conn_timeout`.
+    /// `csp_rdp_check_timeouts` guards its CONNECTION TIMEOUT with `dest_socket != NULL`,
+    /// and `dest_socket` is cleared when the connection is announced to the socket, so the
+    /// branch only ever covers a handshake that never finished. Pinned end to end by
+    /// `rdp::a_proposed_conn_timeout_is_adopted`.
     #[test]
-    fn idle_connections_time_out() {
-        let mut c = Connection::new(1, SynOptions::default());
-        c.state = State::Open;
-        c.last_activity = 0;
-        assert_eq!(c.step(Event::Tick, 5_000, MAX_WINDOW), Action::Nothing);
+    fn only_an_unestablished_connection_times_out() {
+        // Established: stays, however long it is quiet. A telemetry link between passes.
+        let mut open = Connection::new(1, SynOptions::default());
+        open.state = State::Open;
+        open.last_activity = 0;
+        assert_eq!(open.step(Event::Tick, 5_000, MAX_WINDOW), Action::Nothing);
+        assert_eq!(open.step(Event::Tick, 10_001, MAX_WINDOW), Action::Nothing);
+        assert_eq!(open.state, State::Open);
+
+        // A handshake that never completed: reaped, so a half-open connection cannot hold
+        // a slot for ever.
+        let mut half = Connection::new(1, SynOptions::default());
+        half.state = State::SynSent;
+        half.last_activity = 0;
+        assert_eq!(half.step(Event::Tick, 5_000, MAX_WINDOW), Action::Nothing);
         assert_eq!(
-            c.step(Event::Tick, 10_001, MAX_WINDOW),
+            half.step(Event::Tick, 10_001, MAX_WINDOW),
             Action::Closed(ClosedBy::Timeout)
         );
-        assert_eq!(c.state, State::Closed);
+        assert_eq!(half.state, State::Closed);
     }
 
     #[test]

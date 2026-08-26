@@ -321,6 +321,9 @@ MUTANTS = [
   ("rdp: a proposed ack_timeout is adopted", "csp-core/src/rdp.rs",
    "            ack_timeout: clamp(w(4), MIN_ACK_TIMEOUT, conn_timeout),",
    "            ack_timeout: 250,"),
+  ("rdp: only an unestablished connection times out", "csp-core/src/rdp.rs",
+   "                if self.state != State::Open\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout",
+   "                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
