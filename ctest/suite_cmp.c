@@ -927,6 +927,25 @@ START_TEST(test_if_stats_reports_counters_that_moved)
 	ck_assert_uint_eq(ingress_if.tx, tx_at_ask + 1);
 
 	record("if_stats_reports_counters_that_moved");
+
+	if (ctest_tracing()) {
+		/* The counters themselves. The record above carries only the reply's shape, so a
+		   node whose per-interface counters never moved -- or did not exist -- reproduced
+		   it exactly. `csp_route_work` increments rx and rxbytes for every packet it
+		   handles and drop for one it deduplicates; those are the router's own, not the
+		   driver's. */
+		ctest_trace_begin("cmp", "if_stats_counters_after_three_packets", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packets_in", 3);
+		ctest_trace_int("payload_bytes_each", 6);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("rx", (int64_t)be32toh(msg->rx));
+		ctest_trace_int("rxbytes", (int64_t)be32toh(msg->rxbytes));
+		ctest_trace_int("drop", (int64_t)be32toh(msg->drop));
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 }
 END_TEST
 

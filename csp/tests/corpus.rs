@@ -131,7 +131,7 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     r.endpoint_opts = input.socket_opts;
     r.hmac_key = Some(HMAC_KEY);
 
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
         l
@@ -196,7 +196,7 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     p.set_payload(&body[..n]).unwrap();
 
     r.receive(p, 0);
-    let (delivered, delivered_bytes) = match r.work(&pool, &ifaces, 0) {
+    let (delivered, delivered_bytes) = match r.work(&pool, &mut ifaces, 0) {
         Routed::Delivered { conn, .. } => {
             // Take the packet off the connection the way an application would, and
             // measure what it holds. The C reports `p->length` after csp_recvfrom.
@@ -238,6 +238,10 @@ struct DedupInput {
 struct DedupObserved {
     delivered_of_two: u32,
     forwarded_of_two: u32,
+    /// The ingress interface's own drop counter. Without it the record cannot tell a node
+    /// that counts a suppressed duplicate from one that silently discards it -- and the
+    /// driver never sees the drop, because the packet has already left it.
+    ingress_drop: u32,
 }
 
 fn replay_dedup(input: &DedupInput) -> DedupObserved {
@@ -261,7 +265,7 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
     r.routes.set(0, 0, 1, csp_core::rtable::NO_VIA).unwrap();
     r.dedup_mode = mode;
 
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
         l.add("EGRESS", 20, 12, true).unwrap();
@@ -285,7 +289,7 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
     let mut delivered = 0;
     for _ in 0..input.pairs {
         r.receive(packet(LOCAL_ADDR), 0);
-        if let Routed::Delivered { .. } = r.work(&pool, &ifaces, 10) {
+        if let Routed::Delivered { .. } = r.work(&pool, &mut ifaces, 10) {
             delivered += 1;
         }
     }
@@ -293,7 +297,7 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
     let mut forwarded = 0;
     for _ in 0..input.pairs {
         r.receive(packet(25), 0);
-        if let Routed::Forwarded { packet: slot, .. } = r.work(&pool, &ifaces, 10) {
+        if let Routed::Forwarded { packet: slot, .. } = r.work(&pool, &mut ifaces, 10) {
             forwarded += 1;
             // Reclaim the slot the router handed over, or the pool drains and the next
             // iteration fails for a reason unrelated to deduplication.
@@ -304,6 +308,7 @@ fn replay_dedup(input: &DedupInput) -> DedupObserved {
     DedupObserved {
         delivered_of_two: delivered,
         forwarded_of_two: forwarded,
+        ingress_drop: ifaces.get(0).map_or(0, |e| e.stats.drop),
     }
 }
 
@@ -742,7 +747,7 @@ fn replay_conn_pressure(input: &ConnInput) -> (u32, i64) {
     let pool = P::new();
     let mut r = R::new(LOCAL_ADDR, Version::V2);
     r.bind(TEST_PORT).unwrap();
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
         l
@@ -773,7 +778,7 @@ fn replay_conn_pressure(input: &ConnInput) -> (u32, i64) {
             });
             p.set_payload(b"hi").unwrap();
             r.receive(p, 0);
-            let _ = r.work(&pool, &ifaces, 0);
+            let _ = r.work(&pool, &mut ifaces, 0);
         }
         // Drain the way an application does: accept, read everything, close.
         while let Some(h) = r.accept() {
@@ -829,7 +834,7 @@ fn replay_promisc(case: &str) -> serde_json::Value {
     r.dedup_mode = dedup;
     r.set_promisc(tap_on);
 
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
         l.add("EGRESS", EGRESS, 12, true).unwrap();
@@ -852,7 +857,7 @@ fn replay_promisc(case: &str) -> serde_json::Value {
         });
         p.set_payload(b"watched").unwrap();
         r.receive(p, 0);
-        match r.work(&pool, &ifaces, 0) {
+        match r.work(&pool, &mut ifaces, 0) {
             Routed::Delivered { conn, .. } => {
                 delivered += 1;
                 // Read it the way an application does, so the buffer comes back.
@@ -1289,7 +1294,7 @@ fn replay_broadcast(case: &str) -> serde_json::Value {
     let pool = P::new();
     let mut r = R::new(LOCAL, Version::V2);
     r.bind(TEST_PORT).unwrap();
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", LOCAL, NETMASK, true).unwrap();
         l.add("OTHER", 40, NETMASK, false).unwrap();
@@ -1311,7 +1316,7 @@ fn replay_broadcast(case: &str) -> serde_json::Value {
     let mut delivered = 0;
     let mut frames_out = 0;
     loop {
-        match r.work(&pool, &ifaces, 0) {
+        match r.work(&pool, &mut ifaces, 0) {
             Routed::Delivered { conn, .. } => {
                 delivered = 1;
                 if let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
@@ -1328,6 +1333,73 @@ fn replay_broadcast(case: &str) -> serde_json::Value {
     }
 
     serde_json::json!({ "delivered": delivered, "frames_out": frames_out })
+}
+
+/// Per-interface counters after traffic, read the way `IF_STATS` reads them.
+///
+/// `csp_route_work` increments `rx`/`rxbytes` for every packet it handles and `drop` for
+/// one it deduplicates. These are the *router's* counters, not the driver's: a driver only
+/// sees frames it handed up, while the drop happens after the packet has left it. Nothing
+/// wrote `IfList::Entry::stats`, so `IF_STATS` reported a permanent zero -- which an
+/// operator reads as "this link is idle", not as "this node does not count".
+///
+/// The oracle sends three six-byte packets and then the `IF_STATS` request itself, which
+/// the router also counts: four packets, and 3*6 + 13 = 31 bytes.
+fn replay_if_stats_counters() -> serde_json::Value {
+    const LOCAL: u16 = 10;
+    const PEER: u16 = 11;
+
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+    let pool = P::new();
+    let mut r = R::new(LOCAL, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    let mut ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL, 12, true).unwrap();
+        l
+    };
+
+    let mut feed = |r: &mut R, payload: &[u8], dport: u8| {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: PEER,
+            dst: LOCAL,
+            dport,
+            sport: 40,
+        });
+        p.set_payload(payload).unwrap();
+        r.receive(p, 0);
+        loop {
+            match r.work(&pool, &mut ifaces, 0) {
+                csp::Routed::Idle => break,
+                csp::Routed::Forwarded { packet, .. } | csp::Routed::Respond { packet, .. } => {
+                    drop(pool.from_index(packet));
+                }
+                csp::Routed::Delivered { conn, .. } => {
+                    if let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
+                        drop(pool.from_index(slot));
+                    }
+                }
+                _ => continue,
+            }
+        }
+    };
+
+    for _ in 0..3 {
+        feed(&mut r, b"onward", TEST_PORT);
+    }
+    // The IF_STATS request: 2-byte CMP header plus the 11-byte interface name.
+    feed(&mut r, &[0u8; 13], csp_core::ports::CMP);
+
+    let e = ifaces.get(0).expect("INGRESS is registered");
+    serde_json::json!({
+        "rx": e.stats.rx,
+        "rxbytes": e.stats.rxbytes,
+        "drop": e.stats.drop,
+    })
 }
 
 fn replay_rtable(case: &str) -> serde_json::Value {
@@ -1498,7 +1570,7 @@ fn replay_route(case: &str) -> serde_json::Value {
 
     let pool = P::new();
     let mut r = R::new(9999, Version::V2); // an address no interface has
-    let ifaces = {
+    let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
         l.add("INGRESS", INGRESS, 12, false).unwrap();
         l.add("LINK_A", LINK_A, 12, defaults).unwrap();
@@ -1545,7 +1617,7 @@ fn replay_route(case: &str) -> serde_json::Value {
     let mut left_by: Vec<String> = Vec::new();
     let mut dst_on_wire: Vec<u16> = Vec::new();
     loop {
-        match r.work(&pool, &ifaces, 0) {
+        match r.work(&pool, &mut ifaces, 0) {
             Routed::Forwarded { iface, packet, .. } => {
                 let name = ifaces
                     .get(iface)
@@ -1687,6 +1759,10 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             let input: SfpInput = serde_json::from_value(rec.input.clone()).unwrap();
             Some((replay_sfp(&input), format!("{input:?}")))
         }
+        "cmp" if rec.case == "if_stats_counters_after_three_packets" => Some((
+            replay_if_stats_counters(),
+            "per-interface counters".to_string(),
+        )),
         #[cfg(feature = "cmp")]
         "cmp" if rec.case == "a_full_size_ident_request_is_answered" => {
             Some((replay_cmp_through_a_node(), "through a Node".to_string()))
@@ -1796,12 +1872,12 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             let pool = P::new();
             let mut r = R::new(LOCAL_ADDR, Version::V2);
             r.bind(TEST_PORT).unwrap();
-            let ifaces = {
+            let mut ifaces = {
                 let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
                 l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
                 l
             };
-            let deliver = |r: &mut R| {
+            let mut deliver = |r: &mut R| {
                 let mut p = pool.acquire(0).unwrap();
                 p.set_id(Id {
                     pri: 2,
@@ -1813,7 +1889,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 });
                 p.set_payload(b"hi").unwrap();
                 r.receive(p, 0);
-                let _ = r.work(&pool, &ifaces, 0);
+                let _ = r.work(&pool, &mut ifaces, 0);
             };
 
             deliver(&mut r);
@@ -1844,7 +1920,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             let pool = P::new();
             let mut r = R::new(LOCAL_ADDR, Version::V2);
             r.bind(TEST_PORT).unwrap();
-            let ifaces = {
+            let mut ifaces = {
                 let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
                 l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
                 l
@@ -1861,7 +1937,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 });
                 p.set_payload(b"hi").unwrap();
                 r.receive(p, 0);
-                let _ = r.work(&pool, &ifaces, 0);
+                let _ = r.work(&pool, &mut ifaces, 0);
             }
             let mut connections = 0;
             let mut packets_on_it = 0;
@@ -2099,12 +2175,14 @@ impl From<CmpObserved> for CmpJson {
 struct DedupJson {
     delivered_of_two: u32,
     forwarded_of_two: u32,
+    ingress_drop: u32,
 }
 impl From<DedupObserved> for DedupJson {
     fn from(o: DedupObserved) -> Self {
         DedupJson {
             delivered_of_two: o.delivered_of_two,
             forwarded_of_two: o.forwarded_of_two,
+            ingress_drop: o.ingress_drop,
         }
     }
 }

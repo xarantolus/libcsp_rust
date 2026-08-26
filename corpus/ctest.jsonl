@@ -11,10 +11,10 @@
 {"suite":"promisc","case":"the_tap_sees_a_forwarded_packet","verdict":"must_match","observed":{"tapped":1,"delivered":0,"forwarded":1,"buffers_lost":0}}
 {"suite":"promisc","case":"the_tap_does_not_see_a_suppressed_duplicate","verdict":"must_match","observed":{"tapped":1,"delivered":1,"forwarded":0,"buffers_lost":0}}
 {"suite":"promisc","case":"delivery_is_the_same_with_the_tap_off","verdict":"must_match","observed":{"tapped":0,"delivered":1,"forwarded":1,"buffers_lost":0}}
-{"suite":"dedup","case":"off_suppresses_nothing","verdict":"must_match","input":{"mode":0,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":2}}
-{"suite":"dedup","case":"fwd_suppresses_only_forwarded","verdict":"must_match","input":{"mode":1,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":1}}
-{"suite":"dedup","case":"incoming_suppresses_only_local","verdict":"must_match","input":{"mode":2,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":2}}
-{"suite":"dedup","case":"all_suppresses_both","verdict":"must_match","input":{"mode":3,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":1}}
+{"suite":"dedup","case":"off_suppresses_nothing","verdict":"must_match","input":{"mode":0,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":2,"ingress_drop":0}}
+{"suite":"dedup","case":"fwd_suppresses_only_forwarded","verdict":"must_match","input":{"mode":1,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":1,"ingress_drop":1}}
+{"suite":"dedup","case":"incoming_suppresses_only_local","verdict":"must_match","input":{"mode":2,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":2,"ingress_drop":1}}
+{"suite":"dedup","case":"all_suppresses_both","verdict":"must_match","input":{"mode":3,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":1,"ingress_drop":2}}
 {"suite":"security","case":"plain_packet_with_no_policy_is_accepted","verdict":"must_match","input":{"socket_opts":0,"flags":0,"trailer":"none","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
 {"suite":"security","case":"a_valid_checksum_is_accepted","verdict":"must_match","input":{"socket_opts":64,"flags":1,"trailer":"crc32","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
 {"suite":"security","case":"a_valid_mac_is_accepted","verdict":"must_match","input":{"socket_opts":4,"flags":8,"trailer":"hmac","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
@@ -51,6 +51,7 @@
 {"suite":"cmp","case":"route_set_v2_one_byte_short_changes_nothing","verdict":"must_match","input":{"request":"000700c80000000e524f5554454400000000"},"observed":{"replies":0,"reply_len":0,"reply_type":-1,"reply_code":-1}}
 {"suite":"cmp","case":"route_set_v1_installs_a_route_that_is_used","verdict":"must_match","input":{"request":"0002c800524f555445440000000000"},"observed":{"replies":1,"reply_len":15,"reply_type":255,"reply_code":2}}
 {"suite":"cmp","case":"if_stats_reports_counters_that_moved","verdict":"must_match","input":{"request":"0003494e475245535300000000"},"observed":{"replies":1,"reply_len":53,"reply_type":255,"reply_code":3}}
+{"suite":"cmp","case":"if_stats_counters_after_three_packets","verdict":"must_match","input":{"packets_in":3,"payload_bytes_each":6},"observed":{"rx":4,"rxbytes":31,"drop":0}}
 {"suite":"cmp","case":"peek_returns_the_bytes_at_the_address","verdict":"must_match","input":{"request":"0004000010100400000000000000"},"observed":{"replies":1,"reply_len":14,"reply_type":255,"reply_code":4}}
 {"suite":"cmp","case":"the_peek_tail_echoes_the_requesters_own_bytes","verdict":"must_match","input":{"request":"000400001000045a5a5a5a5a5a5a"},"observed":{"replies":1,"reply_len":14,"reply_type":255,"reply_code":4}}
 {"suite":"cmp","case":"the_peek_tail_when_the_request_did_not_cover_it","verdict":"must_match","input":{"request":"00040000100004","buffer_zero_clear":1},"observed":{"reply_len":14,"tail":"000000"}}

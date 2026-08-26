@@ -767,7 +767,7 @@ impl<
         // The router cannot make a correct routing decision without the interface list:
         // local-subnet ownership beats the routing table, and split horizon compares
         // subnets. Passing it here is what closes that.
-        self.router.work(pool, &self.ifaces, now_ms)
+        self.router.work(pool, &mut self.ifaces, now_ms)
     }
 
     /// Periodic maintenance: RDP timers and idle connection expiry.
