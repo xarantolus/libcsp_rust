@@ -249,10 +249,13 @@ pub struct ParsedRoute<'a> {
 ///
 /// Written by hand: no `sscanf`, no VLA, no C-primitive shim, and no 100-character cliff.
 /// The callback is invoked per entry so nothing needs allocating.
-pub fn parse<'a, F>(text: &'a str, mut each: F) -> Result<usize>
+pub fn parse<'a, F>(text: &'a str, version: Version, mut each: F) -> Result<usize>
 where
     F: FnMut(ParsedRoute<'a>) -> Result<()>,
 {
+    let host_bits = version.host_bits() as u16;
+    let max_node_id = version.max_node_id();
+
     let mut count = 0usize;
     for entry in text.split(',') {
         let entry = entry.trim();
@@ -289,6 +292,23 @@ where
                 None,
             ),
         };
+
+        // The range checks belong here, not to the caller. `csp_rtable_stdio.c:44` makes
+        // them in the parser and refuses the **whole string** with `CSP_ERR_INVAL`; only
+        // `csp_rtable_set` clamps, and the string path is the one reachable from the
+        // ground. Leaving them out meant `"3000/99 LINK_A"` parsed happily and then got
+        // silently clamped to /14 by `set` -- an operator's malformed route table
+        // reinterpreted rather than refused.
+        // Redundant with `Table::set`, which refuses an out-of-range address too, so no
+        // corpus record can isolate this one -- kept because `parse` should be able to
+        // reject a malformed string without a table to hand, which is what the C's parser
+        // does. The netmask check below is *not* redundant: `set` clamps.
+        if address > max_node_id {
+            return Err(bad(RouteError::BadAddress));
+        }
+        if netmask.is_some_and(|m| m > host_bits) {
+            return Err(bad(RouteError::BadNetmask));
+        }
 
         each(ParsedRoute {
             address,
@@ -458,7 +478,7 @@ mod tests {
     fn collect<'a>(s: &'a str) -> (usize, [Option<ParsedRoute<'a>>; 8]) {
         let mut out: [Option<ParsedRoute>; 8] = [None; 8];
         let mut n = 0;
-        let count = parse(s, |r| {
+        let count = parse(s, Version::V1, |r| {
             out[n] = Some(r);
             n += 1;
             Ok(())
@@ -535,7 +555,7 @@ mod tests {
 10/5 IFACEA,11/5 IFACEB,12/5 IFACEC,13/5 IFACED,14/5 IFACEE";
         assert!(LONG.len() > 100, "test string must exceed the C's limit");
         let mut n = 0;
-        parse(LONG, |_| {
+        parse(LONG, Version::V1, |_| {
             n += 1;
             Ok(())
         })
@@ -556,7 +576,7 @@ mod tests {
             ("8/5/6 CAN", RouteError::BadNetmask),
         ] {
             assert_eq!(
-                parse(text, |_| Ok(())),
+                parse(text, Version::V1, |_| Ok(())),
                 Err(Error::InvalidRoute { reason }),
                 "{text:?}"
             );
@@ -566,8 +586,8 @@ mod tests {
     #[test]
     fn single_character_entries_are_skipped_like_the_c() {
         // strlen(str) > 1 in csp_rtable_stdio.c: a lone "8" is not an error, it is ignored.
-        assert_eq!(parse("8", |_| Ok(())).unwrap(), 0);
-        assert_eq!(parse("0/0 CAN,x", |_| Ok(())).unwrap(), 1);
+        assert_eq!(parse("8", Version::V1, |_| Ok(())).unwrap(), 0);
+        assert_eq!(parse("0/0 CAN,x", Version::V1, |_| Ok(())).unwrap(), 1);
     }
 
     #[test]
@@ -620,7 +640,7 @@ mod tests {
             let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
             let text = core::str::from_utf8(&out[..n]).unwrap();
             let mut seen = None;
-            parse(text, |p| {
+            parse(text, Version::V1, |p| {
                 seen = Some(p);
                 Ok(())
             })
@@ -666,7 +686,7 @@ mod tests {
     #[test]
     fn parse_feeds_a_table_end_to_end() {
         let mut tb = t();
-        parse("0/0 CAN, 8/5 CAN 12", |r| {
+        parse("0/0 CAN, 8/5 CAN 12", Version::V1, |r| {
             let mask = r.netmask.unwrap_or(Version::V1.host_bits() as u16);
             tb.set(r.address, mask, 0, r.via.unwrap_or(NO_VIA))
         })

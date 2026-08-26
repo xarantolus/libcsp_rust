@@ -104,6 +104,7 @@
 {"suite":"rtable","case":"a_netmask_wider_than_the_address_space_is_refused_by_the_parser","verdict":"must_match","input":{"table":"3000_slash_99_link_a","host_bits":14},"observed":{"load_result":-2,"frames":0}}
 {"suite":"rtable","case":"the_same_netmask_set_directly_is_clamped_not_refused","verdict":"must_match","input":{"netmask_asked_for":99,"host_bits":14},"observed":{"set_result":0,"frames":1}}
 {"suite":"rtable","case":"a_refused_table_string_keeps_the_entries_before_the_bad_one","verdict":"must_match","input":{"table":"good_then_bad"},"observed":{"load_result":-2,"first_entry_installed":1}}
+{"suite":"rtable","case":"an_address_outside_the_address_space_is_refused","verdict":"must_match","input":{"address":20000,"max_node_id":16383},"observed":{"load_result":-2,"frames":0}}
 {"suite":"rtable","case":"a_one_character_entry_ends_the_parse_and_still_reports_success","verdict":"diverges","input":{"table":"good_short_good"},"observed":{"load_result":1,"routes_after_the_short_token":0}}
 {"suite":"rtable","case":"a_next_hop_survives_the_text_format","verdict":"must_match","input":{"table":"addr_iface_via","via_written":42},"observed":{"load_result":1,"via_on_tx":42}}
 {"suite":"rtable","case":"a_route_without_a_next_hop_sends_direct","verdict":"must_match","input":{"table":"addr_iface"},"observed":{"load_result":1,"via_on_tx":65535}}

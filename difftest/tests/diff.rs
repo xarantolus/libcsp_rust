@@ -424,7 +424,7 @@ fn rtable_lookups_agree_for_tables_both_sides_accept() {
 
         let c_res = c_rtable_load(&text).expect("no interior NULs");
         let mut rust: Vec<(u16, u16, u8, u16)> = Vec::new();
-        let rust_res = csp_core::rtable::parse(&text, |r| {
+        let rust_res = csp_core::rtable::parse(&text, csp_core::Version::V1, |r| {
             rust.push((
                 r.address,
                 r.netmask.unwrap_or(5),
@@ -497,7 +497,7 @@ fn a_one_character_entry_ends_the_cs_parse_and_it_reports_success() {
     );
 
     let mut seen = Vec::new();
-    let n = csp_core::rtable::parse(text, |r| {
+    let n = csp_core::rtable::parse(text, csp_core::Version::V1, |r| {
         seen.push((r.address, r.iface.to_string()));
         Ok(())
     })
@@ -534,7 +534,7 @@ fn the_c_truncates_a_long_table_at_a_hundred_characters() {
     assert_eq!(&aligned[99..100], ",", "the cut must land on a separator");
 
     let c_res = c_rtable_load(&aligned).unwrap();
-    let rust_n = csp_core::rtable::parse(&aligned, |_| Ok(())).unwrap();
+    let rust_n = csp_core::rtable::parse(&aligned, csp_core::Version::V1, |_| Ok(())).unwrap();
     assert_eq!(rust_n, 15, "the port parses every entry");
     assert_eq!(c_res, 10, "the C kept the ten that fit");
     assert!(c_res > 0, "and reported success while dropping five routes");
@@ -554,7 +554,7 @@ fn the_c_truncates_a_long_table_at_a_hundred_characters() {
         "a mid-entry cut makes the C reject the whole table"
     );
     assert_eq!(
-        csp_core::rtable::parse(&midway, |_| Ok(())).unwrap(),
+        csp_core::rtable::parse(&midway, csp_core::Version::V1, |_| Ok(())).unwrap(),
         20,
         "and the port still parses all twenty"
     );

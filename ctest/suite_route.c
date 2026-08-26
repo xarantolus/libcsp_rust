@@ -501,6 +501,39 @@ START_TEST(test_a_refused_table_string_keeps_the_entries_before_the_bad_one)
 }
 END_TEST
 
+/* An address outside the address space.
+ *
+ * v2 has 14 host bits, so 16383 is the largest node id. `csp_rtable_stdio.c:44` checks
+ * `address > csp_id_get_max_nodeid()` in the **parser** and refuses the whole string.
+ * 20000 fits a uint16 happily, so nothing about the type catches it -- only the range
+ * check does, and a port that relied on integer width alone would accept it.
+ */
+START_TEST(test_an_address_outside_the_address_space_is_refused)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("20000 LINK_A");
+
+	ck_assert_int_eq(res, CSP_ERR_INVAL);
+	ck_assert_str_eq(goes_by(20000), "");
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "an_address_outside_the_address_space_is_refused",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("address", 20000);
+		ctest_trace_int("max_node_id", (int)csp_id_get_max_nodeid());
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("frames", (int64_t)seen);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* A one-character entry ends the parse.
  *
  * `while (str && (strlen(str) > 1))` is the loop *condition*, not a skip: the short token
@@ -659,6 +692,7 @@ Suite * route_suite(void)
 	tcase_add_test(tc_rt, test_a_netmask_wider_than_the_address_space_is_refused_by_the_parser);
 	tcase_add_test(tc_rt, test_the_same_netmask_set_directly_is_clamped_not_refused);
 	tcase_add_test(tc_rt, test_a_refused_table_string_keeps_the_entries_before_the_bad_one);
+	tcase_add_test(tc_rt, test_an_address_outside_the_address_space_is_refused);
 	tcase_add_test(tc_rt, test_a_one_character_entry_ends_the_parse_and_still_reports_success);
 	tcase_add_test(tc_rt, test_a_next_hop_survives_the_text_format);
 	tcase_add_test(tc_rt, test_a_route_without_a_next_hop_sends_direct);
