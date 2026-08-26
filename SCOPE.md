@@ -2064,3 +2064,27 @@ it would pass identically at either version and prove nothing about v1 — measu
 setting `VERSION` to `V2` and watching it fail 35 against 33. A second assertion states
 that the two header sizes differ, so the first one stops being a distinguisher loudly rather
 than silently if that ever changes.
+
+**2026-08-26: retransmission and reordering against a real peer.** Both had only ever been
+driven at the libcheck level with hand-built frames, where the give-up case is a recorded
+divergence. Two things that only a real peer can answer:
+
+- **A lost packet's retransmission is one the C accepts.** The port sends, the frame is
+  never handed to the C, the clock passes `packet_timeout`, and the port resends. The
+  retransmitted copy carries the original sequence number and a *refreshed* acknowledgement
+  — an earlier bug in that refresh wrote the ack past the trailer and stretched the packet
+  to the whole buffer, which nothing on this side would notice. The C's application receives
+  the payload exactly once, intact. `node_rdp_retransmit.rs`.
+- **A real peer's frames are reordered before the application sees them.** libcsp sequences
+  the two messages; the harness hands them to the port second-first, which is what a network
+  does. Both arrive, in order. `node_rdp_reorder.rs`.
+
+**No defect in either.** Verified by control rather than by passing: suppressing
+retransmission fails the first with nothing resent after four packet timeouts, and dropping
+the held frame fails the second with `["first"]` where two were expected.
+
+**A mistake in the reorder test worth keeping.** It first collected deliveries only when
+`work` reported `Routed::Delivered`, and reported an empty application queue — the released
+frame arrives without a fresh event, so the data was sitting on the connection unread. The
+test now reads the connection itself. It looked exactly like the port dropping the
+overtaking packet, which is the defect it was written to find.
