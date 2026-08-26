@@ -122,6 +122,11 @@ check: canonical
     cargo fmt --all --check
     cargo build -p csp-core -p csp --target thumbv7em-none-eabihf --no-default-features
     cargo build -p csp-core -p csp --target thumbv7em-none-eabihf --all-features
+    # The minimal configuration is also *run*, not only compiled. It was compile-only for
+    # months, its test code drifted until it no longer built, and a divergence lived there
+    # unseen: `forward` was gated on `rtable` and refused every packet, where the C
+    # compiles out only its middle stage.
+    cargo test -p csp-core -p csp --no-default-features
 
 fmt:
     cargo fmt --all
