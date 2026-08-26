@@ -347,7 +347,7 @@ below.
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
 - **118 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
   performed under `ctest/`'s **139 checks**, replayed against the port. `just mutants`
-  reports how many of them some deliberate breakage can actually move — 92 at the time of
+  reports how many of them some deliberate breakage can actually move — 93 at the time of
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.
