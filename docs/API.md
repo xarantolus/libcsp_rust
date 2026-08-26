@@ -73,6 +73,25 @@ match Delivery::classify(first_packet, &mut connection) {
 The `FRAG` bit decides it, and it is a **per-packet** header flag, so it is known from the
 first packet. It becomes the `Delivery` you match on.
 
+`connection` above is anything implementing [`PacketSource`] — a stream past its first
+fragment pulls the rest from it. The crate ships no impl for a node connection, because
+sans-io means the node does not own the read loop; write the four-line adapter:
+
+```rust
+struct Conn<'s, 'a> { node: &'s mut Node<'a, …>, conn: Handle }
+
+impl<'a> PacketSource<'a, BUFS, BUFSZ> for Conn<'_, 'a> {
+    fn next_packet(&mut self, _timeout_ms: u32) -> Option<Packet<'a, BUFS, BUFSZ>> {
+        self.node.read(self.conn).ok().flatten()
+    }
+}
+```
+
+This works because `Node::read` returns a packet borrowed from the **storage** (`'a`), not
+from the `&mut self` that produced it — an adapter tied to the mutable borrow could not
+outlive the call that handed you the first fragment. `rdp::a_multi_fragment_stream_reassembles_over_rdp`
+drives exactly this against the C, with the fragments arriving inside an RDP connection.
+
 > **RDP is server-side only.** The node answers a handshake, acknowledges data and hands
 > the payload up with its trailer removed — a peer can open an RDP connection *to* this
 > node, and `Routed::Respond` is how the control frames reach the wire. It cannot yet open
@@ -345,9 +364,9 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **142 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **155 checks**, replayed against the port. `just mutants`
-  reports how many of them some deliberate breakage can actually move — 113 at the time of
+- **146 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **159 checks**, replayed against the port. `just mutants`
+  reports how many of them some deliberate breakage can actually move — 117 at the time of
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.
