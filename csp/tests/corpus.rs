@@ -2550,6 +2550,118 @@ fn replay_rdp_syn_flood() -> serde_json::Value {
 }
 
 #[cfg(feature = "rdp")]
+/// A reply to a connection the node opened, on a port nothing bound.
+///
+/// This is the request/reply exchange every client does: `connect` picks an ephemeral
+/// source port, the peer answers to it, and no `bind` ever names it. The port refused these
+/// as `PortNotBound` because it checked the socket table and not the connection table, so
+/// nothing a `connect` asked for ever came back.
+fn replay_reply_to_a_connect() -> serde_json::Value {
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const BOUND: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 12, true).unwrap();
+    n.bind(BOUND).unwrap();
+
+    let h = n.connect(2, PEER, 20, 0, CLOCK).expect("connect");
+    let info = n.conn_info(h).expect("live");
+
+    let mut reply = n.packet().expect("the pool is empty");
+    reply.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: PEER,
+        dst: NODE,
+        dport: info.dport,
+        sport: info.sport,
+    });
+    reply.set_payload(b"pong").unwrap();
+    n.router.receive(reply, 0);
+
+    let mut delivered = 0;
+    let mut body: Vec<u8> = Vec::new();
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Delivered { conn, .. } => {
+                while let Ok(Some(p)) = n.read(conn) {
+                    delivered += 1;
+                    p.with_payload(|d| body.extend_from_slice(d));
+                    drop(p);
+                }
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    serde_json::json!({
+        "delivered": delivered,
+        "delivered_len": body.len(),
+        "delivered_body": body.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    })
+}
+
+/// The port opening an RDP connection: what `Node::connect(RDP_REQ)` puts on the wire.
+///
+/// The C's `csp_rdp_connect` emits the SYN and then blocks on a semaphore only its router
+/// task can release, so what is comparable is the frame, not the call. Here the SYN is
+/// queued and `work` reports it, which is the same frame reached without blocking.
+///
+/// The sequence number is absent from both sides on purpose: it is the ISN, and the port
+/// deliberately does not reproduce the C's `rand_r(csp_get_ms())`. See the C test.
+#[cfg(feature = "rdp")]
+fn replay_rdp_client_connect() -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+
+    let opened = n.connect(2, PEER, PORT, csp_core::security::opts::RDP_REQ, CLOCK);
+    let ok = opened.is_ok();
+
+    let mut syn_flags = 0u8;
+    let mut syn_ack = 0u16;
+    let mut option_bytes = 0usize;
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Respond { packet, .. } => {
+                let p = n.take_forwarded(packet).expect("a live slot");
+                p.with_payload(|b| {
+                    if let Ok(h) = rdp::Header::decode(b) {
+                        syn_flags = h.flags;
+                        syn_ack = h.ack_nr;
+                        option_bytes = b.len() - rdp::HEADER_LEN;
+                    }
+                });
+                drop(p);
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+    assert!(ok, "connect(RDP_REQ) must open a connection");
+
+    serde_json::json!({
+        "syn_flags": syn_flags,
+        "syn_ack": syn_ack,
+        "option_bytes": option_bytes,
+    })
+}
+
 fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     use csp_core::rdp;
 
@@ -3826,6 +3938,10 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         {
             Some((replay_broadcast(&rec.case), rec.case.clone()))
         }
+        "conn" if rec.case == "a_reply_reaches_the_connection_that_asked_for_it" => Some((
+            replay_reply_to_a_connect(),
+            "a reply on an unbound ephemeral port".to_string(),
+        )),
         "conn" if rec.case == "a_connection_is_offered_to_the_application_only_once" => {
             let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
             type P = Pool<16, 264>;
@@ -4020,6 +4136,11 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))
         }
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "an_rdp_connect_puts_a_syn_on_the_wire" => Some((
+            replay_rdp_client_connect(),
+            "Node::connect(RDP)".to_string(),
+        )),
         "rdp" if rec.case == "isn_is_a_function_of_the_clock" => None,
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "a_syn_without_options_is_rejected" => Some((

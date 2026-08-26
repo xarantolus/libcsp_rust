@@ -503,6 +503,31 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         self.entry_mut(h).ok()?.rdp.begin_send(now_ms)
     }
 
+    /// Open a connection as the *initiator*: seed the sequence number and produce the SYN.
+    ///
+    /// The responding side is seeded inside the router when a peer's SYN arrives. A
+    /// connection this node opens has no incoming packet to hang that off, so it happens
+    /// here instead.
+    ///
+    /// Returns the header and option block to put on the wire, or `None` if the machine
+    /// was not closed — `csp_rdp_connect` reports `CSP_ERR_ALREADY` for that same case.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_connect(
+        &mut self,
+        h: Handle,
+        iss: u16,
+        opts: rdp::SynOptions,
+        now_ms: u32,
+        max_window: u32,
+    ) -> Option<(rdp::Header, rdp::SynOptions)> {
+        let c = self.entry_mut(h).ok()?;
+        c.rdp = rdp::Connection::new(iss, opts);
+        match c.rdp.step(rdp::Event::Connect, now_ms, max_window) {
+            rdp::Action::SendSyn(header, o) => Some((header, o)),
+            _ => None,
+        }
+    }
+
     /// Hold a copy of a sent packet until the peer acknowledges it.
     #[cfg(feature = "rdp")]
     pub fn hold_unacked(&mut self, h: Handle, seq_nr: u16, slot: u16, now_ms: u32) -> Result<()> {

@@ -536,7 +536,18 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ingress: u8,
         now_ms: u32,
     ) -> Routed {
-        if !self.is_bound(id.dport) {
+        // A bound port is not the only endpoint. `csp_route_deliver` (`csp_route.c:276-285`)
+        // looks the destination port up in the socket table *and* calls
+        // `csp_conn_find_existing`, dropping only when neither matches — because a reply to
+        // a connection this node opened arrives on the ephemeral source port `connect`
+        // chose, and nothing ever binds that.
+        //
+        // Checking only the port meant every reply to every connection this node opened was
+        // refused as `PortNotBound`: `connect` produced a connection that could never
+        // receive anything. The client API, the CMP client and RDP's `SYN|ACK` were all
+        // dead for that reason, and every test passed, because none of them ever put a
+        // reply into a node that had called `connect`.
+        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {
             self.counters.port_not_bound += 1;
             return Routed::Dropped(DropReason::PortNotBound);
         }
@@ -1045,14 +1056,17 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         idout: Id,
         ifaces: &crate::iflist::IfList<N, A>,
         header: csp_core::rdp::Header,
+        body: &[u8],
     ) -> core::result::Result<(), Routed> {
         let Some(mut reply) = pool.acquire(0) else {
             self.counters.rx_queue_full += 1;
             return Err(Routed::Dropped(DropReason::ReceiveQueueFull));
         };
         reply.set_id(idout);
-        let mut buf = [0u8; csp_core::rdp::HEADER_LEN];
-        let Ok(n) = header.encode(&[], &mut buf) else {
+        // Sized for a SYN's option block as well as a bare control frame: the client
+        // handshake is the one caller whose body is not empty.
+        let mut buf = [0u8; csp_core::rdp::HEADER_LEN + csp_core::rdp::SYN_OPTIONS_LEN];
+        let Ok(n) = header.encode(body, &mut buf) else {
             self.counters.malformed += 1;
             return Err(Routed::Dropped(DropReason::Malformed));
         };
@@ -1171,6 +1185,41 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // Knuth's multiplicative constant, folded to 16 bits.
         let mixed = now_ms.wrapping_mul(2_654_435_761);
         ((mixed >> 16) ^ mixed) as u16
+    }
+
+    /// Open an RDP connection this node initiates: queue the `SYN` for the next `work`.
+    ///
+    /// `csp_rdp_connect` sends the SYN and then blocks until the router task reports the
+    /// peer's `SYN|ACK`. There is nowhere to block here, so the SYN is queued and the
+    /// caller's next [`Router::work`] hands it to the wire as `Routed::Respond`; the
+    /// connection reaches `Open` when the reply arrives through the ordinary receive path.
+    ///
+    /// The `SYN|ACK` and the final `ACK` need no new code — `State::SynSent` was already
+    /// implemented and tested in `csp_core`, and was simply never reachable, because
+    /// nothing outside that module ever constructed `Event::Connect`.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_connect<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        handle: Handle,
+        idout: Id,
+        now_ms: u32,
+    ) -> csp_core::Result<()> {
+        let iss = Self::initial_seq(now_ms);
+        let defaults = csp_core::rdp::SynOptions::default();
+        let Some((header, opts)) =
+            self.conns
+                .rdp_connect(handle, iss, defaults, now_ms, RDP_MAX_WINDOW)
+        else {
+            return Err(csp_core::Error::Unsupported {
+                feature: csp_core::Feature::Rdp,
+            });
+        };
+        let mut body = [0u8; csp_core::rdp::SYN_OPTIONS_LEN];
+        let n = opts.encode(&mut body)?;
+        self.queue_rdp_from_tick(pool, idout, ifaces, header, &body[..n])
+            .map_err(|_| csp_core::Error::Unroutable { dst: idout.dst })
     }
 
     /// Decide where a packet that is not for us should go.
@@ -1343,7 +1392,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             let Some((id, h)) = entry else { continue };
             // `is_new` is false: the connection was announced when the handshake created
             // it, and a retransmission is not a new one.
-            let _ = self.queue_rdp_from_tick(pool, *id, ifaces, *h);
+            let _ = self.queue_rdp_from_tick(pool, *id, ifaces, *h, &[]);
         }
 
         // The transmit sweep: release what the peer acknowledged, resend what timed out,

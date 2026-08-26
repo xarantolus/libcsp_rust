@@ -628,6 +628,15 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// True once the handshake has completed and data may flow.
+    ///
+    /// The one question an application actually has to ask of the state: a connection it
+    /// opened is not usable until the peer answers, and data offered before that is
+    /// outside the send window.
+    pub const fn is_open(&self) -> bool {
+        matches!(self.state, State::Open)
+    }
+
     /// A closed connection with the given initial sequence number.
     ///
     /// `iss` should be unpredictable in production: a guessable initial sequence number

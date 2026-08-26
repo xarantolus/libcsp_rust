@@ -10,6 +10,7 @@
 {"suite":"rdp","case":"data_reaches_the_application_without_the_rdp_trailer","verdict":"must_match","input":{"payload_bytes_sent":5,"clock_ms":100000},"observed":{"delivered_len":5,"delivered":"68656c6c6f"}}
 {"suite":"rdp","case":"a_stream_fragment_survives_being_carried_over_rdp","verdict":"must_match","input":{"body_bytes":6,"clock_ms":100000},"observed":{"after_rdp_len":14,"sfp_result":0,"reassembled_len":6,"reassembled":"73747265616d"}}
 {"suite":"rdp","case":"a_multi_fragment_stream_reassembles_over_rdp","verdict":"must_match","input":{"fragments":2,"totalsize":10},"observed":{"sfp_result":0,"reassembled_len":10,"reassembled":"68656c6c6f776f726c64"}}
+{"suite":"rdp","case":"an_rdp_connect_puts_a_syn_on_the_wire","verdict":"must_match","input":{"clock_ms":100000,"conn_timeout_ms":50},"observed":{"syn_flags":8,"syn_ack":0,"option_bytes":24}}
 {"suite":"rdp","case":"a_hostile_syn_cannot_suppress_acknowledgement","verdict":"must_match","input":{"proposed_ack_delay_count":-1,"proposed_window":-1,"packets":12},"observed":{"acks":2,"clamped_window":5,"clamped_ack_delay_count":5}}
 {"suite":"rdp","case":"without_delayed_acks_every_packet_is_acknowledged","verdict":"must_match","input":{"delayed_acks":0,"ack_delay_count":2,"packets":3},"observed":{"acks":3,"acked":[1001,1002,1003]}}
 {"suite":"rdp","case":"a_window_of_two_admits_exactly_two","verdict":"must_match","input":{"window_size":2,"offered":2},"observed":{"frames":2,"sequential":1}}
@@ -120,6 +121,7 @@
 {"suite":"sfp","case":"a_transfer_that_stops_early_still_reports_its_last_write","verdict":"diverges","input":{"fragments":[{"body":"68656c6c6f","offset":0,"totalsize":10}]},"observed":{"ret":0,"writes":1,"assembled":"68656c6c6f"}}
 {"suite":"sfp","case":"a_second_fragment_that_changes_the_total_is_refused","verdict":"must_match","input":{"fragments":[{"body":"68656c6c6f","offset":0,"totalsize":10},{"body":"776f726c64","offset":5,"totalsize":99}]},"observed":{"ret":-103,"writes":1,"assembled":"68656c6c6f"}}
 {"suite":"sfp","case":"the_fragment_mtu_for_each_option_set","verdict":"must_match","input":{"buffer_size":256},"observed":{"plain":248,"rdp":243,"crc32":244,"hmac":244,"all_three":235}}
+{"suite":"conn","case":"a_reply_reaches_the_connection_that_asked_for_it","verdict":"must_match","input":{"bound_port":12,"reply_body":"706f6e67"},"observed":{"delivered":1,"delivered_len":4,"delivered_body":"706f6e67"}}
 {"suite":"conn","case":"running_out_of_connections_costs_no_buffers","verdict":"must_match","input":{"conn_max":8,"buffer_count":15,"offered":16},"observed":{"accepted":8,"buffers_lost":0}}
 {"suite":"conn","case":"a_closed_connection_can_be_used_again","verdict":"must_match","input":{"conn_max":8,"buffer_count":15,"rounds":3},"observed":{"accepted_total":24,"accepted_per_round":[8,8,8],"buffers_lost":0}}
 {"suite":"conn","case":"a_second_packet_reuses_the_same_connection","verdict":"must_match","input":{"packets_from_one_peer":2},"observed":{"connections":1,"packets_on_it":2}}
