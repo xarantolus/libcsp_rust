@@ -60,6 +60,14 @@ MUTANTS = [
    "            if frag.total != total {", "            if false {"),
   ("sfp: fragment order", "csp/src/delivery.rs",
    "            if frag.offset != expected {", "            if false {"),
+  # A reply to a connection this node opened lands on an ephemeral port nothing bound.
+  # Refusing it made `connect` useless, and every test passed anyway.
+  ("conn: a connection is an endpoint too", "csp/src/router.rs",
+   "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
+   "        if !self.is_bound(id.dport) {"),
+  ("rdp: connect proposes its option block", "csp/src/router.rs",
+   "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &body[..n])",
+   "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &[])"),
   ("conn: table exhaustion frees", "csp/src/router.rs",
    "                        return Routed::Dropped(DropReason::ConnectionTableFull);",
    "                        core::mem::forget(packet);\n                        return Routed::Dropped(DropReason::ConnectionTableFull);"),

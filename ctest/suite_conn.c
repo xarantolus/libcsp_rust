@@ -426,11 +426,80 @@ START_TEST(test_another_subnets_broadcast_is_relayed_not_delivered)
 }
 END_TEST
 
+/* A reply addressed to the ephemeral port `csp_connect` chose, on a port nothing bound.
+ *
+ * `csp_route_deliver` (`csp_route.c:276-285`) looks the destination port up in the socket
+ * table *and* calls `csp_conn_find_existing`, dropping only when neither matches. So a
+ * client connection receives its reply on a port that was never bound — which is the whole
+ * point of an ephemeral source port, and the only way a request/reply exchange works.
+ *
+ * Recorded because the port had those two checks in the wrong order: it refused on
+ * "port not bound" before ever consulting the connection table, so every reply to every
+ * connection it opened was dropped. Nothing caught it, because no test had put a reply into
+ * a node that had called `connect`. */
+START_TEST(test_a_reply_reaches_the_connection_that_asked_for_it)
+{
+	setup_stack();
+
+	csp_conn_t * conn = csp_connect(2, 11, 20, 0, 0);
+	ck_assert_ptr_nonnull(conn);
+	/* `csp_conn_dport` is the ephemeral port this node chose; `csp_conn_sport` is the
+	   remote one. Getting these the wrong way round made this test say the C dropped the
+	   reply, which would have buried the defect it exists to find. */
+	const uint8_t ephemeral = (uint8_t)csp_conn_dport(conn);
+	/* The point of the case: nothing bound this port. */
+	ck_assert_uint_ne(ephemeral, TEST_PORT);
+
+	csp_packet_t * reply = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(reply);
+	reply->id.pri = 2;
+	reply->id.src = 11;
+	reply->id.dst = LOCAL_ADDR;
+	reply->id.dport = ephemeral;
+	reply->id.sport = 20;
+	reply->id.flags = 0;
+	memcpy(reply->data, "pong", 4);
+	reply->length = 4;
+	csp_qfifo_write(reply, &ingress_if, NULL);
+	csp_route_work();
+
+	csp_packet_t * got = csp_read(conn, 0);
+	const unsigned int delivered = (got != NULL);
+	unsigned int len = 0;
+	uint8_t body[8] = { 0 };
+	if (got != NULL) {
+		len = got->length;
+		memcpy(body, got->data, len < sizeof(body) ? len : sizeof(body));
+		csp_buffer_free(got);
+	}
+
+	ck_assert_uint_eq(delivered, 1);
+	ck_assert_uint_eq(len, 4);
+	ck_assert_mem_eq(body, "pong", 4);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "a_reply_reaches_the_connection_that_asked_for_it",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("bound_port", TEST_PORT);
+		ctest_trace_hex("reply_body", (const uint8_t *)"pong", 4);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", (int64_t)delivered);
+		ctest_trace_int("delivered_len", (int64_t)len);
+		ctest_trace_hex("delivered_body", body, len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * conn_suite(void)
 {
 	Suite * s = suite_create("Conn");
 
 	TCase * tc = tcase_create("table");
+	tcase_add_test(tc, test_a_reply_reaches_the_connection_that_asked_for_it);
 	tcase_add_test(tc, test_running_out_of_connections_costs_no_buffers);
 	tcase_add_test(tc, test_a_closed_connection_can_be_used_again);
 	tcase_add_test(tc, test_a_second_packet_reuses_the_same_connection);

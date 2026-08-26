@@ -92,12 +92,16 @@ from the `&mut self` that produced it — an adapter tied to the mutable borrow 
 outlive the call that handed you the first fragment. `rdp::a_multi_fragment_stream_reassembles_over_rdp`
 drives exactly this against the C, with the fragments arriving inside an RDP connection.
 
-> **RDP is server-side only.** The node answers a handshake, acknowledges data and hands
-> the payload up with its trailer removed — a peer can open an RDP connection *to* this
-> node, and `Routed::Respond` is how the control frames reach the wire. It cannot yet open
-> one *itself*: `Node::connect` refuses `RDP_REQ` with `Error::Unsupported` rather than
-> setting a flag it will not honour. When it lands, it will be the second axis here:
-> reliability changes *how* you read, and is known at accept.
+> **RDP works in both directions.** A peer can open an RDP connection *to* this node — the
+> node answers the handshake, acknowledges data and hands the payload up with its trailer
+> removed — and `Node::connect(RDP_REQ)` opens one *from* it. `Routed::Respond` is how the
+> control frames reach the wire either way.
+>
+> `connect` returns as soon as the `SYN` is queued, because sans-io has nowhere to block:
+> the next `work()` transmits it, and `Node::is_rdp_open` reports when the peer's `SYN|ACK`
+> has opened the connection. `csp_connect` instead blocks on a semaphore its router task
+> releases. Data offered before the connection is open is refused with
+> `Error::SendWindowFull` rather than sent where a peer would discard it.
 
 Classifying costs one packet peek and **consumes nothing**. A narrow handler that gets the
 wrong shape gets the delivery *back*:
@@ -364,8 +368,8 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **146 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **159 checks**, replayed against the port. `just mutants`
+- **148 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **161 checks**, replayed against the port. `just mutants`
   reports how many of them some deliberate breakage can actually move — 117 at the time of
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
