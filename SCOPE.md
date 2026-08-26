@@ -269,6 +269,38 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### A malformed SYN got an RST *and* an accepted connection
+
+2026-08-26, and the most serious thing this exercise has turned up since the forwarding bug.
+
+Found by the same measurement as the dedup gap the day before — tests per suite against
+records per suite. `suite_rdp.c` was the worst offender: 21 tests, 11 records. Five of the
+ten untraced covered SYN option-block validation, the path a hostile peer reaches first.
+
+`csp_rdp.c` requires a complete six-word option block. Given a SYN with none, or one word
+short, it sends `RST` and frees the connection; the socket never sees it. The port sent the
+same `RST` — the state machine was right and stays `Closed` — but `queue_rdp` announced the
+connection to the application regardless, because `is_new` was true and nothing distinguished
+"a handshake is starting" from "this is being refused". So:
+
+- the application accepted a connection whose peer had already been reset, and
+- the table slot stayed allocated.
+
+The second is the one that bites. `rdp::malformed_syns_do_not_exhaust_the_table` sends
+`CSP_CONN_MAX * 3` option-less SYNs and then one honest peer. Against the C the honest peer
+gets its connection and its `SYN|ACK`. Against the port as it stood it got **neither** — no
+connection, no frame. Twenty-four malformed packets, from a peer that never completed a
+handshake, and the node stops accepting RDP connections at all.
+
+`Action::SendControl` now treats an `RST` on a brand-new connection as a refusal: no
+`queue_accept`, and the slot is released the way `Action::Closed` releases one. Three records
+pin it, and all three fail if the distinction is removed.
+
+Worth naming the shape, because it is the inverse of the earlier RDP findings and it took
+four cycles to reach: those were *the state machine offers an action and the layer above
+drops it*. This is *the state machine refuses and the layer above proceeds anyway*. Both are
+invisible to any test that checks only the state machine, and there were 49 of those.
+
 ### Three C tests that measured the dedup window and recorded none of it
 
 2026-08-26. `suite_dedup.c` had seven tests: four traced the mode matrix, three asserted the

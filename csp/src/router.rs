@@ -760,7 +760,24 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
             rdp::Action::SendControl(h) => {
                 drop(packet);
-                self.emit_rdp(pool, id, ifaces, h, &[], is_new, handle)
+                // A `RST` on a connection this packet just created is a refusal, not the
+                // start of one: the state machine sends it when a SYN's option block is
+                // absent or short, and stays `Closed`. `csp_rdp.c` frees the connection
+                // there and the socket never sees it. This announced it to the application
+                // anyway, so one malformed SYN produced an accepted connection whose peer
+                // had already been reset -- and left the table slot allocated, so a peer
+                // could fill the table with packets a real handshake never sent.
+                let refused = is_new && (h.flags & csp_core::rdp::RST) != 0;
+                let out = self.emit_rdp(pool, id, ifaces, h, &[], is_new && !refused, handle);
+                if refused {
+                    let mut drained = [0u16; RXQ];
+                    if let Ok(n) = self.conns.close(handle, &mut drained) {
+                        for slot in drained.iter().take(n) {
+                            drop(pool.from_index(*slot));
+                        }
+                    }
+                }
+                out
             }
             rdp::Action::SendSyn(h, opts) => {
                 drop(packet);

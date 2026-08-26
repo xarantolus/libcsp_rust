@@ -1162,6 +1162,190 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// Everything else in the `rdp` suite replays `csp_core::rdp::Connection` directly, which
 /// is why the router never reaching it went unnoticed: the state machine was correct and
 /// nothing called it.
+/// A SYN whose option block is absent or one word short.
+///
+/// `csp_rdp.c` reads `packet->data32[0..5]` unconditionally once it has decided a packet is
+/// a SYN, so a block shorter than six words is a read past what the peer actually sent --
+/// on input a peer fully controls. What is compared is only what that peer can see: how
+/// many frames came back, what the first one carried, and whether the node then had a
+/// connection to hand its application.
+#[cfg(feature = "rdp")]
+fn replay_rdp_malformed_syn(words: usize) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    // `words` option words, then the five-byte trailer. The C's own case uses these values
+    // for the five-word variant; with `words == 0` there is no block at all.
+    const PARTIAL: [u32; 5] = [4, 10_000, 1_000, 1, 250];
+    let mut body = [0u8; 6 * 4 + rdp::HEADER_LEN];
+    for (i, w) in PARTIAL.iter().take(words).enumerate() {
+        body[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    let olen = words * 4;
+    let h = rdp::Header {
+        flags: rdp::SYN,
+        seq_nr: 1000,
+        ack_nr: 0,
+    };
+    let hlen = h.encode(&[], &mut body[olen..]).unwrap();
+
+    let mut syn = n.packet().expect("the pool is empty");
+    syn.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    syn.set_payload(&body[..olen + hlen]).unwrap();
+    n.router.receive(syn, 0);
+
+    let mut frames = 0u32;
+    let mut reply_flags = 0u8;
+    loop {
+        match n.work(0) {
+            csp::Routed::Respond { packet, .. } => {
+                frames += 1;
+                if let Some(p) = n.take_forwarded(packet) {
+                    if frames == 1 {
+                        reply_flags = p
+                            .with_payload(|b| rdp::Header::decode(b).map(|h| h.flags).unwrap_or(0));
+                    }
+                    drop(p);
+                }
+            }
+            csp::Routed::Idle => break,
+            _ => {}
+        }
+    }
+
+    let accepted_after = u32::from(n.accept().is_some());
+
+    serde_json::json!({
+        "frames_out": frames,
+        "reply_flags": reply_flags,
+        "accepted_after": accepted_after,
+    })
+}
+
+/// More malformed SYNs than the connection table holds, then an honest peer.
+///
+/// A node that keeps the slot for a SYN it rejected is closed for business after that many
+/// packets, from a peer that never completed a handshake. What is compared is only what the
+/// honest peer gets: a connection, and a `SYN|ACK` on the wire.
+#[cfg(feature = "rdp")]
+fn replay_rdp_syn_flood() -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CONNS: usize = 8;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let send = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>, body: &[u8], sport: u8| {
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport,
+        });
+        p.set_payload(body).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(0) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    // A SYN with no option block at all, from a different source port each time so each one
+    // asks for its own connection rather than re-finding the last.
+    let h = rdp::Header {
+        flags: rdp::SYN,
+        seq_nr: 1000,
+        ack_nr: 0,
+    };
+    let mut bad = [0u8; rdp::HEADER_LEN];
+    let blen = h.encode(&[], &mut bad).unwrap();
+    for i in 0..(CONNS * 3) {
+        send(&mut n, &bad[..blen], 40u8.wrapping_add(i as u8));
+        while n.accept().is_some() {}
+    }
+
+    // Now an honest peer.
+    let opts = rdp::SynOptions {
+        window_size: 3,
+        conn_timeout: 20_000,
+        packet_timeout: 500,
+        delayed_acks: true,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut good = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut good).unwrap();
+    let glen = h.encode(&[], &mut good[olen..]).unwrap();
+
+    let Some(mut p) = n.packet() else {
+        return serde_json::json!({ "honest_peer_opened": 0, "honest_peer_got_syn_ack": 0 });
+    };
+    p.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 39,
+    });
+    p.set_payload(&good[..olen + glen]).unwrap();
+    n.router.receive(p, 0);
+
+    let mut got_syn_ack = 0u32;
+    loop {
+        match n.work(0) {
+            csp::Routed::Respond { packet, .. } => {
+                if let Some(pk) = n.take_forwarded(packet) {
+                    let f =
+                        pk.with_payload(|b| rdp::Header::decode(b).map(|h| h.flags).unwrap_or(0));
+                    if f & (rdp::SYN | rdp::ACK) == (rdp::SYN | rdp::ACK) {
+                        got_syn_ack = 1;
+                    }
+                    drop(pk);
+                }
+            }
+            csp::Routed::Idle => break,
+            _ => {}
+        }
+    }
+
+    serde_json::json!({
+        "honest_peer_opened": u32::from(n.accept().is_some()),
+        "honest_peer_got_syn_ack": got_syn_ack,
+    })
+}
+
 #[cfg(feature = "rdp")]
 fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     use csp_core::rdp;
@@ -2531,6 +2715,21 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))
         }
         "rdp" if rec.case == "isn_is_a_function_of_the_clock" => None,
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_syn_without_options_is_rejected" => Some((
+            replay_rdp_malformed_syn(0),
+            "a SYN with no option block".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_syn_with_partial_options_is_rejected" => Some((
+            replay_rdp_malformed_syn(5),
+            "a SYN one option word short".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "malformed_syns_do_not_exhaust_the_table" => Some((
+            replay_rdp_syn_flood(),
+            "bad SYNs, then an honest peer".to_string(),
+        )),
         "rdp" if rec.case == "the_delay_count_fires_one_packet_after_it" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             // The C records the running total after each of five packets.
