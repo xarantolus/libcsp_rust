@@ -55,6 +55,18 @@ fn main() {
         "src/csp_dedup.c",
         "src/csp_services.c",
         "src/csp_service_handler.c",
+        // Pulled in by `csp_service_handler`, which `shim_node_serve` calls so a real C
+        // node can *answer* a request the port sent. Before that the handler was compiled
+        // but never referenced, so these stayed dead-stripped.
+        "src/cmp/csp_cmp_dispatch.c",
+        "src/cmp/csp_cmp_ident.c",
+        "src/cmp/csp_cmp_if_stats.c",
+        "src/cmp/csp_cmp_route.c",
+        "src/cmp/csp_cmp_mem.c",
+        "src/cmp/csp_cmp_peek_poke.c",
+        "src/cmp/csp_cmp_clock.c",
+        "src/arch/posix/csp_system.c",
+        "src/arch/posix/csp_clock.c",
         "src/csp_sfp.c",
         "src/csp_rdp.c",
         "src/csp_rdp_queue.c",

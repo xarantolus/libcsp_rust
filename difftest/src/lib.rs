@@ -101,6 +101,7 @@ unsafe extern "C" {
     fn shim_node_bind(port: u8) -> c_int;
     fn shim_node_inject(frame: *const u8, len: u32) -> c_int;
     fn shim_node_pump() -> c_int;
+    fn shim_node_serve(port: u8) -> c_int;
     fn shim_node_clear_tx();
     fn shim_node_tx_count() -> c_int;
     fn shim_node_tx_get(i: c_int, out: *mut u8) -> c_int;
@@ -202,6 +203,38 @@ pub fn c_node_init(
 pub fn c_node_bind(port: u8) -> i32 {
     // SAFETY: bounded by SHIM_PORTS on the C side, which returns -1 rather than indexing.
     unsafe { shim_node_bind(port) }
+}
+
+/// Feed `frame` to a real C node acting as a *server*, let its built-in service handler
+/// answer, and hand back the frames it put on the wire.
+///
+/// `port` must be one of libcsp's well-known services (`CSP_PING` = 1, `CSP_UPTIME` = 6,
+/// ...) and must already be bound. The reply is produced by `csp_service_handler` +
+/// `csp_sendto_reply`, i.e. by libcsp itself and not by the harness.
+///
+/// This is the only way to exercise the port as a *client*: everything else in this file
+/// drives the server direction, which is how every reply to every connection the port
+/// opened stayed silently dropped for months.
+pub fn c_node_serve(frame: &[u8], port: u8) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: buffers are sized for the largest frame the C can emit and the shim
+    // bounds-checks its own indices. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        shim_node_inject(frame.as_ptr(), frame.len() as u32);
+        shim_node_pump();
+        while shim_node_serve(port) == 1 {}
+        shim_node_pump();
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
 }
 
 /// Feed `frame` to the C node, run its router to quiescence, and report only what an
