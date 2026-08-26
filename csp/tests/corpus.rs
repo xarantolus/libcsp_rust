@@ -2749,6 +2749,93 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
         return serde_json::json!({ "frames_after_final_ack": after });
     }
 
+    if case == "a_multi_fragment_stream_reassembles_over_rdp" {
+        // Two fragments, both accepted by RDP before the reader starts. The C's
+        // `csp_sfp_recv_fp` reaches back into the connection queue mid-call for the second
+        // one, so the port has to be driven the same way: the stream's source is the node
+        // connection itself, not a fixed list.
+        //
+        // `Node::read` hands back a `Packet<'a, ..>` borrowed from the storage rather than
+        // from `&mut self`, which is what makes a connection-backed source expressible at
+        // all -- one tied to the `&mut Node` borrow could not outlive the call that
+        // produced the first packet.
+        for i in 0..2u32 {
+            let body: &[u8] = if i == 0 { b"hello" } else { b"world" };
+            let mut payload = body.to_vec();
+            payload.extend_from_slice(&(i * 5).to_be_bytes());
+            payload.extend_from_slice(&10u32.to_be_bytes());
+            let dh = rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: 1001 + i as u16,
+                ack_nr: own_iss,
+            };
+            let mut framed = [0u8; 32];
+            let k = dh.encode(&payload, &mut framed).unwrap();
+
+            let mut d = n.packet().expect("the pool is empty");
+            d.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP | csp_core::flags::FRAG,
+                src: PEER,
+                dst: NODE,
+                dport: PORT,
+                sport: 40,
+            });
+            d.set_payload(&framed[..k]).unwrap();
+            n.router.receive(d, 0);
+        }
+
+        // Drive the router to completion first, so both fragments are queued on the
+        // connection before the reader runs -- the same ordering the C test sets up.
+        let mut handle = None;
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Delivered { conn, .. } => handle = Some(conn),
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        let stalled = serde_json::json!({
+            "sfp_result": -1, "reassembled_len": 0, "reassembled": "",
+        });
+        let Some(conn) = handle else { return stalled };
+        let Ok(Some(first)) = n.read(conn) else {
+            return stalled;
+        };
+
+        struct ConnSource<'s, 'a> {
+            node: &'s mut csp::Node<'a, 8, 16, 264, 48, 32, 4>,
+            conn: csp::conn::Handle,
+        }
+        impl<'a> csp::delivery::PacketSource<'a, 16, 264> for ConnSource<'_, 'a> {
+            fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::Packet<'a, 16, 264>> {
+                self.node.read(self.conn).ok().flatten()
+            }
+        }
+
+        let mut src = ConnSource { node: &mut n, conn };
+        return match csp::delivery::Delivery::classify(first, &mut src) {
+            csp::delivery::Delivery::Stream(mut st) => {
+                let mut buf = [0u8; 64];
+                match st.read_to_slice(1000, &mut buf) {
+                    Ok(got) => serde_json::json!({
+                        "sfp_result": 0,
+                        "reassembled_len": got,
+                        "reassembled": buf[..got]
+                            .iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    }),
+                    Err(_) => serde_json::json!({
+                        "sfp_result": -103, "reassembled_len": 0, "reassembled": "",
+                    }),
+                }
+            }
+            csp::delivery::Delivery::Datagram(_) => serde_json::json!({
+                "sfp_result": -103, "reassembled_len": 0, "reassembled": "",
+            }),
+        };
+    }
+
     if case == "a_stream_fragment_survives_being_carried_over_rdp" {
         // Both protocols append their header, and the send path stacks them:
         // `[body][sfp trailer][rdp trailer]`. The receiver strips from the outside in.
@@ -3926,6 +4013,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                     | "data_reaches_the_application_without_the_rdp_trailer"
                     | "without_delayed_acks_every_packet_is_acknowledged"
                     | "a_stream_fragment_survives_being_carried_over_rdp"
+                    | "a_multi_fragment_stream_reassembles_over_rdp"
                     | "a_hostile_syn_cannot_suppress_acknowledgement"
                     | "an_unacknowledged_syn_ack_is_retransmitted_then_reset"
             ) =>

@@ -1699,6 +1699,65 @@ START_TEST(test_a_stream_fragment_survives_being_carried_over_rdp)
 }
 END_TEST
 
+/* The same cell, but with a transfer that does not fit in one fragment.
+ *
+ * The test above hands `csp_sfp_recv_fp` a packet that completes the transfer on the spot,
+ * so the reassembly loop returns before reaching the `csp_read` at its bottom. That
+ * `csp_read` is the only place the two layers are actually coupled: SFP pulls its next
+ * fragment straight out of the connection queue that RDP is filling, in the middle of a
+ * call, with no router step in between. Whether a fragment RDP has already accepted is
+ * visible there is the question, and nothing had asked it -- a stream that stalls on its
+ * second fragment looks exactly like a peer that stopped sending.
+ *
+ * Two fragments, both delivered before the reader starts, so this measures the coupling and
+ * not the arrival order. */
+START_TEST(test_a_multi_fragment_stream_reassembles_over_rdp)
+{
+	setup_stack();
+	memset(sfp_got, 0, sizeof(sfp_got));
+	sfp_got_len = 0;
+
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+	const uint16_t base = conn->rdp.rcv_cur;
+
+	/* [body][sfp trailer][rdp trailer], in that order, for each half. */
+	const char * bodies[2] = { "hello", "world" };
+	for (unsigned int i = 0; i < 2; i++) {
+		csp_packet_t * packet = new_rdp_packet();
+		packet->id.flags |= CSP_FFRAG;
+		memcpy(packet->data, bodies[i], 5);
+		packet->length = 5;
+		sfp_trailer_t * sfp = (sfp_trailer_t *)&packet->data[packet->length];
+		sfp->offset = htobe32(i * 5);
+		sfp->totalsize = htobe32(10);
+		packet->length += sizeof(*sfp);
+		put_header_and_route(packet, RDP_ACK, (uint16_t)(base + 1 + i), iss);
+	}
+
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+
+	const csp_sfp_recv_t rx = { .write = sfp_capture };
+	const int ret = csp_sfp_recv_fp(accepted, &rx, 0, NULL);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_multi_fragment_stream_reassembles_over_rdp",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("fragments", 2);
+		ctest_trace_int("totalsize", 10);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("sfp_result", ret);
+		ctest_trace_int("reassembled_len", (int64_t)sfp_got_len);
+		ctest_trace_hex("reassembled", sfp_got, sfp_got_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * rdp_suite(void)
 {
 	Suite * s;
@@ -1732,6 +1791,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_hs, test_the_handshakes_final_ack_is_not_itself_answered);
 	tcase_add_test(tc_hs, test_data_reaches_the_application_without_the_rdp_trailer);
 	tcase_add_test(tc_hs, test_a_stream_fragment_survives_being_carried_over_rdp);
+	tcase_add_test(tc_hs, test_a_multi_fragment_stream_reassembles_over_rdp);
 	tcase_add_test(tc_hs, test_a_hostile_syn_cannot_suppress_acknowledgement);
 	suite_add_tcase(s, tc_hs);
 

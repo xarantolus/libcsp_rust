@@ -136,6 +136,10 @@ check: canonical
     # untraced test has no written basis in SCOPE.md, or a basis names a test that records.
     @python3 ctest/tools/untraced.py > /dev/null || python3 ctest/tools/untraced.py
     cargo test --workspace --all-features
+    # docs/API.md's five figures against the measurement. `numbers check` existed for two
+    # cycles without being wired in here, and in that time the record and check counts drifted
+    # from 142/155 to 145/158 -- a tool that catches drift only catches it when it is run.
+    @bash ctest/tools/numbers.sh check
     cargo clippy --workspace --all-features --tests -- -D warnings
     cargo fmt --all --check
     cargo build -p csp-core -p csp --target thumbv7em-none-eabihf --no-default-features
