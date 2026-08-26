@@ -327,10 +327,23 @@ get wrong at *runtime* stays in the error enum.
 
 ## Testing
 
-- **449 tests** across the crates.
-- **922 golden vectors** captured from the running C library — real wire bytes, after
-  `csp_id_prepend`, after SFP headers, after CFP fragmentation.
-- **19 differential tests** in `difftest/`, millions of random inputs per run, linking the
+Every number here is printed by **`just numbers`**, which measures rather than remembers.
+Three of them were wrong before that target existed — "449 tests" against 487 and "19
+differential tests" against 33 had simply drifted, but **"922 golden vectors" never
+matched anything measurable**: the vector files have never held more than 510 non-comment
+lines, at any commit that touched them, and no count the tests print comes to 922 either.
+It was carried in two documents. A coverage figure nobody can reproduce is the exact shape
+of the claim that hid a third of the library. Run `just numbers` before changing any figure
+below.
+
+- **487 tests** across the crates, in 10 binaries, with `--all-features`.
+- **510 golden vector lines** in `vectors/v{1,2}.tsv`, captured from the running C library
+  — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
+  Each line carries several assertions; the tests print what they checked (`140 header
+  decodes`, `36 sfp transfers, 184 fragments`, and so on).
+- **100 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **124 checks**, replayed against the port.
+- **33 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
   lookups, and the real `csp_kiss_rx` state machine.

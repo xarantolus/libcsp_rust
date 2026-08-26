@@ -175,9 +175,9 @@ The convergence prediction held, and the branches do converge. But the experimen
 a second result that the plan did not anticipate, and it is the more useful one.
 
 **A port can pass a conformance suite, match golden vectors captured from the running C,
-and still be missing a third of the library.** This one did. 254 tests passed, 922 vectors
-matched, 12 differential tests were green, and the default-interface routing fan-out was
-absent — meaning a node with two redundant routes to a subnet would have used one of them
+and still be missing a third of the library.** This one did. 254 tests passed, every golden
+vector matched, 12 differential tests were green, and the default-interface routing fan-out
+was absent — meaning a node with two redundant routes to a subnet would have used one of them
 and reported nothing. The suite did not catch it because the suite tested what the port
 implemented.
 
