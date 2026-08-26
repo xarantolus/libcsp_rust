@@ -22,6 +22,7 @@
 #define RDP_SYN 0x08
 #define RDP_ACK 0x04
 #define RDP_RST 0x01
+#define RDP_EAK 0x02
 
 /* rand_r() seeded with 1234567, truncated to 16 bits. Recorded, not derived: the
    point of the test is that the C produces a fixed number, so deriving it here would
@@ -773,6 +774,102 @@ static void rst_record(const char * name, int in_sequence, unsigned int frames,
 	ctest_trace_end();
 }
 
+/* EAK -- the one RDP flag neither side had a test for. `csp-core` defines the constant and
+   never reads it; libcsp acts on it twice.
+ *
+ * On receipt (`csp_rdp.c:712`) an EAK is treated as acknowledgement only: `snd_una` moves,
+ * the retransmit counter resets, and then `goto discard_open` throws the packet away
+ * *including any payload it carried*. A receiver that ignored the flag would hand that
+ * payload to the application instead -- data the sender never meant as data.
+ *
+ * What is recorded is what the application got, and how many bytes. */
+static void eak_record_verdict(const char * name, const char * verdict,
+							   unsigned int delivered, unsigned int bytes,
+							   uint8_t reply_flags, unsigned int frames) {
+	if (!ctest_tracing()) {
+		return;
+	}
+	ctest_trace_begin("rdp", name, verdict);
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("delivered", (int64_t)delivered);
+	ctest_trace_int("delivered_bytes", (int64_t)bytes);
+	ctest_trace_int("frames_back", (int64_t)frames);
+	ctest_trace_int("reply_flags", (int64_t)(frames ? (reply_flags & 0x0F) : 0));
+	ctest_trace_obj_end();
+	ctest_trace_end();
+}
+
+static void eak_record(const char * name, unsigned int delivered, unsigned int bytes,
+					   uint8_t reply_flags, unsigned int frames) {
+	eak_record_verdict(name, "must_match", delivered, bytes, reply_flags, frames);
+}
+
+/* How much the application can collect from the accepted connection. */
+static void drain_accepted(unsigned int * count, unsigned int * bytes) {
+	*count = 0;
+	*bytes = 0;
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	if (accepted == NULL) {
+		return;
+	}
+	csp_packet_t * p;
+	while ((p = csp_read(accepted, 0)) != NULL) {
+		*bytes += p->length;
+		(*count)++;
+		csp_buffer_free(p);
+	}
+}
+
+START_TEST(test_an_eak_carries_no_data_to_the_application)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* In sequence, with a payload, but flagged as an extended acknowledgement. */
+	csp_packet_t * packet = new_rdp_packet();
+	packet->data[0] = 'x';
+	packet->data[1] = 'y';
+	packet->length = 2;
+	const unsigned int before = test_tx_count;
+	put_header_and_route(packet, (uint8_t)(RDP_ACK | RDP_EAK),
+						 (uint16_t)(conn->rdp.rcv_cur + 1), iss);
+	const unsigned int frames = test_tx_count - before;
+
+	unsigned int count, bytes;
+	drain_accepted(&count, &bytes);
+	eak_record("an_eak_carries_no_data_to_the_application", count, bytes, tx_flags, frames);
+}
+END_TEST
+
+/* The other half: data that arrives with a gap. `csp_rdp.c:722` says "If message is not in
+   sequence, send EACK and store packet". Measured, it stores and answers *nothing* -- the
+   comment describes an EACK the code does not send on this path.
+ *
+ * `diverges`: the port answers with a plain `ACK` instead of staying silent, because it
+ * drops the packet rather than holding it. `csp-core` has an `RxQueue` with reorder tests
+ * and the connection path never uses it (SCOPE.md). */
+START_TEST(test_out_of_sequence_data_is_answered_but_not_delivered)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* Skip one: the receiver expects rcv_cur+1 and gets rcv_cur+2. */
+	csp_packet_t * packet = new_rdp_packet();
+	packet->data[0] = 'z';
+	packet->length = 1;
+	const unsigned int before = test_tx_count;
+	put_header_and_route(packet, RDP_ACK, (uint16_t)(conn->rdp.rcv_cur + 2), iss);
+	const unsigned int frames = test_tx_count - before;
+
+	unsigned int count, bytes;
+	drain_accepted(&count, &bytes);
+	eak_record_verdict("out_of_sequence_data_is_answered_but_not_delivered", "diverges",
+					   count, bytes, tx_flags, frames);
+}
+END_TEST
+
 START_TEST(test_an_in_sequence_rst_is_answered)
 {
 	setup_stack();
@@ -1342,6 +1439,8 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_an_eak_carries_no_data_to_the_application);
+	tcase_add_test(tc_ack, test_out_of_sequence_data_is_answered_but_not_delivered);
 	tcase_add_test(tc_ack, test_an_in_sequence_rst_is_answered);
 	tcase_add_test(tc_ack, test_an_out_of_sequence_rst_is_ignored);
 	tcase_add_test(tc_ack, test_a_proposed_conn_timeout_is_adopted);

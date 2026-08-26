@@ -891,6 +891,22 @@ impl Connection {
             }
 
             State::Open => {
+                // An extended acknowledgement is acknowledgement *only*. `csp_rdp.c:712`
+                // updates `snd_una`, clears the retransmit counter, and then
+                // `goto discard_open` -- the packet is thrown away including any payload.
+                //
+                // This module defined the flag and never read it, so a packet carrying
+                // `ACK|EAK` and a body was delivered to the application: data a peer had
+                // marked as pure acknowledgement, handed over as if it were a message. It
+                // was also answered, which the C does not do.
+                if h.has(EAK) {
+                    if h.has(ACK) {
+                        self.snd_una = h.ack_nr.wrapping_add(1);
+                    }
+                    self.retransmits = 0;
+                    return Action::Nothing;
+                }
+
                 // A duplicate or out-of-window sequence number is re-acknowledged, not
                 // delivered — that is how the peer learns to stop retransmitting.
                 if !payload.is_empty() {
