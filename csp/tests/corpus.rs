@@ -712,7 +712,11 @@ fn replay_eth(input: &EthInput) -> EthObserved {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RdpInput {
+    #[serde(default)]
     delayed_acks: u8,
+    /// Only the reset cases set this.
+    #[serde(default)]
+    rst_in_sequence: u8,
     /// Only the connection-timeout case sets these.
     #[serde(default)]
     conn_timeout: u32,
@@ -1232,6 +1236,123 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// A peer resetting an established connection, in sequence and out of it.
+///
+/// `csp_rdp.c` honours a reset only when `seq_nr == rcv_cur + 1`: it moves to CLOSE_WAIT and
+/// answers `ACK|RST`. Any other sequence number hits "RST out of sequence, keep connection
+/// open" -- a blind-reset defence, so an injector who cannot guess the sequence number
+/// cannot drop the link with one spoofed frame.
+///
+/// Driven through a real `Node`, and what is compared is only what the peer sees: the reply
+/// to the reset, and the flags on the answer to the *next* data packet. Flags rather than a
+/// bool, because "something came back" cannot separate an `ACK` on a live connection from an
+/// `ACK|RST` on a dead one.
+#[cfg(feature = "rdp")]
+fn replay_rdp_reset(in_sequence: bool) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    // Immediate acknowledgement, matching the C helper's `open_conn(0, 2)`.
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    // Returns the flags of the last frame the node sent, and how many it sent.
+    let send = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                payload: &[u8],
+                flags: u8,
+                seq: u16,
+                ack: u16|
+     -> (u32, u8) {
+        let mut buf = [0u8; 64];
+        buf[..payload.len()].copy_from_slice(payload);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hlen = h.encode(&[], &mut buf[payload.len()..]).unwrap();
+        let Some(mut p) = n.packet() else {
+            return (0, 0);
+        };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..payload.len() + hlen]).unwrap();
+        n.router.receive(p, 0);
+        let (mut frames, mut last) = (0u32, 0u8);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => {
+                    frames += 1;
+                    if let Some(pk) = n.take_forwarded(packet) {
+                        last = pk
+                            .with_payload(|b| rdp::Header::decode(b).map(|h| h.flags).unwrap_or(0));
+                        drop(pk);
+                    }
+                }
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(pkt)) = n.read(conn) {
+                        drop(pkt);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+        (frames, last)
+    };
+
+    send(&mut n, &syn[..olen], rdp::SYN, 1000, 0);
+    let iss = n
+        .accept()
+        .and_then(|h| n.router.conns.rdp(h).ok().map(|r| r.snd_iss))
+        .unwrap_or(0);
+    send(&mut n, &[], rdp::ACK, 1001, iss);
+
+    // `rcv_cur` is 1000 after the handshake, so the next expected sequence is 1001.
+    let rst_seq = if in_sequence { 1001 } else { 1001 + 5000 };
+    let (frames, reply) = send(&mut n, &[], rdp::RST, rst_seq, iss);
+
+    // The next data packet, in sequence for whichever connection is left.
+    let (_, followup) = send(
+        &mut n,
+        b"x",
+        rdp::ACK,
+        if in_sequence { 1002 } else { 1001 },
+        iss,
+    );
+
+    serde_json::json!({
+        "frames_after_rst": frames,
+        "reply_flags": if frames > 0 { reply & 0x0F } else { 0 },
+        "followup_flags": followup & 0x0F,
+    })
+}
+
 /// An established RDP connection left idle past its negotiated `conn_timeout`.
 ///
 /// libcsp does not reap it: `csp_rdp_check_timeouts`'s CONNECTION TIMEOUT branch is guarded
@@ -2920,6 +3041,14 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case.contains("_rst_") => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((
+                replay_rdp_reset(input.rst_in_sequence != 0),
+                format!("rst in sequence: {}", input.rst_in_sequence != 0),
+            ))
+        }
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "a_proposed_conn_timeout_is_adopted" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();

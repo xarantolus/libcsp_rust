@@ -21,6 +21,7 @@
 
 #define RDP_SYN 0x08
 #define RDP_ACK 0x04
+#define RDP_RST 0x01
 
 /* rand_r() seeded with 1234567, truncated to 16 bits. Recorded, not derived: the
    point of the test is that the C produces a fixed number, so deriving it here would
@@ -739,6 +740,83 @@ END_TEST
  * Proposed as 3000 ms and then idled for 4000: libcsp keeps the connection and still
  * answers. A receiver that reaped it would drop a link that is merely quiet -- a telemetry
  * connection between passes -- and the peer would find its next packet unanswered. */
+/* Teardown, which nothing measured: thirty tests in this suite and not one sends a RST.
+ *
+ * `csp_rdp.c` honours a reset only when it is *in sequence* -- `rx_header->seq_nr ==
+ * conn->rdp.rcv_cur + 1`. Then it moves to CLOSE_WAIT and answers `ACK|RST`. An RST with any
+ * other sequence number hits "RST out of sequence, keep connection open" and the connection
+ * survives.
+ *
+ * That second half is a blind-reset defence: an attacker who can inject packets but cannot
+ * guess the sequence number must not be able to drop a link with one spoofed frame. What is
+ * recorded is what the peer sees -- the reply, and whether the connection still answers. */
+/* `reply_flags` is only meaningful when a frame actually went out -- `tx_flags` holds the
+   last frame sent *ever*, so reading it after a silent case reports the handshake's
+   SYN|ACK. And the follow-up is recorded as flags, not as a bool: "something came back"
+   cannot tell an ACK on a live connection from a RST on a dead one, which is the whole
+   difference here. The top nibble is `csp_rdp_incr++ << 4`, which the receiver masks off,
+   so it is masked here too. */
+static void rst_record(const char * name, int in_sequence, unsigned int frames,
+					   uint8_t reply_flags, uint8_t followup_flags) {
+	if (!ctest_tracing()) {
+		return;
+	}
+	ctest_trace_begin("rdp", name, "must_match");
+	ctest_trace_obj_begin("input");
+	ctest_trace_int("rst_in_sequence", in_sequence);
+	ctest_trace_obj_end();
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("frames_after_rst", (int64_t)frames);
+	ctest_trace_int("reply_flags", (int64_t)(frames ? (reply_flags & 0x0F) : 0));
+	ctest_trace_int("followup_flags", (int64_t)(followup_flags & 0x0F));
+	ctest_trace_obj_end();
+	ctest_trace_end();
+}
+
+START_TEST(test_an_in_sequence_rst_is_answered)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* In sequence: the next sequence number the receiver expects. */
+	const uint16_t rst_seq = (uint16_t)(conn->rdp.rcv_cur + 1);
+	unsigned int before = test_tx_count;
+	put_header_and_route(new_rdp_packet(), RDP_RST, rst_seq, iss);
+	const unsigned int frames = test_tx_count - before;
+	const uint8_t flags = tx_flags;
+
+	/* Does it still answer data afterwards? */
+	before = test_tx_count;
+	deliver_data((uint16_t)(rst_seq + 1), iss);
+	const uint8_t followup = (test_tx_count > before) ? tx_flags : 0;
+
+	rst_record("an_in_sequence_rst_is_answered", 1, frames, flags, followup);
+}
+END_TEST
+
+START_TEST(test_an_out_of_sequence_rst_is_ignored)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* Far outside the window: what a blind injector would send. */
+	const uint16_t rst_seq = (uint16_t)(conn->rdp.rcv_cur + 5000);
+	unsigned int before = test_tx_count;
+	put_header_and_route(new_rdp_packet(), RDP_RST, rst_seq, iss);
+	const unsigned int frames = test_tx_count - before;
+	const uint8_t flags = tx_flags;
+
+	/* The connection must have survived it. */
+	before = test_tx_count;
+	deliver_data((uint16_t)(conn->rdp.rcv_cur + 1), iss);
+	const uint8_t followup = (test_tx_count > before) ? tx_flags : 0;
+
+	rst_record("an_out_of_sequence_rst_is_ignored", 0, frames, flags, followup);
+}
+END_TEST
+
 START_TEST(test_a_proposed_conn_timeout_is_adopted)
 {
 	setup_stack();
@@ -1264,6 +1342,8 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_an_in_sequence_rst_is_answered);
+	tcase_add_test(tc_ack, test_an_out_of_sequence_rst_is_ignored);
 	tcase_add_test(tc_ack, test_a_proposed_conn_timeout_is_adopted);
 	tcase_add_test(tc_ack, test_a_proposed_ack_timeout_is_adopted);
 	tcase_add_test(tc_ack, test_a_nonzero_delayed_acks_is_on_not_a_count);

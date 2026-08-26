@@ -783,10 +783,37 @@ impl Connection {
     fn on_packet(&mut self, h: Header, payload: &[u8], now_ms: u32, max_window: u32) -> Action {
         self.last_activity = now_ms;
 
-        // A reset is honoured in every state but Closed.
-        if h.has(RST) && self.state != State::Closed {
-            self.state = State::Closed;
-            return Action::Closed(ClosedBy::Protocol);
+        // A reset is honoured only **in sequence**. `csp_rdp.c` compares
+        // `rx_header->seq_nr == conn->rdp.rcv_cur + 1` and, failing that, takes the branch
+        // spelled "RST out of sequence, keep connection open".
+        //
+        // That is a blind-reset defence, and this had none: any RST in any state closed the
+        // connection, so one injected frame with the right addresses and ports -- no
+        // knowledge of the sequence number needed -- dropped a link. On a spacecraft that
+        // is a telemetry pass ended by a single spoofed packet.
+        //
+        // The in-sequence case was wrong too, quietly: the C answers `ACK|RST` so the peer
+        // learns its close arrived, and this replied nothing at all.
+        if h.has(RST) {
+            match self.state {
+                // Nothing to reset.
+                State::Closed => return Action::Nothing,
+                // Our own reset came back acknowledged; stop waiting.
+                State::CloseWait => {
+                    self.state = State::Closed;
+                    return Action::Closed(ClosedBy::Protocol);
+                }
+                _ if h.seq_nr == self.rcv_cur.wrapping_add(1) => {
+                    self.state = State::CloseWait;
+                    return Action::SendControl(Header {
+                        flags: ACK | RST,
+                        seq_nr: self.snd_nxt,
+                        ack_nr: self.rcv_cur,
+                    });
+                }
+                // Out of sequence: ignored, and the connection carries on.
+                _ => return Action::Nothing,
+            }
         }
 
         match self.state {
@@ -890,7 +917,19 @@ impl Connection {
                     self.state = State::Closed;
                     return Action::Closed(ClosedBy::UserSpace);
                 }
-                Action::Nothing
+                // Anything still arriving is answered with a reset -- `csp_rdp.c`'s
+                // `case RDP_CLOSE_WAIT`, "Send back a reset". Silence here left a peer
+                // that kept sending with nothing to tell it the connection was over.
+                //
+                // The C additionally range-checks `ack_nr` against the send window before
+                // replying, and discards without answering if it is outside. That is not
+                // reproduced: no record distinguishes it, so it would be a guard added
+                // from reading rather than from measurement.
+                Action::SendControl(Header {
+                    flags: ACK | RST,
+                    seq_nr: self.snd_nxt,
+                    ack_nr: self.rcv_cur,
+                })
             }
         }
     }
@@ -1100,25 +1139,48 @@ mod tests {
         assert_eq!(c.state, State::Closed, "must not half-open");
     }
 
+    /// Both halves, measured against libcsp on 2026-08-26. This asserted that *any* reset
+    /// closes from any live state, with `seq_nr: 0` -- which is out of sequence -- and so
+    /// pinned the blind-reset hole it was meant to guard. `csp_rdp.c` honours a reset only
+    /// at `rcv_cur + 1`; anything else is "RST out of sequence, keep connection open".
+    /// End to end in `rdp::an_in_sequence_rst_is_answered` and
+    /// `rdp::an_out_of_sequence_rst_is_ignored`.
     #[test]
-    fn rst_closes_from_every_live_state() {
+    fn a_reset_is_honoured_only_in_sequence() {
+        let rst = |seq: u16| {
+            Event::Packet(
+                Header {
+                    flags: RST,
+                    seq_nr: seq,
+                    ack_nr: 0,
+                },
+                &[] as &[u8],
+            )
+        };
+
         for setup in [State::SynSent, State::SynRcvd, State::Open] {
+            // In sequence: answered with `ACK|RST`, and the connection waits to be closed.
             let mut c = Connection::new(1, SynOptions::default());
             c.state = setup;
-            let a = c.step(
-                Event::Packet(
-                    Header {
-                        flags: RST,
-                        seq_nr: 0,
-                        ack_nr: 0,
-                    },
-                    &[],
-                ),
-                0,
-                MAX_WINDOW,
+            c.rcv_cur = 10;
+            let a = c.step(rst(11), 0, MAX_WINDOW);
+            assert!(
+                matches!(a, Action::SendControl(h) if h.flags == ACK | RST),
+                "from {setup:?} the peer must be told its reset arrived"
             );
-            assert_eq!(a, Action::Closed(ClosedBy::Protocol), "from {setup:?}");
-            assert_eq!(c.state, State::Closed);
+            assert_eq!(c.state, State::CloseWait, "from {setup:?}");
+
+            // Out of sequence: ignored, and the connection carries on. One spoofed frame
+            // must not be able to drop a link.
+            let mut c = Connection::new(1, SynOptions::default());
+            c.state = setup;
+            c.rcv_cur = 10;
+            assert_eq!(
+                c.step(rst(9999), 0, MAX_WINDOW),
+                Action::Nothing,
+                "from {setup:?}"
+            );
+            assert_eq!(c.state, setup, "from {setup:?} the connection must survive");
         }
     }
 
