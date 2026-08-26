@@ -1961,3 +1961,25 @@ in the test, and both initially looked like defects in the port.
 The CMP test also carried a `#[cfg(feature = "cmp")]` that `difftest` does not define, so it
 compiled to nothing and the run reported 7 passing tests as though all 8 had run. Caught by
 counting, not by reading the output.
+
+**Closed on 2026-08-26: the initiator never sent the handshake's third leg.** On
+`SYN_SENT` + `SYN|ACK`, `csp_rdp.c:610` sends `ACK(seq = snd_nxt, ack = rcv_cur)`. The port
+returned `Action::Opened` and put nothing on the wire, so a peer stayed in `SYN_RCVD`,
+retransmitted its `SYN|ACK`, and gave up. The connection died under a client that opened it
+and then waited for the server to speak first.
+
+It looked like it worked because the initiator's *first data packet* also carries `ACK` with
+the right sequence numbers and drags the peer open. Any test that connected and immediately
+sent data — which is every obvious way to write one — passed.
+
+Found by pointing the port's RDP client at the C node that was already in the difftest
+build. `CSP_USE_RDP=ON` has been set there all along and the C answers a `SYN` from its
+router with no application involved, but a comment in `diff.rs` asserted "the C node under
+test here speaks no RDP". Nothing had checked that, and it was wrong; believing it is why
+nothing ever sent the C a SYN.
+
+`an_rdp_connection_to_a_real_c_node_handshakes_then_carries_data` drives all three legs and
+then a data packet. Restoring `Action::Opened` fails it on the third leg. The unit test
+`three_way_handshake_as_the_initiator` had asserted `Action::Opened` — encoding the missing
+frame as though it were correct, which is the self-referential shape this whole exercise
+exists to remove. It now asserts the `ACK` and cites the C line that sends it.

@@ -960,7 +960,18 @@ impl Connection {
                     self.retransmits = 0;
                     self.ack_timestamp = now_ms;
                     self.state = State::Open;
-                    return Action::Opened;
+                    // The handshake's third leg. `csp_rdp.c:610` sends it here, and this
+                    // returned `Opened` and nothing on the wire — so a peer stayed in
+                    // `SYN_RCVD`, retransmitted its `SYN|ACK` and eventually gave up. It
+                    // only looked like it worked because the initiator's *first data
+                    // packet* also carries `ACK` and drags the peer open; a client that
+                    // connects and then waits for the server to speak first had its
+                    // connection die under it.
+                    return Action::SendControl(Header {
+                        flags: ACK,
+                        seq_nr: self.snd_nxt,
+                        ack_nr: self.rcv_cur,
+                    });
                 }
                 Action::Nothing
             }
@@ -1195,7 +1206,17 @@ mod tests {
             10,
             MAX_WINDOW,
         );
-        assert_eq!(a, Action::Opened);
+        // The third leg goes back on the wire. `csp_rdp.c:610` sends
+        // `ACK(seq = snd_nxt, ack = rcv_cur)` here; this asserted `Action::Opened` and no
+        // frame, which is what let the port skip it entirely.
+        assert_eq!(
+            a,
+            Action::SendControl(Header {
+                flags: ACK,
+                seq_nr: 101,
+                ack_nr: 500,
+            })
+        );
         assert_eq!(c.state, State::Open);
         assert_eq!(c.rcv_irs, 500);
     }

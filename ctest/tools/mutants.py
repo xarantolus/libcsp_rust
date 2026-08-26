@@ -65,6 +65,11 @@ MUTANTS = [
   ("conn: a connection is an endpoint too", "csp/src/router.rs",
    "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
    "        if !self.is_bound(id.dport) {"),
+  # The handshake's third leg. Without it a peer sits in SYN_RCVD and gives up -- and the
+  # first data packet hides it, because that carries an ACK too.
+  ("rdp: the initiator answers SYN|ACK", "csp-core/src/rdp.rs",
+   "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });",
+   "                    return Action::Opened;"),
   ("rdp: connect proposes its option block", "csp/src/router.rs",
    "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &body[..n])",
    "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &[])"),
@@ -438,7 +443,11 @@ for name, path, old, new in MUTANTS:
     # tests that cover them live in that crate. Running only `csp` made the unit-test leg
     # blind there, so four Ethernet guards with unit tests asserting the exact error they
     # raise were reported as holes nothing noticed.
-    r = subprocess.run(["cargo","test","-p","csp","-p","csp-core","--all-features","--no-fail-fast"],
+    # `-p difftest` too: the node-level differential tests are the only thing covering the
+    # port against a *running* C node, and a mutation guarded only there scored as a hole
+    # nothing noticed. The RDP handshake's third leg was exactly that case.
+    r = subprocess.run(["cargo","test","-p","csp","-p","csp-core","-p","difftest",
+                        "--all-features","--no-fail-fast"],
                        capture_output=True, text=True)
     p.write_text(orig)
     out = r.stdout + r.stderr
