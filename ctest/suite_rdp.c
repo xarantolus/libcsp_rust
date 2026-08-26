@@ -38,10 +38,24 @@ typedef struct __attribute__((packed)) {
 } test_rdp_header_t;
 
 static unsigned int test_tx_count;
+/* The RDP trailer of the last frame that left, which is the only place the handshake is
+   observable: the state machine's own fields are how it is computed, not what a peer sees. */
+static uint8_t tx_flags;
+static uint16_t tx_seq;
+static uint16_t tx_ack;
+static uint16_t tx_payload_len;
 
 static int test_nexthop(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
 	(void)iface; (void)via; (void)from_me;
 	test_tx_count++;
+	if (packet->length >= sizeof(test_rdp_header_t)) {
+		tx_payload_len = (uint16_t)(packet->length - sizeof(test_rdp_header_t));
+		const test_rdp_header_t * h =
+			(const test_rdp_header_t *)&packet->data[tx_payload_len];
+		tx_flags = h->flags;
+		tx_seq = be16toh(h->seq_nr);
+		tx_ack = be16toh(h->ack_nr);
+	}
 	csp_buffer_free(packet);
 	return CSP_ERR_NONE;
 }
@@ -63,6 +77,10 @@ static void setup_stack(void) {
 	csp_bind(&test_sock, TEST_PORT);
 	csp_listen(&test_sock, 4);
 	test_tx_count = 0;
+	tx_flags = 0;
+	tx_seq = 0;
+	tx_ack = 0;
+	tx_payload_len = 0;
 }
 
 static csp_packet_t * new_rdp_packet(void) {
@@ -397,6 +415,91 @@ START_TEST(test_rdp_queue_flush_all_releases_receive_buffers)
 }
 END_TEST
 
+/* A SYN arriving at a listening node is answered with SYN|ACK, on the wire.
+ *
+ * The whole suite drives the handshake -- every ack-policy case calls `open_conn` -- but
+ * none of them ever looked at the frame it produces, only at `conn->rdp.state`. So the one
+ * thing a peer can actually see about the handshake, the reply and its sequence numbers,
+ * was measured nowhere.
+ *
+ * `csp_rdp_connect`/`csp_rdp_new_packet` answer a SYN with SYN|ACK carrying the node's own
+ * initial send sequence number and acknowledging the peer's. The ISN is `rand_r` seeded
+ * from `csp_get_ms()`, which the virtual clock pins, so it is reproducible.
+ */
+START_TEST(test_a_syn_is_answered_with_syn_ack)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 4, 20000, 1000, 0, 250, 2 };
+
+	const unsigned int before = test_tx_count;
+	send_syn(opts);
+
+	/* Exactly one frame, and it is the SYN|ACK. */
+	ck_assert_uint_eq(test_tx_count - before, 1);
+	ck_assert_uint_eq(tx_flags, RDP_SYN | RDP_ACK);
+	/* Acknowledges the peer's SYN, which carried seq 1000. */
+	ck_assert_uint_eq(tx_ack, 1000);
+
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	/* The reply carries this node's own ISN. */
+	ck_assert_uint_eq(tx_seq, conn->rdp.snd_iss);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_syn_is_answered_with_syn_ack", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("syn_seq", 1000);
+		ctest_trace_int("clock_ms", CTEST_CLOCK_EPOCH_MS);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("frames", (int64_t)(test_tx_count - before));
+		ctest_trace_int("flags", tx_flags);
+		/* Not the raw sequence number: the C's ISN is rand_r() over the clock and the
+		   port derives its own differently on purpose (see SCOPE). What both must agree
+		   on is that the reply carries *this node's own* ISN rather than, say, echoing
+		   the peer's -- which is the part a peer depends on. */
+		ctest_trace_int("seq_is_own_iss", tx_seq == conn->rdp.snd_iss ? 1 : 0);
+		ctest_trace_int("ack", tx_ack);
+		/* Measured 0: the SYN|ACK carries the trailer only. The option block travels
+		   in the SYN alone -- the answer echoes none of it back, so a peer learns the
+		   accepted (clamped) options only by having its own clamped the same way. */
+		ctest_trace_int("payload_len", tx_payload_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* The third leg: the peer's ACK completes the handshake and provokes no further frame.
+ * A node that answered it would have both ends replying to each other forever. */
+START_TEST(test_the_handshakes_final_ack_is_not_itself_answered)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 4, 20000, 1000, 0, 250, 2 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+
+	const unsigned int before = test_tx_count;
+	ack_handshake(conn->rdp.snd_iss);
+
+	ck_assert_uint_eq(conn->rdp.state, RDP_OPEN);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "the_handshakes_final_ack_is_not_itself_answered",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("syn_seq", 1000);
+		ctest_trace_int("clock_ms", CTEST_CLOCK_EPOCH_MS);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("frames_after_final_ack", (int64_t)(test_tx_count - before));
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* --- the acknowledgement policy ---
  *
  * `csp_rdp_should_ack` has three conditions and `csp_rdp_check_ack` gates all of them
@@ -594,6 +697,51 @@ START_TEST(test_acks_stop_when_the_application_is_not_reading)
 }
 END_TEST
 
+/* Data over an open connection reaches the application without its trailer.
+ *
+ * `csp_rdp_new_packet` removes the five-byte RDP header before the packet is queued, so
+ * `csp_read` hands the application exactly what the peer sent. A node that queued the
+ * packet unchanged would give every application five bytes of protocol state appended to
+ * its message -- which parses as a slightly longer message rather than as an error, so
+ * nothing would report it.
+ */
+START_TEST(test_data_reaches_the_application_without_the_rdp_trailer)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	csp_packet_t * packet = new_rdp_packet();
+	memcpy(packet->data, "hello", 5);
+	packet->length = 5;
+	put_header_and_route(packet, RDP_ACK, 1001, iss);
+
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+	csp_packet_t * got = csp_read(accepted, 0);
+	ck_assert_ptr_nonnull(got);
+
+	ck_assert_uint_eq(got->length, 5);
+	ck_assert_mem_eq(got->data, "hello", 5);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "data_reaches_the_application_without_the_rdp_trailer",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("payload_bytes_sent", 5);
+		ctest_trace_int("clock_ms", CTEST_CLOCK_EPOCH_MS);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered_len", (int64_t)got->length);
+		ctest_trace_hex("delivered", got->data, got->length);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	csp_buffer_free(got);
+}
+END_TEST
+
 Suite * rdp_suite(void)
 {
 	Suite * s;
@@ -620,6 +768,12 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_tx, test_rdp_retransmits_are_limited);
 	tcase_add_test(tc_tx, test_rdp_retransmit_count_resets_on_ack);
 	suite_add_tcase(s, tc_tx);
+
+	TCase * tc_hs = tcase_create("handshake");
+	tcase_add_test(tc_hs, test_a_syn_is_answered_with_syn_ack);
+	tcase_add_test(tc_hs, test_the_handshakes_final_ack_is_not_itself_answered);
+	tcase_add_test(tc_hs, test_data_reaches_the_application_without_the_rdp_trailer);
+	suite_add_tcase(s, tc_hs);
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);

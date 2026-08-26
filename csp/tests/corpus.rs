@@ -877,6 +877,170 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 ///
 /// The two are separate implementations of `csp_send_direct` in this port, and only the
 /// forward path had records. This drives the one an application actually calls.
+/// The RDP handshake, driven through a real `Node` rather than the state machine alone.
+///
+/// Everything else in the `rdp` suite replays `csp_core::rdp::Connection` directly, which
+/// is why the router never reaching it went unnoticed: the state machine was correct and
+/// nothing called it.
+#[cfg(feature = "rdp")]
+fn replay_rdp_handshake(case: &str) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    // The SYN: the option block, then the five-byte trailer. libcsp writes the RDP header
+    // *after* the payload, so it is a trailer and not a header.
+    let mut syn = n.packet().expect("the pool is empty");
+    syn.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut body = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut body).unwrap();
+    let h = rdp::Header {
+        flags: rdp::SYN,
+        seq_nr: 1000,
+        ack_nr: 0,
+    };
+    let mut framed = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let n_bytes = h.encode(&body[..olen], &mut framed).unwrap();
+    syn.set_payload(&framed[..n_bytes]).unwrap();
+    n.router.receive(syn, 0);
+
+    // Drain the router and keep the control frames it produced.
+    let mut replies: Vec<(u8, u16, u16, usize)> = Vec::new();
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Respond { packet, .. } => {
+                let p = n
+                    .take_forwarded(packet)
+                    .expect("the router named a live slot");
+                let (flags, seq, ack, plen) = p.with_payload(|b| {
+                    let hh = rdp::Header::decode(b).unwrap();
+                    (hh.flags, hh.seq_nr, hh.ack_nr, b.len() - rdp::HEADER_LEN)
+                });
+                replies.push((flags, seq, ack, plen));
+                drop(p);
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    if case == "a_syn_is_answered_with_syn_ack" {
+        let h = n.accept().expect("the handshake opened a connection");
+        let own_iss = n.router.conns.rdp(h).unwrap().snd_iss;
+        let first = replies.first().copied().unwrap_or((0, 0, 0, 0));
+        return serde_json::json!({
+            "frames": replies.len(),
+            "flags": first.0,
+            "seq_is_own_iss": u8::from(first.1 == own_iss),
+            "ack": first.2,
+            "payload_len": first.3,
+        });
+    }
+
+    // the_handshakes_final_ack_is_not_itself_answered: complete the handshake and count
+    // what the third leg provokes, which must be nothing.
+    let h = n.accept().expect("the handshake opened a connection");
+    let own_iss = n.router.conns.rdp(h).unwrap().snd_iss;
+    let mut ack = n.packet().expect("the pool is empty");
+    ack.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    let h = rdp::Header {
+        flags: rdp::ACK,
+        seq_nr: 1001,
+        ack_nr: own_iss,
+    };
+    let mut framed = [0u8; rdp::HEADER_LEN];
+    let n_bytes = h.encode(&[], &mut framed).unwrap();
+    ack.set_payload(&framed[..n_bytes]).unwrap();
+    n.router.receive(ack, 0);
+
+    let mut after = 0usize;
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Respond { packet, .. } => {
+                after += 1;
+                drop(n.take_forwarded(packet));
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+    if case == "the_handshakes_final_ack_is_not_itself_answered" {
+        return serde_json::json!({ "frames_after_final_ack": after });
+    }
+
+    // data_reaches_the_application_without_the_rdp_trailer: one data packet on the now-open
+    // connection, read back the way an application would.
+    let mut data = n.packet().expect("the pool is empty");
+    data.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    let dh = rdp::Header {
+        flags: rdp::ACK,
+        seq_nr: 1001,
+        ack_nr: own_iss,
+    };
+    let mut framed = [0u8; 5 + rdp::HEADER_LEN];
+    let n_bytes = dh.encode(b"hello", &mut framed).unwrap();
+    data.set_payload(&framed[..n_bytes]).unwrap();
+    n.router.receive(data, 0);
+
+    let mut delivered: Option<Vec<u8>> = None;
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Delivered { conn, .. } => {
+                if let Ok(Some(p)) = n.read(conn) {
+                    delivered = Some(p.with_payload(<[u8]>::to_vec));
+                }
+            }
+            csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+    let body = delivered.unwrap_or_default();
+    serde_json::json!({
+        "delivered_len": body.len(),
+        "delivered": body.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    })
+}
+
 fn replay_node_send(case: &str) -> serde_json::Value {
     type S = csp::CspStorage<8, 16, 264, 48, 32>;
     let storage = S::new();
@@ -1336,6 +1500,17 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         }
         // The initial send sequence number is rand_r() over the C's clock; the port takes
         // it as a parameter, so there is nothing to compare.
+        #[cfg(feature = "rdp")]
+        "rdp"
+            if matches!(
+                rec.case.as_str(),
+                "a_syn_is_answered_with_syn_ack"
+                    | "the_handshakes_final_ack_is_not_itself_answered"
+                    | "data_reaches_the_application_without_the_rdp_trailer"
+            ) =>
+        {
+            Some((replay_rdp_handshake(&rec.case), rec.case.clone()))
+        }
         "rdp" if rec.case == "isn_is_a_function_of_the_clock" => None,
         "rdp" if rec.case == "the_delay_count_fires_one_packet_after_it" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();

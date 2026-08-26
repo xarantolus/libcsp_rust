@@ -73,9 +73,10 @@ match Delivery::classify(first_packet, &mut connection) {
 The `FRAG` bit decides it, and it is a **per-packet** header flag, so it is known from the
 first packet. It becomes the `Delivery` you match on.
 
-> **RDP is not available.** `csp-core::rdp` is a complete state machine, but the node does
-> not drive it — see *RDP is implemented in the core and not reached by the node* in
-> `SCOPE.md`. `Node::connect` refuses `RDP_REQ` with `Error::Unsupported` rather than
+> **RDP is server-side only.** The node answers a handshake, acknowledges data and hands
+> the payload up with its trailer removed — a peer can open an RDP connection *to* this
+> node, and `Routed::Respond` is how the control frames reach the wire. It cannot yet open
+> one *itself*: `Node::connect` refuses `RDP_REQ` with `Error::Unsupported` rather than
 > setting a flag it will not honour. When it lands, it will be the second axis here:
 > reliability changes *how* you read, and is known at accept.
 
@@ -192,7 +193,7 @@ byte-for-byte under `Coverage::PayloadOnly`, which settles it empirically.)
 
 RDP options are **per connection** in `csp-core::rdp`. The C keeps its six RDP tunables in
 file statics shared by every connection, so two connections with different timeouts are not
-expressible there. (This is a property of the core type; the node does not run RDP yet.)
+expressible there. (This is a property of the core type; the node uses the defaults for connections a peer opens.)
 
 ## The router
 

@@ -158,7 +158,7 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | Area | Where | Status |
 |---|---|---|
 | Core (io, conn, route, qfifo, port, buffer, id) | `csp/{pool,conn,qfifo,router,iface}.rs`, `csp-core/id.rs` | done |
-| RDP | `csp-core/rdp.rs` — state machine, option clamping, retransmit queue | **core only; the node does not drive it** — see below |
+| RDP | `csp-core/rdp.rs` + `csp/router.rs::deliver_rdp` | **server side only** — the node answers a handshake and delivers data; it cannot yet *open* a connection or retransmit — see below |
 | SFP | `csp-core/sfp.rs` + `csp/delivery.rs` | done |
 | CMP | `csp-core/cmp.rs` — client **and** decoder | done |
 | Crypto | `csp-core/{crc32,sha1,hmac}.rs` | done |
@@ -607,27 +607,37 @@ that does not deduplicate loops a frame between its interfaces forever. `bridge_
 it on the flag, so a bridge built from the port with deduplication off, the default, looped
 where the C does not. Now unconditional.
 
-### RDP is implemented in the core and not reached by the node
+### RDP: the node answers it, and cannot yet initiate it
 
-Found on 2026-08-25 while building `ctest/`, by reading the C's `csp_connect` against
-ours. `csp-core/rdp.rs` is a complete RDP: the state machine, the SYN option clamping, the
-retransmission queue, 49 passing tests. **Nothing in the `csp` crate drives any of it.**
+Found on 2026-08-25 while building `ctest/`, by reading the C's `csp_connect` against ours.
+`csp-core/rdp.rs` was a complete RDP — state machine, SYN option clamping, retransmission
+queue, 49 passing tests — and **nothing in the `csp` crate drove any of it**. `Routed` had
+no variant that could put a frame on the wire on this node's own behalf, so a `SYN` reached
+a bound port and nothing came back.
 
-Measured, not argued — `grep -rn 'rdp' csp/src/` outside `conn.rs` returns three lines:
-`router.rs:668` (the idle-timeout tick) and two lines of one test in `node.rs`.
+The receiving half is now wired (`Router::deliver_rdp`, gated on `CSP_FRDP` exactly where
+`csp_route_deliver_connection` gates it) and measured at node level against a real C node:
 
-| What the protocol needs | State |
+| Behaviour | Where it is measured |
 |---|---|
-| Send a `SYN` when a connection opens | never happens; `connect` builds an `Id` and stops |
-| Feed a received RDP packet to the state machine | `Connection::step` is called from exactly one site, `conn.rs:435`, always with `Event::Tick` |
-| A retransmission queue per connection | `TxQueue` is instantiated only inside `csp-core/src/rdp.rs`'s own test module |
-| An unpredictable initial sequence number | `conn.rs:98` passes a literal `0` for every connection |
+| A `SYN` is answered with `SYN\|ACK` carrying this node's ISN and acknowledging the peer's | `corpus`: `rdp::a_syn_is_answered_with_syn_ack` |
+| The handshake's third leg provokes no further frame | `corpus`: `rdp::the_handshakes_final_ack_is_not_itself_answered` |
+| Data reaches the application with the five-byte trailer removed | `corpus`: `rdp::data_reaches_the_application_without_the_rdp_trailer` |
+| The initial sequence number moves with the clock | `router.rs::the_sequence_a_peer_receives_moves_with_the_clock` |
 
-So a connection asking for RDP got the `CSP_FRDP` flag's five bytes deducted from its SFP
-MTU and no protocol. `Node::connect` now **refuses** `RDP_REQ` with
-`Error::Unsupported { feature: Rdp }`, which is what the C does when built without
-`CSP_USE_RDP`. Flagging RDP without speaking it would be worse than refusing: the peer
-reads the first five bytes of payload as an RDP header.
+`conn.rs` passed a literal `0` as the ISN for every connection — constant across reboots and
+across peers, so a delayed segment from a previous connection falls inside the window of the
+next one between the same pair of ports. That is strictly worse than the C, whose ISN is at
+least a function of the clock (`csp_rdp.c:548`, `rand_r` seeded from `csp_get_ms()`).
+`Router::initial_seq` now derives it from `now_ms`. It is **not** a random number and is not
+treated as one: a sans-io core has no entropy source, and the C's own ISN is guessable by
+anyone who can estimate the peer's uptime to the millisecond.
+
+**Still not done: this node cannot open an RDP connection.** `Node::connect` continues to
+refuse `RDP_REQ` with `Error::Unsupported { feature: Rdp }`, and the application send path
+adds no trailer and queues nothing for retransmission. So the port speaks RDP as a server
+and not as a client. Refusing remains better than flagging RDP without speaking it, which
+would have the peer read five bytes of payload as a header.
 
 **Why the audits missed it.** `AUDIT.md`'s RDP entry audited `csp-core/rdp.rs` against
 `csp_rdp.c` function by function and was right about all of it. Nothing asked whether the
