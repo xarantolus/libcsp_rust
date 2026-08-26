@@ -339,6 +339,14 @@ MUTANTS = [
   ("rdp: an extended acknowledgement carries no data", "csp-core/src/rdp.rs",
    "                if h.has(EAK) {\n                    if h.has(ACK) {",
    "                if false {\n                    if h.has(ACK) {"),
+  # The receive reorder queue, wired in 2026-08-26 after existing unused for the whole port.
+  ("rdp: a packet ahead of the gap is held", "csp-core/src/rdp.rs",
+   "                    if seq_between(h.seq_nr, expected, expected.wrapping_add(max_window as u16)) {",
+   "                    if false {"),
+  ("rdp: the gap-filler releases what was held", "csp/src/router.rs",
+   "                        self.release_held(handle);", "                        {}"),
+  ("conn: the two receive queues share one budget", "csp/src/conn.rs",
+   "        if c.rx_len + c.rx_reorder.len() >= RXQ {", "        if false {"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

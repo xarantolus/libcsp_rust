@@ -249,6 +249,12 @@ pub enum Action {
     SendSyn(Header, SynOptions),
     /// Deliver the payload to the application.
     Deliver,
+    /// In the window but ahead of the gap: hold it until the missing packet arrives.
+    ///
+    /// `csp_rdp.c:723` stores it with `csp_rdp_rx_queue_add` and walks the queue once the
+    /// hole is filled. The caller owns the packet, so it does the holding -- this only says
+    /// which sequence number it is holding it under.
+    Hold(u16),
     /// The connection is now open.
     Opened,
     /// The connection has closed.
@@ -543,6 +549,19 @@ impl<const N: usize> RxQueue<N> {
         None
     }
 
+    /// Take any held entry, without caring which.
+    ///
+    /// For releasing what a dead connection still holds: every one is a pool slot nobody
+    /// else will ever return.
+    pub fn take_any(&mut self) -> Option<u16> {
+        for e in self.entries.iter_mut() {
+            if let Some(entry) = e.take() {
+                return Some(entry.token);
+            }
+        }
+        None
+    }
+
     /// Abandon everything, returning the tokens so the caller can release them.
     pub fn flush(&mut self, out: &mut [u16]) -> usize {
         let mut n = 0;
@@ -656,6 +675,23 @@ impl Connection {
         // [0,0,1,1,1] for a count of 2.
         let outstanding = self.rcv_cur.wrapping_sub(self.rcv_lsa);
         outstanding as u32 > self.opts.ack_delay_count
+    }
+
+    /// Accept a packet that was held out of order, now that it is next in sequence.
+    ///
+    /// Returns false if it is not next, so a caller cannot advance the sequence by handing
+    /// back the wrong one.
+    pub fn release_held(&mut self, seq_nr: u16) -> bool {
+        if self.state != State::Open || seq_nr != self.rcv_cur.wrapping_add(1) {
+            return false;
+        }
+        self.rcv_cur = seq_nr;
+        true
+    }
+
+    /// The sequence number a held packet must carry to be released next.
+    pub const fn next_expected(&self) -> u16 {
+        self.rcv_cur.wrapping_add(1)
     }
 
     /// Take the acknowledgement that is due, if any.
@@ -907,14 +943,22 @@ impl Connection {
                     return Action::Nothing;
                 }
 
-                // A duplicate or out-of-window sequence number is re-acknowledged, not
-                // delivered — that is how the peer learns to stop retransmitting.
                 if !payload.is_empty() {
                     let expected = self.rcv_cur.wrapping_add(1);
                     if h.seq_nr == expected {
                         self.rcv_cur = h.seq_nr;
                         return Action::Deliver;
                     }
+                    // Ahead of the gap but inside the window: held, not dropped. This
+                    // re-acknowledged and discarded it, so one lost packet cost a
+                    // retransmission of everything behind it -- on a link with real
+                    // latency, most of the window. Measured against the C by
+                    // `rdp::a_gap_filled_late_delivers_both_in_order`.
+                    if seq_between(h.seq_nr, expected, expected.wrapping_add(max_window as u16)) {
+                        return Action::Hold(h.seq_nr);
+                    }
+                    // A duplicate or genuinely out-of-window sequence number is
+                    // re-acknowledged — that is how the peer learns to stop retransmitting.
                     return Action::SendControl(Header {
                         flags: ACK,
                         seq_nr: self.snd_nxt,

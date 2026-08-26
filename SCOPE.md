@@ -286,26 +286,44 @@ acknowledgement-only, matching.
 not in sequence, send EACK and store packet"*. Measured, it stores and answers **nothing** —
 no EAK goes out. I would have implemented the comment.
 
-### Out-of-order RDP data is dropped, and the reorder queue that exists is unused
+### The receive reorder queue is wired in; the transmit queue still is not
 
-`rdp::out_of_sequence_data_is_answered_but_not_delivered` — `diverges`, and the reason is a
-real gap rather than a decision.
+2026-08-26. Closing the gap named the day before.
 
-Data arriving with a gap: the C queues it (`csp_rdp_rx_queue_add`) silently, to be delivered
-once the missing packet fills the hole. The port drops it and answers a plain `ACK`, so the
-peer retransmits — the data eventually arrives, but a lost packet costs a round trip per
-following packet instead of one.
+`csp_rdp.c:723` stores an out-of-sequence packet with `csp_rdp_rx_queue_add` and walks the
+queue once the hole fills. Measured with `rdp::a_gap_filled_late_delivers_both_in_order` --
+`B` sent at `rcv_cur+2`, then `A` at `rcv_cur+1` -- the C hands the application `AB`. The
+port handed it `A` and dropped `B`, so one lost packet cost the sender a round trip for every
+packet behind it.
 
-`csp-core::rdp::RxQueue` exists, with reorder tests including the sequence wrap. **Nothing
-uses it**: `Connection::step`'s `Open` arm re-acknowledges out-of-window data instead of
-holding it. That is the same shape as every RDP finding in this exercise — a correct piece of
-the core that the layer above never calls — and it is the fourth instance.
+`csp-core::rdp::RxQueue` had existed since the port was written, with reorder tests including
+the sequence wrap, and **nothing called it**. Now: `Action::Hold(seq)` for a packet inside the
+window but ahead of the gap, the router holds the pool slot under that sequence number, and
+`release_held` drains in order after each in-order delivery, stopping at the first gap.
 
-Not closed here: wiring the receive queue in is a functional change with its own delivery
-ordering to verify, not something to bolt on at the end of a cycle. Removing the gratuitous
-`ACK` alone would match this record and make the port *worse* — silent loss with no signal to
-the sender — which is optimising for the test rather than for the peer. Recorded as measured,
-with the record asserting the disagreement so it cannot drift unnoticed.
+Two hazards came with it, both found rather than reasoned about:
+
+- **The held packets were a second place a connection holds pool slots**, and `Table::close`
+  drained only the receive queue. A connection torn down mid-gap leaked one buffer per held
+  packet. `close` now drains both, and
+  `router::a_held_out_of_order_packet_is_returned_on_close` pins it.
+- **Sizing.** Draining both into one array would have needed `RXQ * 2`, which Rust will not
+  let an array length compute from a generic parameter -- and rewriting the 30 call sites late
+  in a cycle is how the next mistake happens. Instead the two queues *share* the `RXQ` budget:
+  `hold_rx` refuses once they reach it together. Every existing `[0u16; RXQ]` stays correct,
+  and a peer that never fills a gap cannot pin more than one connection's worth of pool.
+  `conn::the_two_receive_queues_share_one_budget` pins that, added because the mutation sweep
+  reported the cap as noticed by nothing -- and then *rejected the first version of the test*,
+  which only held packets and checked it refused eventually. `RxQueue`'s own capacity
+  guarantees that much, so it passed with the cap removed. Filling the receive queue first is
+  what makes it a test of the shared budget.
+
+**`TxQueue` is still unused.** Same shape, still open: it is defined in `csp-core` with its
+own tests and no caller in `csp/src`, so the port has no send-side data retransmission. That
+is why libcsp PR #3's fourth item -- freeing packets when an RDP queue is flushed -- has no
+counterpart here: there is no live transmit queue to flush. The other three items of that PR
+are in the pinned submodule (`1bc00a0f`, an ancestor of `13a8c841`) and are covered by
+records: the SYN option-block length check, the parameter clamping, and the retransmit limit.
 
 ### One spoofed RST dropped the link — the port had no blind-reset defence
 
@@ -1248,7 +1266,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**108 of 136**.
+**109 of 137**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
