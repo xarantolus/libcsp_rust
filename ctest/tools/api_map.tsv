@@ -1,0 +1,200 @@
+# c_function	status	detail   -- see api_coverage.py for what each status claims
+csp_queue_create_static	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_dequeue	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_dequeue_isr	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_empty	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_enqueue	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_enqueue_isr	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_free	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_size	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_queue_size_isr	out-of-scope	arch shim; the port has no queues -- sans-io, the caller owns them
+csp_get_ms	out-of-scope	arch shim; `now_ms` is a parameter, the core reads no clock
+csp_get_ms_isr	out-of-scope	arch shim; `now_ms` is a parameter, the core reads no clock
+csp_get_s	out-of-scope	arch shim; `now_ms` is a parameter, the core reads no clock
+csp_get_s_isr	out-of-scope	arch shim; `now_ms` is a parameter, the core reads no clock
+csp_can_socketcan_init	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_can_socketcan_open_and_add_interface	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_can_socketcan_stop	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_can_open_and_add_interface	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_can_set_rx_filter	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_can_stop	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_eth_init	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_eth_rx_loop	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_eth_tx_frame	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_usart_lock	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_usart_open	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_usart_open_and_add_kiss_interface	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_usart_unlock	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_usart_write	out-of-scope	src/drivers -- syscalls, not protocol (SCOPE.md)
+csp_zmqhub_add_filters	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_fixup_cspv1_add_dest_addr	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_fixup_cspv1_del_dest_addr	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_init	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_init_filter2	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_init_w_endpoints	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_init_w_name_endpoints_rxfilter	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_make_endpoint	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_zmqhub_remove_filters	out-of-scope	ZeroMQ hub -- not in the agreed feature table
+csp_conn_print_table	out-of-scope	printf-style diagnostics; the port returns data, the caller formats
+csp_conn_print_table_str	out-of-scope	printf-style diagnostics; the port returns data, the caller formats
+csp_iflist_print	out-of-scope	printf-style diagnostics; the port returns data, the caller formats
+csp_rtable_print	out-of-scope	printf-style diagnostics; the port returns data, the caller formats
+csp_print_func	out-of-scope	printf-style diagnostics; the port returns data, the caller formats
+csp_yaml_init	deferred	`yaml` feature, off by default -- no C oracle available
+csp_if_tun_init	deferred	`if-tun`; carries the two csp_crypto_* hooks
+csp_bind_callback	deferred	callback delivery, deferred by decision (SCOPE.md)
+csp_crypto_decrypt	deferred	if-tun's crypto hooks, with if-tun
+csp_crypto_encrypt	deferred	if-tun's crypto hooks, with if-tun
+csp_crc32_append	ported	csp_core::crc32
+csp_crc32_final	ported	csp_core::crc32
+csp_crc32_init	ported	csp_core::crc32
+csp_crc32_memory	ported	csp_core::crc32
+csp_crc32_update	ported	csp_core::crc32
+csp_crc32_verify	ported	csp_core::crc32
+csp_sha1_done	ported	csp_core::sha1::Sha1
+csp_sha1_init	ported	csp_core::sha1::Sha1
+csp_sha1_memory	ported	csp_core::sha1::Sha1
+csp_sha1_process	ported	csp_core::sha1::Sha1
+csp_hmac_append	ported	csp_core::hmac
+csp_hmac_memory	ported	csp_core::hmac
+csp_hmac_set_key	ported	csp_core::hmac
+csp_hmac_verify	ported	csp_core::hmac
+csp_id_extract	ported	csp_core::id::Id
+csp_id_prepend	ported	csp_core::id::Id
+csp_id_strip	ported	csp_core::id::Id
+csp_id_setup_rx	ported	csp_core::id::Id
+csp_id_clear	ported	csp_core::id::Id
+csp_id_copy	ported	csp_core::id::Id
+csp_id_extract_fixup_cspv1	ported	csp_core::id::Id
+csp_id_prepend_fixup_cspv1	ported	csp_core::id::Id
+csp_id_strip_fixup_cspv1	ported	csp_core::id::Id
+csp_id_get_header_size	ported	csp_core::id::Version
+csp_id_get_host_bits	ported	csp_core::id::Version
+csp_id_get_max_nodeid	ported	csp_core::id::Version
+csp_id_get_max_port	ported	csp_core::id::Version
+csp_id_is_broadcast	ported	csp_core::id::Id::is_broadcast
+csp_sfp_send	ported	csp_core::sfp
+csp_sfp_recv	ported	csp_core::sfp
+csp_sfp_recv_fp	ported	csp_core::sfp
+csp_sfp_conn_max_mtu	ported	csp_core::sfp::max_mtu
+csp_sfp_opts_max_mtu	ported	csp_core::sfp::max_mtu
+csp_rtable_set	ported	csp_core::rtable::Table
+csp_rtable_find_route	ported	csp_core::rtable::Table
+csp_rtable_clear	ported	csp_core::rtable::Table
+csp_rtable_check	ported	csp_core::rtable::Table
+csp_rtable_iterate	ported	csp_core::rtable::Table
+csp_rtable_load	ported	csp_core::rtable::Table
+csp_rtable_save	ported	csp_core::rtable::Table
+csp_rtable_free	ported	csp_core::rtable::Table
+csp_rtable_search_backward	ported	csp_core::rtable::Table
+csp_cmp	ported	csp_core::cmp
+csp_cmp_ident	ported	csp_core::cmp
+csp_cmp_route_set_v1	ported	csp_core::cmp
+csp_cmp_route_set_v2	ported	csp_core::cmp
+csp_cmp_if_stats	ported	csp_core::cmp
+csp_cmp_peek	ported	csp_core::cmp
+csp_cmp_peek_v2	ported	csp_core::cmp
+csp_cmp_poke	ported	csp_core::cmp
+csp_cmp_poke_v2	ported	csp_core::cmp
+csp_cmp_clock	ported	csp_core::cmp
+csp_cmp_memcpy	ported	csp::hooks::Hooks
+csp_cmp_memread64	ported	csp::hooks::Hooks
+csp_cmp_memwrite64	ported	csp::hooks::Hooks
+csp_cmp_set_memcpy	ported	csp::hooks::Hooks
+csp_cmp_set_memread64	ported	csp::hooks::Hooks
+csp_cmp_set_memwrite64	ported	csp::hooks::Hooks
+csp_clock_get_time	ported	csp::hooks::Hooks
+csp_clock_set_time	ported	csp::hooks::Hooks
+csp_input_hook	ported	csp::hooks::Hooks
+csp_output_hook	ported	csp::hooks::Hooks
+csp_memfree_hook	ported	csp::hooks::Hooks
+csp_ps_hook	ported	csp::hooks::Hooks
+csp_reboot_hook	ported	csp::hooks::Hooks
+csp_shutdown_hook	ported	csp::hooks::Hooks
+csp_panic	ported	csp::hooks::Hooks
+csp_buffer_get	ported	csp::pool::Pool
+csp_buffer_get_isr	ported	csp::pool::Pool
+csp_buffer_free	ported	csp::pool::Pool
+csp_buffer_free_isr	ported	csp::pool::Pool
+csp_buffer_clone	ported	csp::pool::Pool
+csp_buffer_copy	ported	csp::pool::Pool
+csp_buffer_init	ported	csp::pool::Pool
+csp_buffer_refc_inc	ported	csp::pool::Pool
+csp_buffer_remaining	ported	csp::pool::Pool
+csp_iflist_add	ported	csp::iflist::IfList
+csp_iflist_get	ported	csp::iflist::IfList
+csp_iflist_get_by_name	ported	csp::iflist::IfList
+csp_iflist_get_by_addr	ported	csp::iflist::IfList
+csp_iflist_get_by_subnet	ported	csp::iflist::IfList
+csp_iflist_get_by_broadcast	ported	csp::iflist::IfList
+csp_iflist_get_by_index	ported	csp::iflist::IfList
+csp_iflist_get_by_isdfl	ported	csp::iflist::IfList
+csp_iflist_check_dfl	ported	csp::iflist::IfList
+csp_iflist_is_within_subnet	ported	csp::iflist::IfList
+csp_iflist_iterate	ported	csp::iflist::IfList
+csp_iflist_remove	ported	csp::iflist::IfList
+csp_alias_add	ported	csp::iflist::IfList
+csp_addr_is_alias	ported	csp::iflist::IfList
+csp_bytesize	ported	csp::iflist::IfList
+csp_qfifo_write	ported	csp::router::Router::receive
+csp_promisc_enable	ported	csp::router::Router::promisc_read
+csp_promisc_disable	ported	csp::router::Router::promisc_read
+csp_promisc_read	ported	csp::router::Router::promisc_read
+csp_bridge_set_interfaces	ported	csp::router::Router::bridge_work
+csp_bridge_work	ported	csp::router::Router::bridge_work
+csp_route_work	ported	csp::router::Router::work
+csp_service_handler	ported	csp::service::respond_cmp
+csp_ping	ported	csp::client
+csp_ping_noreply	ported	csp::client
+csp_reboot	ported	csp::client
+csp_shutdown	ported	csp::client
+csp_memfree	ported	csp::client
+csp_buf_free	ported	csp::client
+csp_uptime	ported	csp::client
+csp_ps	ported	csp::client
+csp_get_memfree	ported	csp::client
+csp_get_buf_free	ported	csp::client
+csp_get_uptime	ported	csp::client
+csp_init	ported	csp::Config
+csp_get_conf	ported	csp::Config
+csp_bind	ported	csp::node::Node
+csp_listen	ported	csp::node::Node
+csp_accept	ported	csp::node::Node
+csp_close	ported	csp::node::Node
+csp_socket_close	ported	csp::node::Node
+csp_connect	ported	csp::node::Node
+csp_send	ported	csp::node::Node
+csp_sendto	ported	csp::node::Node
+csp_sendto_reply	ported	csp::node::Node
+csp_send_prio	ported	csp::node::Node
+csp_read	ported	csp::node::Node
+csp_recvfrom	ported	csp::node::Node
+csp_transaction	ported	csp::node::Node
+csp_transaction_w_opts	ported	csp::node::Node
+csp_transaction_persistent	ported	csp::node::Node
+csp_conn_dport	ported	csp::node::Node::conn_info
+csp_conn_dst	ported	csp::node::Node::conn_info
+csp_conn_sport	ported	csp::node::Node::conn_info
+csp_conn_src	ported	csp::node::Node::conn_info
+csp_conn_flags	ported	csp::node::Node::conn_info
+csp_conn_is_active	ported	csp::node::Node::conn_info
+csp_rdp_set_opt	ported	csp_core::rdp::SynOptions
+csp_rdp_get_opt	ported	csp_core::rdp::SynOptions
+csp_can_add_interface	ported	csp_core::cfp
+csp_can_remove_interface	ported	csp_core::cfp
+csp_can_rx	ported	csp_core::cfp
+csp_can_tx	ported	csp_core::cfp
+csp_kiss_add_interface	ported	csp_core::kiss
+csp_kiss_rx	ported	csp_core::kiss
+csp_kiss_tx	ported	csp_core::kiss
+csp_i2c_add_interface	ported	csp::iface
+csp_i2c_rx	ported	csp::iface
+csp_i2c_tx	ported	csp::iface
+csp_eth_rx	ported	csp_core::eth
+csp_eth_tx	ported	csp_core::eth
+csp_eth_pack_header	ported	csp_core::eth
+csp_eth_unpack_header	ported	csp_core::eth
+csp_eth_arp_get_addr	ported	csp_core::eth::ArpTable
+csp_eth_arp_set_addr	ported	csp_core::eth::ArpTable
+csp_if_udp_init	ported	csp::iface
+csp_hex_dump	out-of-scope	deliberately not ported (SCOPE.md): a no_std crate has no business owning a variadic formatter
