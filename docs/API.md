@@ -345,9 +345,9 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **126 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **142 checks**, replayed against the port. `just mutants`
-  reports how many of them some deliberate breakage can actually move — 96 at the time of
+- **127 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **143 checks**, replayed against the port. `just mutants`
+  reports how many of them some deliberate breakage can actually move — 100 at the time of
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.

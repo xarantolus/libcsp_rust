@@ -269,6 +269,34 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The negotiated window never bounded anything, in any test
+
+2026-08-26. `csp_rdp.c:576` clamps the peer's proposed `ack_delay_count` to
+`conn->rdp.window_size` — the window it has just negotiated, not a compile-time maximum.
+Every cadence test in `suite_rdp.c` opens through a helper that hardcodes `window_size = 4`
+and passes an `ack_delay_count` below it, so the clamp never fired and the relationship
+between the two was exercised nowhere.
+
+`rdp::a_delay_count_beyond_the_window_is_bound_by_it` proposes a two-packet window and a
+delay count of 250. Both nodes acknowledge on the third packet: the count is bound to 2.
+**The port was already right** — this pins a bound, it does not fix one. Clamping to
+`max_window` instead produces no acknowledgement at all within five packets, which a sender
+sees as a dead link on a window that only allows two packets in flight.
+
+The replay had to go through `SynOptions::decode_clamped` to test it. The neighbouring
+cadence replays build `SynOptions` directly, which skips the only code that applies the
+bound — so none of them could ever have caught a wrong one, whatever they asserted. Their
+hand-built window is 4, the same as the C helper's, so they were at the right operating
+point and honest; they were simply blind to this.
+
+**The lead is now a tool.** `just untraced` prints, per suite, the C tests that assert
+against a real node and record nothing — 125 of 144 record something today. That measurement
+found the dedup window, the malformed-SYN connection leak, and this. It resolves recording
+helpers, because an earlier hand-rolled version that only looked for a literal
+`ctest_trace_begin` reported two already-covered tests as gaps and would have sent me to
+re-do work. It is deliberately not in `just check`: an untraced test is a lead, not a defect,
+and several of the remaining nineteen are libcsp internals with no port equivalent.
+
 ### Function-level coverage, checked rather than claimed
 
 2026-08-26. The first "the port is complete" here compared module names and missed about
@@ -982,7 +1010,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**96 of 123**.
+**100 of 127**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
