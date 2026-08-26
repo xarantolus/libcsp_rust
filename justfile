@@ -43,6 +43,14 @@ ctest-ubsan suite="":
     if [ -n "{{suite}}" ]; then export CK_RUN_SUITE="{{suite}}"; fi
     ./build/ctest-ubsan/ctest
 
+# Line/region coverage over the shipped crates.
+#
+# Not a score to admire: what it is for is the *uncovered* half. The crypto hooks defaulting
+# to "encrypted" on plaintext sat behind hooks.rs having the lowest function coverage in the
+# crate, and nothing else had pointed at it.
+cov:
+    cargo llvm-cov --workspace --all-features --summary-only
+
 # Mutation-test the corpus: break each guard, count which records notice.
 #
 # A mutation nothing notices is a hole. See ctest/tools/mutants.py for why counting

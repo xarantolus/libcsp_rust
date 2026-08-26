@@ -137,14 +137,28 @@ pub trait Hooks<const B: usize, const SZ: usize> {
         false
     }
 
-    /// Encrypt a payload in place for the tunnel interface. Returns the new length.
-    fn encrypt(&mut self, _data: &mut [u8], len: usize) -> Option<usize> {
-        Some(len)
+    /// Encrypt a payload in place for the tunnel interface.
+    ///
+    /// Returns the new length, or `None` if it cannot be encrypted — in which case the
+    /// caller must **not** transmit it.
+    ///
+    /// Defaults to `None`, like every other hook here that can fail. It used to default to
+    /// `Some(len)` with the payload untouched, which reports "encrypted" for plaintext: a
+    /// node that switched on a tunnel without supplying crypto would have transmitted in
+    /// the clear while every layer above it believed otherwise. The C's `__weak`
+    /// `csp_crypto_encrypt` returns `-1` (`csp_if_tun.c:16`), so this was also the one
+    /// default that disagreed with the C about which way to fail.
+    fn encrypt(&mut self, _data: &mut [u8], _len: usize) -> Option<usize> {
+        None
     }
 
     /// Decrypt a payload in place. Returns the new length, or `None` to drop the packet.
-    fn decrypt(&mut self, _data: &mut [u8], len: usize) -> Option<usize> {
-        Some(len)
+    ///
+    /// Defaults to `None`: a node with no crypto cannot read ciphertext, and treating it as
+    /// plaintext would hand the application whatever the peer sent. Matches the C's
+    /// `__weak` `csp_crypto_decrypt`, which returns `-1`.
+    fn decrypt(&mut self, _data: &mut [u8], _len: usize) -> Option<usize> {
+        None
     }
 
     /// Read `out.len()` bytes of node memory at `addr`, for CMP `PEEK`.
@@ -203,6 +217,51 @@ mod tests {
         assert_eq!(Hooks::<4, 264>::mem_free(&h), 0);
         assert_eq!(Hooks::<4, 264>::uptime_s(&h), 0);
         assert_eq!(Hooks::<4, 264>::clock(&h), Timestamp::UNSET);
+    }
+
+    /// A node with no crypto must not claim to have encrypted anything.
+    ///
+    /// This is the direction that matters: every other fallible default here refuses, and
+    /// this one returned `Some(len)` with the buffer untouched — "encrypted", for
+    /// plaintext. The C's `__weak` csp_crypto_encrypt returns -1, so the port was also the
+    /// more dangerous of the two. Neither default had a test; both were among the six the
+    /// coverage run showed nothing entering.
+    #[test]
+    fn crypto_defaults_refuse_rather_than_passing_plaintext() {
+        let mut h = NoHooks;
+        let mut buf = *b"secret";
+
+        assert_eq!(
+            Hooks::<4, 264>::encrypt(&mut h, &mut buf, 6),
+            None,
+            "a node that cannot encrypt must not report success"
+        );
+        assert_eq!(
+            Hooks::<4, 264>::decrypt(&mut h, &mut buf, 6),
+            None,
+            "a node that cannot decrypt must drop the packet, not pass ciphertext up"
+        );
+        // And it did not quietly alter the buffer either way.
+        assert_eq!(&buf, b"secret");
+    }
+
+    /// The rest of the defaults that return a value, in one place.
+    ///
+    /// `the_default_hooks_are_safe_and_say_nothing` checked three of the fourteen. These
+    /// are the others that can say something untrue by returning the wrong thing.
+    #[test]
+    fn every_fallible_default_refuses() {
+        let mut h = NoHooks;
+        let mut out = [0u8; 32];
+
+        assert_eq!(Hooks::<4, 264>::process_list(&h, &mut out), 0);
+        assert_eq!(
+            Hooks::<4, 264>::on_power_request(&mut h, PowerAction::Reboot),
+            PowerAction::Refuse
+        );
+        assert!(!Hooks::<4, 264>::set_clock(&mut h, Timestamp::UNSET));
+        assert!(Hooks::<4, 264>::mem_read(&h, 0x1000, &mut out).is_err());
+        assert!(Hooks::<4, 264>::mem_write(&mut h, 0x1000, &out).is_err());
     }
 
     #[test]
