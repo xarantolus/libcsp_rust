@@ -269,6 +269,33 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The other shape mismatch, and a stale number under a paragraph promising measurement
+
+2026-08-26. Two checks, one clean and one not.
+
+**The shape mismatch in the direction an application hits by accident.** The corpus covered
+a plain datagram handed to the stream reader; it did not cover a *fragmented* transfer read
+with the ordinary datagram call, which is what happens to any receiver that never opted into
+SFP. Nothing in `csp_route.c` reads `CSP_FFRAG` — only `csp_sfp.c` does — so the C delivers
+it like any other packet and the reader gets the body with the 8-byte SFP header still on
+the end, with no indication. `sfp::a_fragment_read_as_a_datagram_keeps_the_sfp_header` drives
+the real router and the real socket on both sides and they agree: 13 bytes for a 5-byte body,
+`FRAG` visible on the id. **The port is faithful here** — this closes a gap in what was
+checked, not a defect.
+
+**"487 tests" against a measured 492.** In `docs/API.md`, three lines under a paragraph
+saying every number in it is printed by `just numbers`. I had corrected the record and check
+counts in that same list the day before and did not re-measure this one. `just numbers check`
+now compares all five figures against the measurement and fails on a mismatch, so the promise
+is enforced instead of restated.
+
+**A record no mutation moves is not a dead record.** Both connection-reuse records
+(`a_second_packet_reuses_the_same_connection`, `a_closed_connection_can_be_used_again`) sat
+in the "no mutation could move" list, which is where the padded-frame defect was found — so
+the list reads as a list of suspects. Breaking `Conn::find` and `Conn::close` failed both
+immediately. The list means "nothing has tried this yet"; it takes a mutation to tell the two
+apart, and three were added.
+
 ### The Ethernet replay refused every padded frame, and no record could see it
 
 Found on 2026-08-26, starting from the mutation sweep rather than from reading. Removing
@@ -805,10 +832,13 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**78 of 109**.
+**89 of 117**.
 
-It is a measure of the *mutation suite's* reach, not proof that the other 31 are vacuous —
-most are guards no mutation happens to break. But it found two that were:
+It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
+most are guards no mutation happens to break. Both connection-reuse records sat in that
+list until 2026-08-26, when the first mutation to break `Conn::find` and `Conn::close` was
+added; both failed immediately. Read the list as "no mutation has tried this yet", and check
+before concluding a record is dead. It has, though, found two that genuinely were:
 
 - **`replay_eth` contained its own copies of two production checks.** It tested
   `!h.is_csp()` and sliced `payload.get(..seg_size)` inside the replay closure, before

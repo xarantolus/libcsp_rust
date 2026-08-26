@@ -206,6 +206,60 @@ START_TEST(test_a_plain_datagram_given_to_the_stream_reader_is_destroyed)
 }
 END_TEST
 
+/* The mismatch in the other direction, and the one an application hits without opting into
+   anything: a peer sends a fragmented transfer, the receiver reads the connection with the
+   ordinary datagram call. Nothing in `csp_route.c` looks at `CSP_FFRAG` -- the flag is read
+   only inside `csp_sfp.c` -- so the packet is delivered like any other and the reader gets
+   the body *with the 8-byte SFP header still on the end*, and no indication of it. This
+   drives the real router and reads through the real socket, so it is the node's behaviour,
+   not the helper's. */
+START_TEST(test_a_fragment_read_as_a_datagram_keeps_the_sfp_header)
+{
+	setup_stack();
+	const int before = csp_buffer_remaining();
+
+	csp_packet_t * p = make_packet(true, "hello", 5, 0, 5);
+	const uint16_t on_the_wire = p->length;
+	csp_qfifo_write(p, &ingress_if, NULL);
+	csp_route_work();
+
+	csp_conn_t * conn = csp_accept(&sock, 0);
+	ck_assert_ptr_nonnull(conn);
+	csp_packet_t * got_p = csp_read(conn, 0);
+	ck_assert_ptr_nonnull(got_p);
+
+	/* The whole thing, trailer included. */
+	ck_assert_uint_eq(got_p->length, on_the_wire);
+	ck_assert_uint_eq(got_p->length, 5 + sizeof(sfp_header_t));
+	const int flag_visible = (got_p->id.flags & CSP_FFRAG) != 0;
+
+	uint8_t body[64];
+	const uint16_t body_len = got_p->length > sizeof(body) ? sizeof(body) : got_p->length;
+	memcpy(body, got_p->data, body_len);
+
+	csp_buffer_free(got_p);
+	csp_close(conn);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("sfp", "a_fragment_read_as_a_datagram_keeps_the_sfp_header",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_bool("frag_flag", true);
+		ctest_trace_hex("body", (const uint8_t *)"hello", 5);
+		ctest_trace_int("totalsize", 5);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", 1);
+		ctest_trace_int("delivered_len", (int64_t)body_len);
+		ctest_trace_hex("delivered_body", body, body_len);
+		ctest_trace_int("frag_flag_visible", flag_visible);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* The same error code the wrong-shape case produces, from a genuinely corrupt stream. This
    is what makes the previous test a problem rather than a curiosity: an application cannot
    distinguish them. */
@@ -350,6 +404,7 @@ Suite * sfp_suite(void)
 	TCase * tc = tcase_create("shape");
 	tcase_add_test(tc, test_a_single_fragment_stream_is_delivered);
 	tcase_add_test(tc, test_a_plain_datagram_given_to_the_stream_reader_is_destroyed);
+	tcase_add_test(tc, test_a_fragment_read_as_a_datagram_keeps_the_sfp_header);
 	tcase_add_test(tc, test_a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape);
 	tcase_add_test(tc, test_a_fragment_at_the_wrong_offset_is_refused);
 	tcase_add_test(tc, test_a_zero_total_transfer_is_refused);

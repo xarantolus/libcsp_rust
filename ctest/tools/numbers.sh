@@ -22,6 +22,28 @@ printf 'difftest tests       %s (#[test] in difftest/tests/)\n' \
 printf 'C oracle checks      %s (just ctest)\n' \
   "$(just ctest 2>&1 | grep -oE 'Checks: [0-9]+' | grep -oE '[0-9]+')"
 printf 'corpus records       %s\n' "$(wc -l < corpus/ctest.jsonl)"
+
+# Printing them is not enough. "487 tests" drifted to 492 while sitting three lines under
+# a paragraph promising every number here is measured, and I corrected the record and check
+# counts in the same edit without noticing it. `just numbers check` fails on a mismatch, so
+# the promise is enforced rather than repeated.
+if [ "${1:-}" = "check" ]; then
+  fail=0
+  expect() {  # expect <what> <measured> <regex capturing the figure in docs/API.md>
+    doc=$(grep -oE "$3" docs/API.md | grep -oE '[0-9]+' | head -1)
+    if [ "$doc" != "$2" ]; then
+      echo "docs/API.md says $1 = ${doc:-<missing>}, measured $2" >&2
+      fail=1
+    fi
+  }
+  expect "rust tests"     "$(echo "$out" | grep -E '^test result' | awk '{s+=$4} END {print s}')" '\*\*[0-9]+ tests\*\* across the crates'
+  expect "corpus records" "$(wc -l < corpus/ctest.jsonl)" '\*\*[0-9]+ corpus records\*\*'
+  expect "C oracle checks" "$(just ctest 2>&1 | grep -oE 'Checks: [0-9]+' | grep -oE '[0-9]+')" '\*\*[0-9]+ checks\*\*'
+  expect "golden vector lines" "$(cat vectors/v1.tsv vectors/v2.tsv | grep -vcE '^#|^$')" '\*\*[0-9]+ golden vector lines\*\*'
+  expect "difftest tests" "$(grep -hcE '^[[:space:]]*#\[test\]' difftest/tests/*.rs | paste -sd+ - | python3 -c 'import sys; print(eval(sys.stdin.read()))')" '\*\*[0-9]+ differential tests\*\*'
+  [ "$fail" -eq 0 ] && echo "docs/API.md matches the measurement"
+  exit "$fail"
+fi
 python3 - <<'PY'
 import json, collections
 c = collections.Counter()

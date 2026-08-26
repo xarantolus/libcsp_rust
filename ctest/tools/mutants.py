@@ -291,6 +291,17 @@ MUTANTS = [
   ("eth: a transfer larger than the buffer is refused up front", "csp-core/src/eth.rs",
    "                if h.packet_length as usize > out.len() {",
    "                if false && h.packet_length as usize > out.len() {"),
+  # The connection table's reuse paths. Both records existed and both were in the
+  # "no mutation could move" list -- not because they measure nothing, but because nothing
+  # here had ever broken connection lookup or release. They fail as soon as something does.
+  ("conn: a second packet finds the open connection", "csp/src/conn.rs",
+   "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        for (i, c) in self.conns.iter().enumerate() {",
+   "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
+  ("conn: close releases the slot", "csp/src/conn.rs",
+   "        c.reset();\n        Ok(n)\n    }", "        let _ = &c;\n        Ok(n)\n    }"),
+  ("id: the fragment flag is read", "csp-core/src/id.rs",
+   "    pub const fn is_fragment(&self) -> bool {\n        self.has_flag(crate::flags::FRAG)",
+   "    pub const fn is_fragment(&self) -> bool {\n        false && self.has_flag(crate::flags::FRAG)"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),
