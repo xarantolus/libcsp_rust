@@ -30,7 +30,12 @@ MUTANTS = [
   ("eth: zero-length segment", "csp-core/src/eth.rs",
    "        if h.seg_size == 0 {", "        if false {"),
   ("eth: running total bound", "csp-core/src/eth.rs",
-   "        if self.received as usize + payload.len() > self.total as usize {", "        if false {"),
+   "        let end = offset + payload.len();\n        if end > self.total as usize {",
+   "        let end = offset + payload.len();\n        if false {"),
+  ("eth: segments append, not overwrite", "csp-core/src/eth.rs",
+   "        let offset = self.received as usize;", "        let offset = 0;"),
+  ("eth: the surplus past seg_size is ignored", "csp-core/src/eth.rs",
+   "        let payload = &payload[..h.seg_size as usize];", "        let payload = payload;"),
   ("eth: declared-length floor", "csp-core/src/eth.rs",
    "                if h.packet_length < self.min_len {", "                if false {"),
   ("eth: buffer bound up front", "csp-core/src/eth.rs",
@@ -192,6 +197,12 @@ MUTANTS = [
    "                if false {"),
   ("rdp: retransmission gives up eventually", "csp-core/src/rdp.rs",
    "                    if self.retransmits >= MAX_RETRANSMITS {", "                    if false {"),
+  ("rdp: the repeat carries the original sequence", "csp-core/src/rdp.rs",
+   "                        seq_nr: self.snd_iss,\n                        // `rcv_cur`, not `rcv_irs`.",
+   "                        seq_nr: self.snd_iss.wrapping_add(1),\n                        // `rcv_cur`, not `rcv_irs`."),
+  ("rdp: the repeat is a SYN|ACK", "csp-core/src/rdp.rs",
+   "                    self.retransmits += 1;\n                    return Action::SendControl(Header {\n                        flags: SYN | ACK,",
+   "                    self.retransmits += 1;\n                    return Action::SendControl(Header {\n                        flags: ACK,"),
   ("rdp: the timer's frames reach the caller", "csp/src/conn.rs",
    "                rdp::Action::SendControl(h) => {\n                    send(c.idout, h);",
    "                rdp::Action::SendControl(h) => {\n                    let _ = h;"),
@@ -265,9 +276,9 @@ MUTANTS = [
   # The Ethernet receive path's refusals. Twelve `eth::` records existed that no mutation
   # could move -- not because they measure nothing, but because nothing was breaking the
   # guards they cover. A malformed frame is the one input a peer fully controls.
-  ("eth: a segment must be the length it claims", "csp-core/src/eth.rs",
-   "        if payload.len() != h.seg_size as usize {",
-   "        if false && payload.len() != h.seg_size as usize {"),
+  ("eth: a frame shorter than its segment is refused", "csp-core/src/eth.rs",
+   "        if payload.len() < h.seg_size as usize {",
+   "        if false && payload.len() < h.seg_size as usize {"),
   ("eth: a zero-length transfer is refused", "csp-core/src/eth.rs",
    "                if h.packet_length == 0 {\n                    return Err(Error::ZeroTotal);\n                }",
    "                if false {\n                    return Err(Error::ZeroTotal);\n                }"),
@@ -304,7 +315,11 @@ for name, path, old, new in MUTANTS:
     # corpus records alone would report it as a hole.
     # --no-fail-fast: a broken unit test must not stop the corpus binary from running, or
     # every mutation that trips a unit test would report the corpus as blind to it.
-    r = subprocess.run(["cargo","test","-p","csp","--all-features","--no-fail-fast"],
+    # `-p csp-core` as well as `-p csp`: most mutations target `csp-core/src`, and the unit
+    # tests that cover them live in that crate. Running only `csp` made the unit-test leg
+    # blind there, so four Ethernet guards with unit tests asserting the exact error they
+    # raise were reported as holes nothing noticed.
+    r = subprocess.run(["cargo","test","-p","csp","-p","csp-core","--all-features","--no-fail-fast"],
                        capture_output=True, text=True)
     p.write_text(orig)
     out = r.stdout + r.stderr
