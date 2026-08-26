@@ -842,9 +842,57 @@ static void deliver_byte(uint16_t seq, uint16_t ack_nr, char byte) {
  * whose `timestamp_tx + packet_timeout` has passed, and counts **one attempt per sweep**
  * rather than per packet. Past `CSP_RDP_MAX_RETRANSMITS` it closes the connection.
  *
- * Nothing measured this, and the measurement is stark: the C puts 29 frames on the wire and
- * then stops; the port puts one there and never repeats it. `diverges`, with the reason in
- * SCOPE.md -- the port has no RDP *send* path at all, not merely an unused queue. */
+ * `diverges`, and the reason is the C rather than the port. Measured: the total scales with
+ * `conn_timeout`, not with `CSP_RDP_MAX_RETRANSMITS` -- 29 frames at a 20 s connection
+ * timeout, 10 at 5 s. So "No progress after 10 retransmissions, closing" does not stop the
+ * retransmitting; `csp_conn_close` on an *accepted* handle leaves the connection for the
+ * application to close, `csp_conn_check_timeouts` keeps sweeping it, and only the CLOSE-WAIT
+ * timeout finally ends it. The port stops when it says it stops: 12 frames, one initial and
+ * eleven attempts. SCOPE.md carries the arithmetic. */
+/* One packet, one `packet_timeout`, one repeat -- the part of retransmission both stacks
+   agree on, and the part the give-up arithmetic does not reach. The total-frame record next
+   door is a `diverges`, which cannot catch a send path that stops holding what it sent:
+   breaking it leaves the two disagreeing either way. This one can. */
+START_TEST(test_one_retransmission_after_the_packet_timeout)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	ack_handshake(conn->rdp.snd_iss);
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+
+	csp_packet_t * out = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(out);
+	memcpy(out->data, "hello", 5);
+	out->length = 5;
+	csp_send(accepted, out);
+
+	/* `packet_timeout` is 1000 ms; sweep just past it once. */
+	const unsigned int before = test_tx_count;
+	for (int i = 0; i < 5; i++) {
+		ctest_clock_advance(250);
+		csp_conn_check_timeouts();
+	}
+	const unsigned int repeats = test_tx_count - before;
+	const uint8_t repeat_flags = tx_flags & 0x0F;
+	const int repeat_carries_the_payload = (tx_payload_len == 5);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "one_retransmission_after_the_packet_timeout", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packet_timeout", 1000);
+		ctest_trace_int("swept_ms", 1250);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("repeats", (int64_t)repeats);
+		ctest_trace_int("repeat_flags", (int64_t)repeat_flags);
+		ctest_trace_int("repeat_carries_the_payload", repeat_carries_the_payload);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
 {
 	setup_stack();
@@ -863,6 +911,29 @@ START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
 	out->length = 5;
 	csp_send(accepted, out);
 	const unsigned int first_send = test_tx_count - before;
+	/* What the data frame itself looks like. Absolute sequence numbers cannot be compared
+	   -- the port does not reproduce `rand_r`, so the two ISNs differ by design (SCOPE.md)
+	   -- but everything relative to the connection's own ISN can be, and it is what says
+	   the trailer was framed at all. */
+	const uint8_t data_flags = tx_flags & 0x0F;
+	const int seq_is_iss_plus_one = (tx_seq == (uint16_t)(conn->rdp.snd_iss + 1));
+	const int ack_is_rcv_cur = (tx_ack == conn->rdp.rcv_cur);
+	const uint16_t data_payload_len = tx_payload_len;
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_sent_data_packet_carries_an_rdp_trailer", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("payload_bytes", 5);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("frames", (int64_t)first_send);
+		ctest_trace_int("flags", (int64_t)data_flags);
+		ctest_trace_int("seq_is_iss_plus_one", seq_is_iss_plus_one);
+		ctest_trace_int("ack_is_rcv_cur", ack_is_rcv_cur);
+		ctest_trace_int("payload_len", (int64_t)data_payload_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 
 	/* The peer stays silent. Sweep well past any plausible give-up point.
 	   Counting frames, not connection-table state: after the C gives up it leaves the
@@ -1552,6 +1623,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_one_retransmission_after_the_packet_timeout);
 	tcase_add_test(tc_ack, test_unacknowledged_data_is_retransmitted_then_given_up_on);
 	tcase_add_test(tc_ack, test_a_gap_filled_late_delivers_both_in_order);
 	tcase_add_test(tc_ack, test_an_eak_carries_no_data_to_the_application);

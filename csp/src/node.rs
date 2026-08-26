@@ -522,6 +522,54 @@ impl<
     ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
         let id = self.router.conns.id_out(conn)?;
         self.router.conns.touch(conn, now_ms)?;
+
+        // On an RDP connection the payload carries a trailer and a copy stays behind until
+        // the peer acknowledges it. Without this the connection is reliable in name only:
+        // the frame goes out once, a C peer does not recognise it as RDP data at all, and
+        // nothing retransmits it. `csp_rdp_send` does exactly this -- stamp
+        // `seq_nr = snd_nxt`, `ack_nr = rcv_cur`, set `ACK`, clone into the transmit queue.
+        #[cfg(feature = "rdp")]
+        let cur_len = packet.with_payload(<[u8]>::len);
+        #[cfg(feature = "rdp")]
+        if id.has_flag(csp_core::flags::RDP) {
+            let Some(h) = self.router.conns.begin_rdp_send(conn, now_ms) else {
+                return Err(Error::SendWindowFull);
+            };
+            // The RDP header is a *trailer*: `csp_rdp_header_add` writes it at
+            // `data[length]` and extends the length, so it lands after the payload.
+            let mut trailer = [0u8; csp_core::rdp::HEADER_LEN];
+            let tn = h.encode(&[], &mut trailer)?;
+            let appended = packet.with_payload_mut(|b| {
+                let len = b.len().min(cur_len);
+                if len + tn > b.len() {
+                    return (len, false);
+                }
+                b[len..len + tn].copy_from_slice(&trailer[..tn]);
+                (len + tn, true)
+            });
+            if !appended {
+                return Err(Error::BufferTooSmall {
+                    needed: cur_len + tn,
+                });
+            }
+            packet.set_id(id);
+            // The copy is what gets retransmitted; the original goes out now.
+            if let Some(copy) = packet.deep_copy() {
+                let slot = copy.into_index();
+                if self
+                    .router
+                    .conns
+                    .hold_unacked(conn, h.seq_nr, slot, now_ms)
+                    .is_err()
+                {
+                    // No room to hold it. Release rather than leak; the packet still goes
+                    // out, and this connection simply has nothing to retransmit from.
+                    drop(self.storage.pool_ref().from_index(slot));
+                }
+            }
+            return Ok(self.route(packet, id));
+        }
+
         packet.set_id(id);
         Ok(self.route(packet, id))
     }

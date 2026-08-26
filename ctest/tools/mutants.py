@@ -345,8 +345,23 @@ MUTANTS = [
    "                    if false {"),
   ("rdp: the gap-filler releases what was held", "csp/src/router.rs",
    "                        self.release_held(handle);", "                        {}"),
-  ("conn: the two receive queues share one budget", "csp/src/conn.rs",
-   "        if c.rx_len + c.rx_reorder.len() >= RXQ {", "        if false {"),
+  ("conn: the receive and transmit queues share one budget", "csp/src/conn.rs",
+   "        if c.rx_len + c.rx_reorder.len() + c.tx_unacked.len() >= RXQ {\n            return Err(Error::BufferTooSmall { needed: RXQ + 1 });\n        }\n        c.rx_reorder.insert(seq_nr, slot)",
+   "        c.rx_reorder.insert(seq_nr, slot)"),
+  # The RDP send path, built 2026-08-26 after existing nowhere at all.
+  ("rdp: an outgoing data packet carries a trailer", "csp/src/node.rs",
+   "            let appended = packet.with_payload_mut(|b| {",
+   "            let appended = true || packet.with_payload_mut(|b| {"),
+  ("rdp: a sent packet is held for retransmission", "csp/src/node.rs",
+   "            if let Some(copy) = packet.deep_copy() {",
+   "            if let Some(copy) = packet.deep_copy().filter(|_| false) {"),
+  ("rdp: the window bounds what may be sent", "csp-core/src/rdp.rs",
+   "        if seq_before(last, self.snd_nxt) {", "        if false {"),
+  # The real bug this caught: `with_payload_mut`'s closure *sets* the length, and its slice
+  # is the whole slot. Returning `b.len()` stretches every retransmission to the full buffer.
+  ("rdp: a retransmission keeps its own length", "csp/src/router.rs",
+   "                                (len, ())\n                            });",
+   "                                (b.len(), ())\n                            });"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

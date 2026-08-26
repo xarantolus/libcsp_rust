@@ -1236,6 +1236,237 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// One packet, one `packet_timeout`, and what comes back out.
+///
+/// The total-frame record is a `diverges` and so cannot protect the send path -- breaking
+/// it leaves the two disagreeing either way. This is the `must_match` half: the repeat
+/// happens, carries `ACK`, and still carries the payload.
+#[cfg(feature = "rdp")]
+fn replay_rdp_one_retransmission() -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    let inject = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                  body: &[u8],
+                  flags: u8,
+                  seq: u16,
+                  ack: u16| {
+        let mut buf = [0u8; 64];
+        buf[..body.len()].copy_from_slice(body);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hl = h.encode(&[], &mut buf[body.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..body.len() + hl]).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(x)) = n.read(conn) {
+                        drop(x);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    inject(&mut n, &syn[..olen], rdp::SYN, 1000, 0);
+    let Some(h) = n.accept() else {
+        return serde_json::json!({ "repeats": 0 });
+    };
+    let iss = n.router.conns.rdp(h).map(|r| r.snd_iss).unwrap_or(0);
+    inject(&mut n, &[], rdp::ACK, 1001, iss);
+
+    let Some(mut p) = n.packet() else {
+        return serde_json::json!({ "repeats": 0 });
+    };
+    p.set_payload(b"hello").unwrap();
+    if let Ok(out) = n.send(h, p, CLOCK) {
+        drop(out.into_packet());
+    }
+
+    // Sweep just past the 1000 ms packet timeout.
+    let mut repeats = 0u32;
+    let (mut flags, mut carries) = (0u8, 0u32);
+    let mut t = CLOCK;
+    for _ in 0..5 {
+        t = t.wrapping_add(250);
+        n.tick(t, 60_000);
+        loop {
+            match n.work(t) {
+                csp::Routed::Respond { packet, .. } | csp::Routed::Forwarded { packet, .. } => {
+                    repeats += 1;
+                    if let Some(pk) = n.take_forwarded(packet) {
+                        pk.with_payload(|b| {
+                            if let Ok(hd) = rdp::Header::decode(b) {
+                                flags = hd.flags & 0x0F;
+                            }
+                            carries = u32::from(b.len().saturating_sub(rdp::HEADER_LEN) == 5);
+                        });
+                        drop(pk);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    }
+
+    serde_json::json!({
+        "repeats": repeats,
+        "repeat_flags": flags,
+        "repeat_carries_the_payload": carries,
+    })
+}
+
+/// The frame an application's send produces on an RDP connection.
+///
+/// Absolute sequence numbers are not comparable -- the port does not reproduce the C's
+/// `rand_r` initial sequence number, deliberately -- so what is recorded is relative to the
+/// connection's own ISN, plus the flags and the payload length. That is what says the
+/// trailer was framed at all.
+///
+/// `must_match`, on purpose: the retransmission record next door is a `diverges`, and a
+/// divergence record cannot catch a broken send path -- breaking it keeps the two
+/// disagreeing. The mutation sweep said so, with three send-path mutations noticed by
+/// nothing.
+#[cfg(feature = "rdp")]
+fn replay_rdp_sent_framing() -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    let inject = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                  body: &[u8],
+                  flags: u8,
+                  seq: u16,
+                  ack: u16| {
+        let mut buf = [0u8; 64];
+        buf[..body.len()].copy_from_slice(body);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hl = h.encode(&[], &mut buf[body.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..body.len() + hl]).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(x)) = n.read(conn) {
+                        drop(x);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    inject(&mut n, &syn[..olen], rdp::SYN, 1000, 0);
+    let Some(h) = n.accept() else {
+        return serde_json::json!({ "frames": 0 });
+    };
+    let iss = n.router.conns.rdp(h).map(|r| r.snd_iss).unwrap_or(0);
+    inject(&mut n, &[], rdp::ACK, 1001, iss);
+    let rcv_cur = n.router.conns.rdp(h).map(|r| r.rcv_cur).unwrap_or(0);
+
+    let Some(mut p) = n.packet() else {
+        return serde_json::json!({ "frames": 0 });
+    };
+    p.set_payload(b"hello").unwrap();
+    let Ok(out) = n.send(h, p, CLOCK) else {
+        return serde_json::json!({ "frames": 0 });
+    };
+    let pk = out.into_packet();
+    let (flags, seq, ack, plen) = pk.with_payload(|b| {
+        let hd = rdp::Header::decode(b).ok();
+        (
+            hd.map(|x| x.flags & 0x0F).unwrap_or(0),
+            hd.map(|x| x.seq_nr).unwrap_or(0),
+            hd.map(|x| x.ack_nr).unwrap_or(0),
+            b.len().saturating_sub(rdp::HEADER_LEN) as u16,
+        )
+    });
+    drop(pk);
+
+    serde_json::json!({
+        "frames": 1,
+        "flags": flags,
+        "seq_is_iss_plus_one": u8::from(seq == iss.wrapping_add(1)),
+        "ack_is_rcv_cur": u8::from(ack == rcv_cur),
+        "payload_len": plen,
+    })
+}
+
 /// What the node puts on the wire when the application sends on an RDP connection, and
 /// what happens when the peer never acknowledges it.
 ///
@@ -3376,6 +3607,14 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "one_retransmission_after_the_packet_timeout" => {
+            Some((replay_rdp_one_retransmission(), "one timeout".to_string()))
+        }
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_sent_data_packet_carries_an_rdp_trailer" => {
+            Some((replay_rdp_sent_framing(), "one 5-byte send".to_string()))
+        }
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "unacknowledged_data_is_retransmitted_then_given_up_on" => Some((
             replay_rdp_unacked_send(),
