@@ -825,6 +825,58 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// for in-order data that action is `Deliver`, so the ack comes from the separate
     /// `poll_ack`. Emitting it through `emit_rdp` would have returned `Respond` and thrown
     /// the `Delivered` away.
+    /// Queue a frame the RDP timers produced.
+    ///
+    /// `queue_rdp` builds its reply by swapping an *incoming* header's addresses; a timer
+    /// has no incoming packet, only the connection's outgoing id, so it is used directly.
+    #[cfg(feature = "rdp")]
+    fn queue_rdp_from_tick<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        idout: Id,
+        ifaces: &crate::iflist::IfList<N, A>,
+        header: csp_core::rdp::Header,
+    ) -> core::result::Result<(), Routed> {
+        let Some(mut reply) = pool.acquire(0) else {
+            self.counters.rx_queue_full += 1;
+            return Err(Routed::Dropped(DropReason::ReceiveQueueFull));
+        };
+        reply.set_id(idout);
+        let mut buf = [0u8; csp_core::rdp::HEADER_LEN];
+        let Ok(n) = header.encode(&[], &mut buf) else {
+            self.counters.malformed += 1;
+            return Err(Routed::Dropped(DropReason::Malformed));
+        };
+        if reply.set_payload(&buf[..n]).is_err() {
+            self.counters.malformed += 1;
+            return Err(Routed::Dropped(DropReason::Malformed));
+        }
+        let dst = reply.id().dst;
+        let mut hops = [crate::route_policy::Hop {
+            iface: 0,
+            via: 0,
+            dst: 0,
+        }; 1];
+        match crate::route_policy::destinations(
+            ifaces,
+            &self.routes,
+            self.version,
+            dst,
+            None,
+            &mut hops,
+        ) {
+            crate::route_policy::Outcome::Hops(_) => {
+                let slot = reply.into_index();
+                self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
+                Ok(())
+            }
+            _ => {
+                self.counters.no_route += 1;
+                Err(Routed::Dropped(DropReason::NoRoute))
+            }
+        }
+    }
+
     #[cfg(feature = "rdp")]
     #[allow(clippy::too_many_arguments)]
     fn queue_rdp<const B: usize, const SZ: usize, const N: usize, const A: usize>(
@@ -1040,9 +1092,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     ///
     /// Returns how many connections were closed. Must be called regularly — the RDP state
     /// machine reads no clock on purpose, so nothing else advances its timers.
-    pub fn tick<const B: usize, const SZ: usize>(
+    pub fn tick<const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
         now_ms: u32,
         conn_timeout_ms: u32,
     ) -> usize {
@@ -1058,7 +1111,29 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
 
         #[cfg(feature = "rdp")]
-        let closed = closed + self.conns.tick_rdp(now_ms, RDP_MAX_WINDOW);
+        // Frames the RDP timers want to send -- a retransmitted `SYN|ACK`, or the `RST`
+        // that gives up on one. Collected first because building them needs `&mut self`,
+        // which the sweep already holds; queued below so `work` reports them as
+        // `Routed::Respond` like any other frame this node originates.
+        #[cfg(feature = "rdp")]
+        let mut pending: [Option<(Id, csp_core::rdp::Header)>; CONNS] = [None; CONNS];
+        #[cfg(feature = "rdp")]
+        let mut n_pending = 0usize;
+        #[cfg(feature = "rdp")]
+        let closed = closed
+            + self.conns.tick_rdp(now_ms, RDP_MAX_WINDOW, |id, h| {
+                if n_pending < CONNS {
+                    pending[n_pending] = Some((id, h));
+                    n_pending += 1;
+                }
+            });
+        #[cfg(feature = "rdp")]
+        for entry in pending.iter().take(n_pending) {
+            let Some((id, h)) = entry else { continue };
+            // `is_new` is false: the connection was announced when the handshake created
+            // it, and a retransmission is not a new one.
+            let _ = self.queue_rdp_from_tick(pool, *id, ifaces, *h);
+        }
 
         if closed > 0 {
             self.purge_dead_accepts();
@@ -1555,7 +1630,7 @@ mod tests {
         assert!(pool.available() < before);
 
         // Well past the timeout, in one sweep.
-        let closed = r.tick(&pool, 60_000, 1_000);
+        let closed = r.tick(&pool, &test_ifaces(), 60_000, 1_000);
         assert_eq!(closed, 1, "the idle connection must be expired");
         assert_eq!(
             pool.available(),
@@ -1834,8 +1909,12 @@ mod tests {
         ));
         assert_eq!(r.conns.open_count(), 1);
 
-        assert_eq!(r.tick(&pool, 5_000, 10_000), 0, "not yet idle");
-        let closed = r.tick(&pool, 30_000, 10_000);
+        assert_eq!(
+            r.tick(&pool, &test_ifaces(), 5_000, 10_000),
+            0,
+            "not yet idle"
+        );
+        let closed = r.tick(&pool, &test_ifaces(), 30_000, 10_000);
         assert!(closed >= 1, "an idle connection must be reclaimed");
         assert_eq!(r.conns.open_count(), 0);
     }
@@ -1853,7 +1932,7 @@ mod tests {
             "the delivered packet is held on the conn"
         );
 
-        r.tick(&pool, 30_000, 10_000);
+        r.tick(&pool, &test_ifaces(), 30_000, 10_000);
         assert_eq!(pool.available(), 16, "expiry must release it, not leak it");
     }
 
@@ -1870,7 +1949,7 @@ mod tests {
         assert!(pool.available() < 16);
 
         // drain what is on connections too
-        r.tick(&pool, 1_000_000, 1_000);
+        r.tick(&pool, &test_ifaces(), 1_000_000, 1_000);
         r.shutdown(&pool);
         assert_eq!(pool.available(), 16, "nothing may survive shutdown");
     }

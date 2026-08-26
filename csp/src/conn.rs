@@ -458,15 +458,33 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// timeout — without it the RDP state machine never advances on its own, because it
     /// deliberately reads no clock.
     #[cfg(feature = "rdp")]
-    pub fn tick_rdp(&mut self, now_ms: u32, max_window: u32) -> usize {
+    pub fn tick_rdp(
+        &mut self,
+        now_ms: u32,
+        max_window: u32,
+        mut send: impl FnMut(Id, rdp::Header),
+    ) -> usize {
         let mut closed = 0;
         for c in self.conns.iter_mut() {
             if c.state != State::Open {
                 continue;
             }
-            if let rdp::Action::Closed(_) = c.rdp.step(rdp::Event::Tick, now_ms, max_window) {
-                c.reset();
-                closed += 1;
+            match c.rdp.step(rdp::Event::Tick, now_ms, max_window) {
+                rdp::Action::Closed(_) => {
+                    c.reset();
+                    closed += 1;
+                }
+                // A retransmitted `SYN|ACK`, or the `RST` that gives up on one. These were
+                // discarded: the match arm only looked for `Closed`, so anything the timer
+                // wanted to put on the wire went nowhere and the peer heard nothing.
+                rdp::Action::SendControl(h) => {
+                    send(c.idout, h);
+                    if c.rdp.state == csp_core::rdp::State::Closed {
+                        c.reset();
+                        closed += 1;
+                    }
+                }
+                _ => {}
             }
         }
         closed
@@ -736,8 +754,8 @@ mod tests {
             c.state = rdp::State::Open;
             c.last_activity = 0;
         }
-        assert_eq!(t.tick_rdp(5_000, 5), 0, "not yet timed out");
-        assert_eq!(t.tick_rdp(60_000, 5), 1, "must close on timeout");
+        assert_eq!(t.tick_rdp(5_000, 5, |_, _| {}), 0, "not yet timed out");
+        assert_eq!(t.tick_rdp(60_000, 5, |_, _| {}), 1, "must close on timeout");
         assert_eq!(t.open_count(), 0);
     }
 

@@ -676,6 +676,31 @@ a table to hand, which is what the C's parser does, and it is deliberately not i
 mutation suite since nothing could notice it. The netmask check is the one that mattered,
 because `set` clamps instead of refusing.
 
+### A lost SYN/ACK was never repeated
+
+`rdp_retransmits_are_limited` asserts that an unanswered `SYN|ACK` is retransmitted up to
+`CSP_RDP_MAX_RETRANSMITS` and then reset — four `ck_assert`s, no record, so the port had
+never been compared on retransmission at all.
+
+Measured: over 1000 ticks with the peer silent, the C sends at least ten frames and closes
+the connection; this port sent **none** and kept the connection open indefinitely. A peer
+whose `SYN|ACK` was lost waited forever for a connection this node believed it had opened,
+and nothing ever told it otherwise.
+
+Two layers were wrong, and either alone would have been enough:
+
+- `Connection::step(Event::Tick)` only checked the connection timeout. It never looked at
+  whether anything was outstanding, so no retransmission was ever produced.
+- `Table::tick_rdp` matched on `Action::Closed` and nothing else, so a control frame from a
+  timer would have been discarded even if one had been produced. That is the same shape as
+  the acknowledgement finding: the state machine offers an action and the layer above drops
+  it.
+
+Only `SynRcvd` is handled. It is the one state in which this port has something outstanding
+of its own — data retransmission needs the send side, which the node does not have.
+`Router::tick` now takes the interface list so the frames it produces can be routed, and
+reports them through `Routed::Respond` like anything else this node originates.
+
 ### The tap's ownership rules were asserted eight times and recorded none
 
 `promisc_read_transfers_ownership` makes eight `ck_assert`s about what

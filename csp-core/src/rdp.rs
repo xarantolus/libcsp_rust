@@ -714,6 +714,40 @@ impl Connection {
                     self.state = State::Closed;
                     return Action::Closed(ClosedBy::Timeout);
                 }
+
+                // An unacknowledged `SYN|ACK` is repeated until the peer answers or the
+                // retransmit limit is reached, and then the connection is reset.
+                //
+                // This did nothing but check the connection timeout. A `SYN|ACK` lost on
+                // the way out was never repeated, so the peer waited for a connection this
+                // node believed it had opened and neither side ever learned otherwise --
+                // the RST below is the only thing that tells it. `csp_rdp_check_timeouts`
+                // does this; measured in
+                // `rdp::an_unacknowledged_syn_ack_is_retransmitted_then_reset`, where the C
+                // sends at least `MAX_RETRANSMITS` frames and this sent none.
+                //
+                // Only `SynRcvd` is handled: it is the one state in which this port has
+                // something outstanding of its own. Data retransmission needs the send
+                // side, which the node does not have -- see SCOPE.md.
+                if self.state == State::SynRcvd
+                    && now_ms.wrapping_sub(self.ack_timestamp) > self.opts.packet_timeout
+                {
+                    self.ack_timestamp = now_ms;
+                    if self.retransmits >= MAX_RETRANSMITS {
+                        self.state = State::Closed;
+                        return Action::SendControl(Header {
+                            flags: RST,
+                            seq_nr: self.snd_nxt,
+                            ack_nr: self.rcv_cur,
+                        });
+                    }
+                    self.retransmits += 1;
+                    return Action::SendControl(Header {
+                        flags: SYN | ACK,
+                        seq_nr: self.snd_iss,
+                        ack_nr: self.rcv_irs,
+                    });
+                }
                 Action::Nothing
             }
 
@@ -757,6 +791,10 @@ impl Connection {
                     // after a handshake.
                     self.rcv_lsa = h.seq_nr;
                     self.state = State::SynRcvd;
+                    // When this went out, so `Tick` can tell how long it has gone
+                    // unanswered.
+                    self.ack_timestamp = now_ms;
+                    self.retransmits = 0;
                     return Action::SendControl(Header {
                         flags: SYN | ACK,
                         seq_nr: self.snd_iss,
