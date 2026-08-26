@@ -45,12 +45,29 @@ def live_source(text):
 
 
 def recorders(src):
-    """`ctest_trace_begin` plus every static helper that reaches it."""
-    found = {"ctest_trace_begin"}
+    """`ctest_trace_begin` plus every static helper that reaches it, transitively.
+
+    To a fixed point, not one level. `suite_hmac.c` records through
+    `hmac_record` -> `hmac_record_hdr` -> `ctest_trace_begin`, and a single pass called a
+    test that does record a test that does not -- which is the same mistake this tool exists
+    to catch, made by the tool.
+    """
+    bodies = {}
     for m in HELPER.finditer(src):
         end = src.find("\n}", m.end())
-        if end != -1 and "ctest_trace_begin" in src[m.end() : end]:
-            found.add(m.group(1))
+        if end != -1:
+            bodies[m.group(1)] = src[m.end() : end]
+
+    found = {"ctest_trace_begin"}
+    changed = True
+    while changed:
+        changed = False
+        for name, body in bodies.items():
+            if name in found:
+                continue
+            if any(f"{r}(" in body for r in found):
+                found.add(name)
+                changed = True
     return found
 
 

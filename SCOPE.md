@@ -269,6 +269,35 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The untraced tool mis-reported, and a field that measured nothing new
+
+2026-08-26. Two corrections, one to a tool I built two cycles ago and one to a claim I was
+about to commit.
+
+**`just untraced` resolved helper chains one level deep, not to a fixed point.**
+`suite_hmac.c` records through `hmac_record` -> `hmac_record_hdr` -> `ctest_trace_begin`, so
+a test that *does* record was listed as recording nothing — and I had traced it myself the
+day before. That is the same mistake the tool exists to catch, made by the tool, and it is
+the second time: the first version looked only for a literal `ctest_trace_begin` and missed
+single-level helpers. Now iterated to a fixed point. 128/145, not 127.
+
+**`security` records now carry `delivered_body`, and it moved nothing.**
+`test_the_checksum_is_stripped_before_delivery` asserts both the length *and* the content of
+what the application reads, and recorded neither — the other seventeen records carried
+`delivered_bytes` alone. Adding the content is right in principle: it is what the C asserts,
+and the record should carry the same assertion the oracle makes.
+
+But the reach figure is **102 of 130 before and after**. It moves no mutation the existing
+fields did not already move, and I nearly justified it with a claim that is simply false
+here: that the length cannot separate a trailer stripped from the end from one stripped off
+the front. Both stacks truncate by length from the end — `csp_crc32_verify` does
+`packet->length -= 4`, and the port takes only `stripped.len()` from `security::check` and
+shortens in place, never using *which* bytes came back. I proved it by making `crc32::verify`
+return a correctly-verified but shifted slice: the CRC-only records stayed green.
+
+Kept, because it pins what the application reads and costs nothing. Recorded here with the
+measurement that it added no detection power, rather than the argument I first wrote for it.
+
 ### A flag checked as a field, and a counter reset nothing reads
 
 2026-08-26, both from `just untraced` on `suite_rdp.c`.
