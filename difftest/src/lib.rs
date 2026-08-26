@@ -104,6 +104,7 @@ unsafe extern "C" {
     fn shim_node_serve(port: u8) -> c_int;
     fn shim_node_send_on(port: u8, body: *const u8, len: c_int) -> c_int;
     fn shim_node_release(port: u8);
+    fn shim_node_set_dedup(mode: c_int);
     fn shim_node_clear_tx();
     fn shim_node_tx_count() -> c_int;
     fn shim_node_tx_get(i: c_int, out: *mut u8) -> c_int;
@@ -265,6 +266,15 @@ pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Set the C node's deduplication mode (`csp_conf.dedup`).
+///
+/// 0 off, 1 forwarded only, 2 incoming only, 3 both — the `csp_dedup_types` enum. Both
+/// stacks default to off, so a differential test has to switch it on to compare anything.
+pub fn c_node_set_dedup(mode: i32) {
+    // SAFETY: writes one `uint8_t` in `csp_conf`, read per packet. Callers hold `LOCK`.
+    unsafe { shim_node_set_dedup(mode) }
 }
 
 /// Close a connection the C node is holding, which resets the peer.

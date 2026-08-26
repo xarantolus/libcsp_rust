@@ -599,6 +599,13 @@ int shim_node_serve(uint8_t port) {
 	return 1;
 }
 
+/*
+ * Set `csp_conf.dedup`, which decides *which* traffic the C deduplicates: off, forwarded
+ * only, incoming only, or both (`csp_route.c:238`). Both stacks default to off, so the
+ * interesting comparison only exists once it is switched on.
+ */
+void shim_node_set_dedup(int mode) { csp_conf.dedup = (uint8_t)mode; }
+
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 
