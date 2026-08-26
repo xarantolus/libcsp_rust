@@ -2,7 +2,7 @@
 {"suite":"rdp","case":"a_syn_is_answered_with_syn_ack","verdict":"must_match","input":{"syn_seq":1000,"clock_ms":100000},"observed":{"frames":1,"flags":12,"seq_is_own_iss":1,"ack":1000,"payload_len":0}}
 {"suite":"rdp","case":"the_handshakes_final_ack_is_not_itself_answered","verdict":"must_match","input":{"syn_seq":1000,"clock_ms":100000},"observed":{"frames_after_final_ack":0}}
 {"suite":"rdp","case":"data_reaches_the_application_without_the_rdp_trailer","verdict":"must_match","input":{"payload_bytes_sent":5,"clock_ms":100000},"observed":{"delivered_len":5,"delivered":"68656c6c6f"}}
-{"suite":"rdp","case":"without_delayed_acks_every_packet_is_acknowledged","verdict":"must_match","input":{"delayed_acks":0,"ack_delay_count":2,"packets":3},"observed":{"acks":3}}
+{"suite":"rdp","case":"without_delayed_acks_every_packet_is_acknowledged","verdict":"must_match","input":{"delayed_acks":0,"ack_delay_count":2,"packets":3},"observed":{"acks":3,"acked":[1001,1002,1003]}}
 {"suite":"rdp","case":"the_delay_count_fires_one_packet_after_it","verdict":"must_match","input":{"delayed_acks":1,"ack_delay_count":2},"observed":{"acks_after_n_packets":[0,0,1,1,1]}}
 {"suite":"rdp","case":"an_ack_is_sent_even_with_nothing_to_acknowledge","verdict":"diverges","input":{"delayed_acks":0,"packets_since_last_ack":0},"observed":{"acks":1}}
 {"suite":"rdp","case":"acks_stop_when_the_application_is_not_reading","verdict":"must_match","input":{"delivered":12,"rxqueue_len":16,"buffer_count":15,"window_size":4},"observed":{"acks":12,"last_acked_packet":12}}

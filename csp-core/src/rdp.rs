@@ -745,7 +745,17 @@ impl Connection {
                     self.opts = opts;
                     self.rcv_cur = h.seq_nr;
                     self.rcv_irs = h.seq_nr;
-                    self.rcv_lsa = h.seq_nr.wrapping_sub(1);
+                    // `rcv_lsa = seq_nr`, not `seq_nr - 1`: nothing is outstanding yet, so
+                    // the handshake itself must not leave an acknowledgement owing.
+                    //
+                    // `csp_rdp.c:556` sets all three equal on **this** path and only uses
+                    // `seq_nr - 1` on the *client* path at line 601, where acking at once
+                    // is the point. The client-side assignment had been copied here, so
+                    // every incoming handshake left `rcv_cur != rcv_lsa` and the next
+                    // `poll_ack` produced a gratuitous frame. Invisible until the router
+                    // started calling `poll_ack` at all -- 49 unit tests never polled one
+                    // after a handshake.
+                    self.rcv_lsa = h.seq_nr;
                     self.state = State::SynRcvd;
                     return Action::SendControl(Header {
                         flags: SYN | ACK,
