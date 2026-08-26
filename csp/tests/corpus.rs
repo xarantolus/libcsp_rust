@@ -813,6 +813,136 @@ fn replay_conn_pressure(input: &ConnInput) -> (u32, i64) {
 /// left by a wire. The placement is the behaviour — after deduplication so a suppressed
 /// duplicate is not reported, and before the local/forward branch so traffic passing
 /// *through* the node is tapped too.
+/// What the promiscuous tap hands the application, and who owns it afterwards.
+///
+/// Eight `ck_assert`s in the C and, until now, no record: the port was never compared on
+/// any of it. Ownership is a leak on one side and a double free on the other, and neither
+/// shows up in the `tapped`/`delivered`/`forwarded` counts the other promisc records carry.
+/// Two packets through the tap, both read back exactly once.
+///
+/// A `read` that hands the packet over but leaves its slot occupied passes the
+/// single-packet case: the queue count says empty, so the stale entry is never reached. It
+/// only shows on the second round, when the count rises again and the stale slot is handed
+/// out ahead of the new one -- the application given a buffer already released.
+fn replay_promisc_two() -> serde_json::Value {
+    const LOCAL: u16 = 10;
+
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+    let pool = P::new();
+    let mut r = R::new(LOCAL, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    r.set_promisc(true);
+    let mut ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL, 12, true).unwrap();
+        l
+    };
+
+    let before = pool.available();
+    for tag in [0xA1u8, 0xB2] {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 11,
+            dst: LOCAL,
+            dport: TEST_PORT,
+            sport: 40,
+        });
+        p.set_payload(&[tag, 0, 0, 0]).unwrap();
+        r.receive(p, 0);
+        if let Routed::Delivered { conn, .. } = r.work(&pool, &mut ifaces, 0) {
+            if let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
+                drop(pool.from_index(slot));
+            }
+        }
+    }
+
+    let mut tags = Vec::new();
+    while let Some(p) = r.promisc_read(&pool) {
+        tags.push(p.with_payload(|d| d[0]));
+        drop(p);
+        if tags.len() > 4 {
+            break; // a read that never empties would otherwise spin
+        }
+    }
+    let third_read_empty = u8::from(r.promisc_read(&pool).is_none());
+
+    serde_json::json!({
+        "first_tag": tags.first().copied().unwrap_or(0),
+        "second_tag": tags.get(1).copied().unwrap_or(0),
+        "tags_differ": u8::from(tags.len() == 2 && tags[0] != tags[1]),
+        "third_read_empty": third_read_empty,
+        "buffers_lost": before as i64 - pool.available() as i64,
+    })
+}
+
+fn replay_promisc_ownership() -> serde_json::Value {
+    const LOCAL: u16 = 10;
+
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+    let pool = P::new();
+    let mut r = R::new(LOCAL, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    r.set_promisc(true);
+    let mut ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL, 12, true).unwrap();
+        l
+    };
+
+    let baseline = pool.available();
+    let body = b"tapped";
+    let mut p = pool.acquire(0).unwrap();
+    p.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: 11,
+        dst: LOCAL,
+        dport: TEST_PORT,
+        sport: 40,
+    });
+    p.set_payload(body).unwrap();
+    r.receive(p, 0);
+
+    // Deliver it; the tap takes a copy on the way past.
+    let delivered_slot = match r.work(&pool, &mut ifaces, 0) {
+        Routed::Delivered { conn, .. } => r.conns.dequeue_rx(conn).ok().flatten(),
+        _ => None,
+    };
+
+    // With both the delivered packet and the tap's copy outstanding, two buffers are gone
+    // rather than one -- the tap cloned instead of aliasing.
+    let held = pool.available();
+    let tap_consumed_a_buffer = u8::from(held <= baseline - 2);
+
+    let tapped = r.promisc_read(&pool).expect("the tap holds a packet");
+    let tapped_payload_matches = u8::from(tapped.with_payload(|d| d == body));
+    let tapped_idx = tapped.into_index();
+    // Distinct from the delivered packet: two live slots, not one aliased twice.
+    let tapped_is_a_distinct_packet = u8::from(delivered_slot.is_some_and(|s| s != tapped_idx));
+
+    drop(pool.from_index(tapped_idx));
+    // Releasing what `promisc_read` handed back returned the buffer, so `read` gave
+    // ownership away rather than lending it.
+    let buffers_back_after_free = u8::from(pool.available() == held + 1);
+
+    let second_read_empty = u8::from(r.promisc_read(&pool).is_none());
+    if let Some(s) = delivered_slot {
+        drop(pool.from_index(s));
+    }
+
+    serde_json::json!({
+        "tap_consumed_a_buffer": tap_consumed_a_buffer,
+        "tapped_is_a_distinct_packet": tapped_is_a_distinct_packet,
+        "tapped_payload_matches": tapped_payload_matches,
+        "buffers_back_after_free": buffers_back_after_free,
+        "second_read_empty": second_read_empty,
+    })
+}
+
 fn replay_promisc(case: &str) -> serde_json::Value {
     use csp::dedup::DedupMode;
     type P = Pool<16, 264>;
@@ -2073,6 +2203,12 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         }
         "rtable" => Some((replay_rtable(&rec.case), rec.case.clone())),
         "route" => Some((replay_route(&rec.case), rec.case.clone())),
+        "promisc" if rec.case == "two_tapped_packets_come_back_once_each" => {
+            Some((replay_promisc_two(), "two through the tap".to_string()))
+        }
+        "promisc" if rec.case == "read_transfers_ownership" => {
+            Some((replay_promisc_ownership(), "tap ownership".to_string()))
+        }
         "promisc" => Some((replay_promisc(&rec.case), rec.case.clone())),
         "security" => {
             let input: SecurityInput = serde_json::from_value(rec.input.clone()).unwrap();

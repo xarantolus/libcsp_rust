@@ -176,6 +176,17 @@ MUTANTS = [
   ("rtable: a short entry is skipped, not a full stop", "csp-core/src/rtable.rs",
    "        if entry.len() <= 1 {\n            continue;\n        }",
    "        if entry.len() <= 1 {\n            break;\n        }"),
+  # The tap's ownership rules: a leak on one side, a buffer handed out twice on the other.
+  # Eight ck_asserts in the C and no record until now.
+  ("promisc: read clears the slot it hands over", "csp/src/router.rs",
+   "            if let Some(idx) = slot.take() {\n                self.promisc_len -= 1;",
+   "            if let Some(idx) = *slot {\n                self.promisc_len -= 1;"),
+  ("promisc: the tap keeps every packet, not the newest", "csp/src/router.rs",
+   "                    for slot in self.promisc.iter_mut() {\n                        if slot.is_none() {",
+   "                    for slot in self.promisc.iter_mut() {\n                        if true {"),
+  ("promisc: read hands something back", "csp/src/router.rs",
+   "        if self.promisc_len == 0 {\n            return None;\n        }",
+   "        if true {\n            return None;\n        }"),
   ("rdp: a peer's proposed window is clamped", "csp-core/src/rdp.rs",
    "    pub fn decode_clamped(data: &[u8], max_window: u32) -> Result<SynOptions> {",
    "    pub fn decode_clamped(data: &[u8], max_window: u32) -> Result<SynOptions> {\n        let max_window = u32::MAX;"),

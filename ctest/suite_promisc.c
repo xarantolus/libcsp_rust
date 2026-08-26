@@ -1,6 +1,10 @@
 #include <check.h>
+#include <stdbool.h>
 #include <string.h>
 #include <endian.h>
+
+#include "clock.h"
+#include "trace.h"
 
 #include "csp/csp.h"
 #include "csp/csp_id.h"
@@ -104,6 +108,64 @@ END_TEST
 
 /* Every packet handed out by csp_promisc_read() is owned by the caller, and
    returning it to the pool must fully restore it. */
+/* Two packets through the tap, both read back.
+ *
+ * A `read` that hands the packet over but leaves its slot occupied looks correct for a
+ * single packet -- the queue count says empty, so the stale entry is never reached. It
+ * shows up on the second round, when the count rises again and the stale slot is handed
+ * out ahead of the new one: the application is given a buffer that was already released.
+ * The single-packet case cannot see that, which is why this one exists.
+ */
+START_TEST(test_two_tapped_packets_come_back_once_each)
+{
+	csp_init();
+	ck_assert_int_eq(csp_promisc_enable(0), CSP_ERR_NONE);
+	const int before = csp_buffer_remaining();
+
+	csp_packet_t * a = make_packet();
+	csp_packet_t * b = make_packet();
+	a->data[0] = 0xA1;
+	b->data[0] = 0xB2;
+	csp_promisc_add(a);
+	csp_promisc_add(b);
+
+	csp_packet_t * first = csp_promisc_read(0);
+	ck_assert_ptr_nonnull(first);
+	const uint8_t first_tag = first->data[0];
+	csp_buffer_free(first);
+
+	csp_packet_t * second = csp_promisc_read(0);
+	ck_assert_ptr_nonnull(second);
+	const uint8_t second_tag = second->data[0];
+	ck_assert_ptr_ne(second, first);
+	csp_buffer_free(second);
+
+	const bool third_empty = (csp_promisc_read(0) == NULL);
+	ck_assert(third_empty);
+
+	csp_buffer_free(a);
+	csp_buffer_free(b);
+	csp_promisc_disable();
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("promisc", "two_tapped_packets_come_back_once_each", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packets_tapped", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		/* Both tags seen, each once: the two reads returned different packets. */
+		ctest_trace_int("first_tag", first_tag);
+		ctest_trace_int("second_tag", second_tag);
+		ctest_trace_int("tags_differ", first_tag != second_tag ? 1 : 0);
+		ctest_trace_int("third_read_empty", third_empty ? 1 : 0);
+		ctest_trace_int("buffers_lost", before - csp_buffer_remaining());
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_promisc_read_transfers_ownership)
 {
 	csp_init();
@@ -124,10 +186,32 @@ START_TEST(test_promisc_read_transfers_ownership)
 	csp_buffer_free(tapped);
 	ck_assert_int_eq(csp_buffer_remaining(), free_with_source_held);
 
-	ck_assert_ptr_null(csp_promisc_read(0));
+	const bool second_read_empty = (csp_promisc_read(0) == NULL);
+	ck_assert(second_read_empty);
 
 	csp_buffer_free(source);
 	csp_promisc_disable();
+
+	if (ctest_tracing()) {
+		/* Eight assertions here and, until now, no record: the port was never compared on
+		   any of it. The tap's ownership rules are a leak on one side and a double free on
+		   the other, and neither shows up in the `tapped`/`delivered`/`forwarded` counts
+		   the other promisc records carry. */
+		ctest_trace_begin("promisc", "read_transfers_ownership", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packets_tapped", 1);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		/* The tap took a buffer of its own: it clones rather than aliasing the source. */
+		ctest_trace_int("tap_consumed_a_buffer", 1);
+		ctest_trace_int("tapped_is_a_distinct_packet", 1);
+		ctest_trace_int("tapped_payload_matches", 1);
+		/* Freeing what `read` handed back returned it, so `read` gave ownership away. */
+		ctest_trace_int("buffers_back_after_free", 1);
+		ctest_trace_int("second_read_empty", second_read_empty ? 1 : 0);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 }
 END_TEST
 
@@ -185,8 +269,6 @@ END_TEST
  *     the node where it is most useful, a router.
  */
 
-#include "clock.h"
-#include "trace.h"
 #include "csp_qfifo.h"
 
 #define TAP_LOCAL 10
@@ -378,6 +460,7 @@ Suite * promisc_suite(void)
 	tcase_add_test(tc, test_promisc_queue_size_argument_is_ignored);
 	tcase_add_test(tc, test_promisc_disabled_consumes_nothing);
 	tcase_add_test(tc, test_promisc_read_transfers_ownership);
+	tcase_add_test(tc, test_two_tapped_packets_come_back_once_each);
 	tcase_add_test(tc, test_csp1_id_layout_matches_the_binding);
 	suite_add_tcase(s, tc);
 
