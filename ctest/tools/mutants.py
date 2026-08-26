@@ -51,6 +51,15 @@ MUTANTS = [
    "        outstanding as u32 >= self.opts.ack_delay_count"),
   ("sfp: shape classification", "csp/src/delivery.rs",
    "        if first.id().is_fragment() {", "        if true {"),
+  # The port's whole disagreement with the C on a truncated transfer. Making it agree has
+  # to break the `diverges` record, or that record is decoration.
+  ("sfp: truncation is not success", "csp/src/delivery.rs",
+   "                None => return Err(Error::Truncated),",
+   "                None => return Ok(None),"),
+  ("sfp: cross-fragment total", "csp/src/delivery.rs",
+   "            if frag.total != total {", "            if false {"),
+  ("sfp: fragment order", "csp/src/delivery.rs",
+   "            if frag.offset != expected {", "            if false {"),
   ("conn: table exhaustion frees", "csp/src/router.rs",
    "                        return Routed::Dropped(DropReason::ConnectionTableFull);",
    "                        core::mem::forget(packet);\n                        return Routed::Dropped(DropReason::ConnectionTableFull);"),

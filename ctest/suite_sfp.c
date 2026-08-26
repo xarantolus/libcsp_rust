@@ -356,6 +356,148 @@ START_TEST(test_a_zero_total_transfer_is_refused)
 }
 END_TEST
 
+/* --- more than one fragment ---
+ *
+ * Every test above hands `csp_sfp_recv_fp` a single packet, so the do/while that actually
+ * reassembles a transfer -- the `csp_read` at the bottom of the loop, the running
+ * `data_offset`, the cross-fragment total check -- has never been executed against the C.
+ * That is the whole of SFP; one fragment is the case where reassembly does nothing.
+ */
+
+/* Put a follow-on fragment where the reassembly loop's `csp_read` will find it. */
+static void enqueue_fragment(csp_conn_t * conn, const char * body, size_t len,
+							 uint32_t offset, uint32_t totalsize) {
+	csp_packet_t * p = make_packet(true, body, len, offset, totalsize);
+	ck_assert_int_eq(csp_conn_enqueue_packet(conn, p), CSP_ERR_NONE);
+}
+
+/* The fragments an input carries, traced identically by all three cases below. */
+static void trace_fragments(const char * const * bodies, const uint32_t * offsets,
+							const uint32_t * totals, size_t n) {
+	ctest_trace_arr_begin("fragments");
+	for (size_t i = 0; i < n; i++) {
+		ctest_trace_obj_begin(NULL);
+		ctest_trace_hex("body", (const uint8_t *)bodies[i], strlen(bodies[i]));
+		ctest_trace_int("offset", (int64_t)offsets[i]);
+		ctest_trace_int("totalsize", (int64_t)totals[i]);
+		ctest_trace_obj_end();
+	}
+	ctest_trace_arr_end();
+}
+
+START_TEST(test_a_two_fragment_transfer_is_reassembled)
+{
+	setup_stack();
+	const int before = csp_buffer_remaining();
+	csp_conn_t * conn = open_conn();
+
+	enqueue_fragment(conn, "world", 5, 5, 10);
+	csp_packet_t * first = make_packet(true, "hello", 5, 0, 10);
+	int ret = csp_sfp_recv_fp(conn, &receiver, 0, first);
+
+	ck_assert_int_eq(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(got_len, 10);
+	ck_assert_mem_eq(got, "helloworld", 10);
+	ck_assert_uint_eq(writes, 2);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	if (ctest_tracing()) {
+		static const char * bodies[] = { "hello", "world" };
+		static const uint32_t offsets[] = { 0, 5 };
+		static const uint32_t totals[] = { 10, 10 };
+		ctest_trace_begin("sfp", "a_two_fragment_transfer_is_reassembled", "must_match");
+		ctest_trace_obj_begin("input");
+		trace_fragments(bodies, offsets, totals, 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("ret", ret);
+		ctest_trace_int("writes", (int64_t)writes);
+		ctest_trace_hex("assembled", got, got_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* A transfer whose later fragments never arrive.
+ *
+ * `csp_sfp_recv_fp` seeds `error = CSP_ERR_TIMEDOUT`, but every accepted fragment
+ * overwrites it with the return of `user->write` -- and a successful write returns
+ * `CSP_ERR_NONE`. When `csp_read` then comes back NULL the do/while ends and the function
+ * falls into `error:`, returning whatever `error` last held. Whether that means half a
+ * message is reported like a whole one is what this measures.
+ */
+START_TEST(test_a_transfer_that_stops_early_still_reports_its_last_write)
+{
+	setup_stack();
+	const int before = csp_buffer_remaining();
+	csp_conn_t * conn = open_conn();
+
+	/* Ten bytes promised, five delivered, nothing queued behind it. */
+	csp_packet_t * first = make_packet(true, "hello", 5, 0, 10);
+	int ret = csp_sfp_recv_fp(conn, &receiver, 0, first);
+
+	ck_assert_uint_eq(got_len, 5);
+	ck_assert_uint_eq(writes, 1);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	if (ctest_tracing()) {
+		static const char * bodies[] = { "hello" };
+		static const uint32_t offsets[] = { 0 };
+		static const uint32_t totals[] = { 10 };
+		ctest_trace_begin("sfp", "a_transfer_that_stops_early_still_reports_its_last_write",
+						  "diverges");
+		ctest_trace_obj_begin("input");
+		trace_fragments(bodies, offsets, totals, 1);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("ret", ret);
+		ctest_trace_int("writes", (int64_t)writes);
+		ctest_trace_hex("assembled", got, got_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* The total is re-read from every fragment and must not change mid-transfer. Only
+   reachable with two fragments, so nothing has exercised it. */
+START_TEST(test_a_second_fragment_that_changes_the_total_is_refused)
+{
+	setup_stack();
+	const int before = csp_buffer_remaining();
+	csp_conn_t * conn = open_conn();
+
+	enqueue_fragment(conn, "world", 5, 5, 99);
+	csp_packet_t * first = make_packet(true, "hello", 5, 0, 10);
+	int ret = csp_sfp_recv_fp(conn, &receiver, 0, first);
+
+	ck_assert_int_eq(ret, CSP_ERR_SFP);
+	/* The first fragment was already handed to the application before the second one was
+	   seen, so a refused transfer still leaves a partial message with the caller. */
+	ck_assert_uint_eq(got_len, 5);
+	ck_assert_uint_eq(writes, 1);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	if (ctest_tracing()) {
+		static const char * bodies[] = { "hello", "world" };
+		static const uint32_t offsets[] = { 0, 5 };
+		static const uint32_t totals[] = { 10, 99 };
+		ctest_trace_begin("sfp", "a_second_fragment_that_changes_the_total_is_refused",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		trace_fragments(bodies, offsets, totals, 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("ret", ret);
+		ctest_trace_int("writes", (int64_t)writes);
+		ctest_trace_hex("assembled", got, got_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* The largest payload a fragment may carry, per option set.
  *
  * This is what decides how a message is cut up, so an MTU one byte too large produces
@@ -408,6 +550,9 @@ Suite * sfp_suite(void)
 	tcase_add_test(tc, test_a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape);
 	tcase_add_test(tc, test_a_fragment_at_the_wrong_offset_is_refused);
 	tcase_add_test(tc, test_a_zero_total_transfer_is_refused);
+	tcase_add_test(tc, test_a_two_fragment_transfer_is_reassembled);
+	tcase_add_test(tc, test_a_transfer_that_stops_early_still_reports_its_last_write);
+	tcase_add_test(tc, test_a_second_fragment_that_changes_the_total_is_refused);
 	tcase_add_test(tc, test_the_fragment_mtu_for_each_option_set);
 	suite_add_tcase(s, tc);
 

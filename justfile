@@ -132,6 +132,9 @@ test:
 # The full pre-commit gate.
 check: canonical
     python3 ctest/tools/api_coverage.py
+    # Not the untraced *count* -- that is a lead, not a defect. This fails only when an
+    # untraced test has no written basis in SCOPE.md, or a basis names a test that records.
+    @python3 ctest/tools/untraced.py > /dev/null || python3 ctest/tools/untraced.py
     cargo test --workspace --all-features
     cargo clippy --workspace --all-features --tests -- -D warnings
     cargo fmt --all --check
