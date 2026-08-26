@@ -372,6 +372,36 @@ static void tap_record(const char * name, unsigned int tapped, unsigned int deli
 	ctest_trace_end();
 }
 
+/* The third half of the placement, and the one no test pinned: the tap is at
+   `csp_route.c:252`, the endpoint's security check at :289. A packet the policy refuses is
+   therefore tapped and *then* dropped. That is what makes the tap usable for diagnosing a
+   misconfigured peer -- an operator can see the traffic that is being rejected. A tap moved
+   below the check would show nothing at all in exactly that case, while every existing
+   promisc test kept passing, since all of them use a socket with no policy. */
+START_TEST(test_the_tap_sees_a_packet_the_security_check_rejects)
+{
+	tap_setup(true, CSP_DEDUP_OFF);
+	/* Demand a CRC32 the packet does not carry. `csp_bind` stores the socket by pointer,
+	   so tightening the policy after binding is what a reconfigured node looks like. */
+	tap_sock.opts = CSP_SO_CONN_LESS | CSP_SO_CRC32REQ;
+	const int before = csp_buffer_remaining();
+
+	tap_route(TAP_LOCAL);
+
+	const unsigned int delivered = socket_drain();
+	const unsigned int tapped = tap_drain();
+
+	/* Refused... */
+	ck_assert_uint_eq(delivered, 0);
+	/* ...and seen anyway. */
+	ck_assert_uint_eq(tapped, 1);
+	ck_assert_uint_eq(tap_forwarded, 0);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+	tap_record("the_tap_sees_a_packet_the_security_check_rejects", tapped, delivered,
+			   tap_forwarded, before);
+}
+END_TEST
+
 START_TEST(test_the_tap_sees_a_locally_delivered_packet)
 {
 	tap_setup(true, CSP_DEDUP_OFF);
@@ -466,6 +496,7 @@ Suite * promisc_suite(void)
 
 	TCase * tc_route = tcase_create("routing");
 	tcase_add_test(tc_route, test_the_tap_sees_a_locally_delivered_packet);
+	tcase_add_test(tc_route, test_the_tap_sees_a_packet_the_security_check_rejects);
 	tcase_add_test(tc_route, test_the_tap_sees_a_forwarded_packet);
 	tcase_add_test(tc_route, test_the_tap_does_not_see_a_suppressed_duplicate);
 	tcase_add_test(tc_route, test_delivery_is_the_same_with_the_tap_off);
