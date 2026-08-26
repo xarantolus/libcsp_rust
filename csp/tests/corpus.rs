@@ -114,6 +114,13 @@ struct SecurityObserved {
     /// `delivered: 1` is the same whether the trailer was verified and stripped or the
     /// policy never ran at all.
     delivered_bytes: u32,
+    /// And which bytes -- what the application reads, which is what the C's
+    /// `test_the_checksum_is_stripped_before_delivery` asserted and never recorded.
+    ///
+    /// Not an independent check on *where* the trailer was removed: both stacks truncate by
+    /// length from the end (`packet->length -= 4`; the port takes `stripped.len()` and
+    /// shortens in place), so here the content follows from the length.
+    delivered_body: String,
     rx_error: u32,
     autherr: u32,
 }
@@ -196,26 +203,27 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     p.set_payload(&body[..n]).unwrap();
 
     r.receive(p, 0);
-    let (delivered, delivered_bytes) = match r.work(&pool, &mut ifaces, 0) {
+    let (delivered, delivered_bytes, delivered_body) = match r.work(&pool, &mut ifaces, 0) {
         Routed::Delivered { conn, .. } => {
             // Take the packet off the connection the way an application would, and
             // measure what it holds. The C reports `p->length` after csp_recvfrom.
-            let len = match r.conns.dequeue_rx(conn) {
+            let got = match r.conns.dequeue_rx(conn) {
                 Ok(Some(slot)) => pool
                     .from_index(slot)
-                    .map(|p| p.with_payload(|d| d.len() as u32))
-                    .unwrap_or(0),
-                _ => 0,
+                    .map(|p| p.with_payload(<[u8]>::to_vec))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
             };
-            (1, len)
+            (1, got.len() as u32, tohex(&got))
         }
-        Routed::Dropped(DropReason::Refused(_)) => (0, 0),
+        Routed::Dropped(DropReason::Refused(_)) => (0, 0, String::new()),
         other => panic!("neither delivered nor refused: {other:?}"),
     };
 
     SecurityObserved {
         delivered,
         delivered_bytes,
+        delivered_body,
         // The **ingress interface's** counters, which is what the C records
         // (`csp_route_security_check` takes the iface and charges it directly). This used
         // to read the router's node-wide totals and say the two were the same event. They
@@ -2965,6 +2973,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
 struct SecurityJson {
     delivered: u32,
     delivered_bytes: u32,
+    delivered_body: String,
     rx_error: u32,
     autherr: u32,
 }
@@ -2973,6 +2982,7 @@ impl From<SecurityObserved> for SecurityJson {
         SecurityJson {
             delivered: o.delivered,
             delivered_bytes: o.delivered_bytes,
+            delivered_body: o.delivered_body,
             rx_error: o.rx_error,
             autherr: o.autherr,
         }

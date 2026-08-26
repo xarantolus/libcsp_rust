@@ -50,6 +50,15 @@ struct outcome {
 	   verified packet from an unchecked one: both deliver, and only the *length* shows
 	   whether the trailer was verified and removed. */
 	unsigned int delivered_bytes;
+	/* And *which* bytes. `test_the_checksum_is_stripped_before_delivery` asserted the
+	   content and recorded nothing, so the oracle had this answer and threw it away.
+	   Measured caveat: both stacks truncate by *length* from the end -- the C does
+	   `packet->length -= 4`, the port takes only `stripped.len()` and shortens in place --
+	   so for these scenarios the content follows from the length and this field does not
+	   separate the two. It pins what the application reads, which is worth having and
+	   costs nothing; it is not a second independent check. */
+	uint8_t body[32];
+	unsigned int body_len;
 	uint32_t rx_error;
 	uint32_t autherr;
 };
@@ -128,10 +137,16 @@ static struct outcome route_packet(uint8_t flags, int trailer, bool corrupt) {
 	csp_qfifo_write(packet, &ingress_if, NULL);
 	csp_route_work();
 
-	struct outcome out = {0, 0, ingress_if.rx_error, ingress_if.autherr};
+	struct outcome out = {0};
+	out.rx_error = ingress_if.rx_error;
+	out.autherr = ingress_if.autherr;
 	csp_packet_t * p;
 	while ((p = csp_recvfrom(&sock, 0)) != NULL) {
 		out.delivered_bytes += p->length;
+		if (out.delivered == 0) {
+			out.body_len = p->length > sizeof(out.body) ? sizeof(out.body) : p->length;
+			memcpy(out.body, p->data, out.body_len);
+		}
 		csp_buffer_free(p);
 		out.delivered++;
 	}
@@ -155,6 +170,7 @@ static void record(const char * name, const char * verdict, struct outcome o) {
 	ctest_trace_obj_begin("observed");
 	ctest_trace_int("delivered", (int64_t)o.delivered);
 	ctest_trace_int("delivered_bytes", (int64_t)o.delivered_bytes);
+	ctest_trace_hex("delivered_body", o.body, o.body_len);
 	ctest_trace_int("rx_error", (int64_t)o.rx_error);
 	ctest_trace_int("autherr", (int64_t)o.autherr);
 	ctest_trace_obj_end();
