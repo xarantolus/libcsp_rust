@@ -58,6 +58,7 @@ pub mod iflist;
 pub mod node;
 pub mod pool;
 pub mod qfifo;
+pub mod route_policy;
 pub mod router;
 pub mod service;
 

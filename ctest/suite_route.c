@@ -599,6 +599,45 @@ START_TEST(test_a_route_without_a_next_hop_sends_direct)
 }
 END_TEST
 
+/* Split horizon is a *subnet* test, not an interface-identity test.
+ *
+ * `is_same_subnet` (csp_io.c:93) is two clauses: the candidate is the interface it arrived
+ * on, **or** the candidate's address falls inside that interface's subnet. Two links on the
+ * same subnet are two ways onto the same wire, so relaying between them is the loop split
+ * horizon exists to stop -- and only the second clause catches it.
+ *
+ * LINK_A is 8/12 and LINK_B is 9/12, so both own 8..11 and each address is inside the
+ * other's subnet. A packet arriving on LINK_A for 10 matches both, and both are vetoed:
+ * nothing leaves. An implementation with only the identity clause relays it out LINK_B.
+ */
+START_TEST(test_split_horizon_vetoes_a_second_link_on_the_same_subnet)
+{
+	setup_stack(true);
+	const int before = csp_buffer_remaining();
+
+	/* Arrives on LINK_A, not INGRESS: both owning links are now same-subnet as the
+	   ingress interface. */
+	csp_packet_t * packet = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(packet);
+	packet->id.pri = 2;
+	packet->id.src = PEER_ADDR;
+	packet->id.dst = TARGET;
+	packet->id.dport = TEST_PORT;
+	packet->id.sport = 40;
+	packet->id.flags = 0;
+	memcpy(packet->data, "onward", 6);
+	packet->length = 6;
+	csp_qfifo_write(packet, &link_a, NULL);
+	csp_route_work();
+
+	ck_assert_uint_eq(seen, 0);
+	/* And the packet was released rather than held. */
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+
+	record("split_horizon_vetoes_a_second_link_on_the_same_subnet", before);
+}
+END_TEST
+
 Suite * route_suite(void)
 {
 	Suite * s = suite_create("Route");
@@ -613,6 +652,7 @@ Suite * route_suite(void)
 	tcase_add_test(tc, test_a_table_routed_destination_leaves_unchanged);
 	tcase_add_test(tc, test_a_local_subnet_beats_the_default_interface);
 	tcase_add_test(tc, test_an_application_send_to_a_broadcast_is_rewritten_too);
+	tcase_add_test(tc, test_split_horizon_vetoes_a_second_link_on_the_same_subnet);
 	suite_add_tcase(s, tc);
 
 	TCase * tc_rt = tcase_create("rtable_text");

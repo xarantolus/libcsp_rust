@@ -248,7 +248,11 @@ for d in dests.as_slice() {
 
 `route_from` keeps the single-destination shape for the common case and returns the first.
 
-`resolve` follows `csp_send_direct`'s order: an interface whose **subnet owns** the
+`resolve`, `Router::forward` and the RDP reply path are all one function —
+`route_policy::destinations`. They were three copies, and the duplication cost three
+defects before it was removed; see *One routing policy, not three* in `SCOPE.md`.
+
+It follows `csp_send_direct`'s order: an interface whose **subnet owns** the
 destination, then the routing table, then the defaults. Each stage that matches suppresses
 the ones after it — even when split horizon leaves the match unusable — because the C
 returns as soon as `local_found` or `route_found` is set. Skipping the subnet stage sends
@@ -341,8 +345,8 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **105 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **129 checks**, replayed against the port.
+- **106 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **130 checks**, replayed against the port.
 - **33 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
