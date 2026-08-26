@@ -11,6 +11,8 @@
 {"suite":"rdp","case":"a_stream_fragment_survives_being_carried_over_rdp","verdict":"must_match","input":{"body_bytes":6,"clock_ms":100000},"observed":{"after_rdp_len":14,"sfp_result":0,"reassembled_len":6,"reassembled":"73747265616d"}}
 {"suite":"rdp","case":"a_hostile_syn_cannot_suppress_acknowledgement","verdict":"must_match","input":{"proposed_ack_delay_count":-1,"proposed_window":-1,"packets":12},"observed":{"acks":2,"clamped_window":5,"clamped_ack_delay_count":5}}
 {"suite":"rdp","case":"without_delayed_acks_every_packet_is_acknowledged","verdict":"must_match","input":{"delayed_acks":0,"ack_delay_count":2,"packets":3},"observed":{"acks":3,"acked":[1001,1002,1003]}}
+{"suite":"rdp","case":"an_eak_carries_no_data_to_the_application","verdict":"must_match","observed":{"delivered":0,"delivered_bytes":0,"frames_back":0,"reply_flags":0}}
+{"suite":"rdp","case":"out_of_sequence_data_is_answered_but_not_delivered","verdict":"diverges","observed":{"delivered":0,"delivered_bytes":0,"frames_back":0,"reply_flags":0}}
 {"suite":"rdp","case":"an_in_sequence_rst_is_answered","verdict":"must_match","input":{"rst_in_sequence":1},"observed":{"frames_after_rst":1,"reply_flags":5,"followup_flags":5}}
 {"suite":"rdp","case":"an_out_of_sequence_rst_is_ignored","verdict":"must_match","input":{"rst_in_sequence":0},"observed":{"frames_after_rst":0,"reply_flags":0,"followup_flags":4}}
 {"suite":"rdp","case":"a_proposed_conn_timeout_is_adopted","verdict":"must_match","input":{"conn_timeout":3000,"idled_ms":4000,"delayed_acks":0},"observed":{"answered_after_idle":1}}
