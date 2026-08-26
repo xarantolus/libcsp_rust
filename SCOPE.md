@@ -269,6 +269,33 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### A flag checked as a field, and a counter reset nothing reads
+
+2026-08-26, both from `just untraced` on `suite_rdp.c`.
+
+**`delayed_acks` is a flag, not a count.** `csp_rdp.c` normalises any non-zero proposal to 1.
+`test_rdp_delayed_acks_is_a_flag` asserted `conn->rdp.delayed_acks == 1`, which is how the C
+spells it, and recorded nothing — so what a *peer* sees was never compared.
+`rdp::a_nonzero_delayed_acks_is_on_not_a_count` proposes 2 with a delay count of 2 and
+records the acknowledgement cadence, which must then match the case that proposes 1. Both
+sides give `[0,0,1,1,1]`. The port was already right. Reading the word as `== 1` instead of
+`!= 0` turns delayed acknowledgement off entirely — five acks instead of one over five
+packets, a bandwidth difference the peer sees immediately, and the field assertion alone
+cannot distinguish it.
+
+The replay writes the option block word by word rather than encoding the port's
+`SynOptions`, whose `delayed_acks` is a `bool` — encoding from the struct would drop the very
+value under test.
+
+**A reset that changes nothing observable.** `Connection::step`'s `SynRcvd → Open` arm did
+not clear `retransmits`; `csp_rdp.c` does on that ack, and the port's other two transitions
+into an open state already did. Aligned — but stated plainly: **no record can catch it.**
+`retransmits` is read in exactly one place, the `SynRcvd` arm of `Tick` for the `SYN|ACK`
+repeat, and a connection never returns to `SynRcvd`, so a stale value is never consulted.
+Changed because it is what the C does and what the neighbouring arms do, not because
+anything observed it. If RDP data retransmission is ever driven from `Connection` rather
+than from `TxQueue`'s own counter, it stops being harmless.
+
 ### The wire MAC's coverage was never compared to the C
 
 2026-08-26, found with `just untraced`: `suite_hmac.c` had two tests and no records.
@@ -1040,7 +1067,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**101 of 129**.
+**102 of 130**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
