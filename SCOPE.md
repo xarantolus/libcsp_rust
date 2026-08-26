@@ -498,27 +498,35 @@ alongside the code it was guarding.
 
 ### The seventeen untraced C tests, justified one at a time
 
-2026-08-26. `just untraced` reports 128 of 145 C tests recording something. I had been
+2026-08-26. `just untraced` reports 142 of 159 C tests recording something. I had been
 calling the remainder "legitimate" in the aggregate without checking them individually,
 which is the same shape as the coverage claims this file exists to correct. Each is now
 either covered elsewhere, structurally inapplicable, or named as a real remaining gap.
+
+The table below is **checked**, not merely written: `untraced.py` fails when an untraced
+test has no row, or a row names a test that is no longer untraced, and `just check` runs
+that check. Before it existed, the prose here asserted "each is justified" for several
+cycles with nothing verifying it, and the ratio above went stale as tests were added — a
+justification nobody checks decays into the same hand-wave as no justification at all.
 
 | test | basis |
 |---|---|
 | `buffer::alloc_clean_734` | Structural. `Slot::new()` sets `bytes: [0; SZ]` and `len: 0` on every `acquire`, and `with_payload` slices exactly `PADDING..PADDING + len` — a `Packet` cannot expose a byte past its payload, so issue 734's leak class does not exist to test. Read, not assumed. |
 | `buffer::clone_frame_begin_fixed` | Covered by `promisc::read_transfers_ownership`: `tapped_is_a_distinct_packet` and `buffers_back_after_free` are the clone-independence property, measured through the tap. |
-| `cmp::the_peek_tail_leaks_…_not_cleared` | Registered under `#if !CSP_BUFFER_ZERO_CLEAR`; runs in `just ctest-noclear`, not in the canonical build. Not a canonical gap. |
+| `cmp::the_peek_tail_leaks_the_previous_packet_when_the_pool_is_not_cleared` | Registered under `#if !CSP_BUFFER_ZERO_CLEAR`; runs in `just ctest-noclear`, not in the canonical build. Not a canonical gap. |
 | `promisc::leaves_a_buffer_reserve` | libcsp's tap allocates from the shared pool and must not starve it. The port's tap is a fixed array inside `Router` with `promisc_missed` counting overflow — no shared allocation to starve. |
 | `promisc::queue_size_argument_is_ignored` | `csp_promisc_enable(N)` ignoring `N` is a libcsp quirk. `Router::set_promisc` takes a bool; there is no argument to ignore. |
 | `promisc::disabled_consumes_nothing` | Covered by `promisc::delivery_is_the_same_with_the_tap_off`: `tapped: 0`, `buffers_lost: 0`. |
 | `promisc::csp1_id_layout_matches_the_binding` | Covered byte-for-byte by `vectors/v1.tsv` (270 lines of real wire bytes from the C) and the difftest header codec, which compare the layout rather than a hand-written formula for it. |
 | `queue::queue_free_707` | `csp_queue_*` is an arch shim, out of scope in this file's exclusion table and marked `out-of-scope` in `api_map.tsv`. Sans-io: the caller owns the queues. |
-| `rdp::syn_options_are_bounded_above` / `_below` | Behaviour covered by `a_hostile_syn_cannot_suppress_acknowledgement` (every field at its maximum) and `a_delay_count_beyond_the_window_is_bound_by_it`. The tests themselves read `conn->rdp.*`. |
+| `rdp::syn_options_are_bounded_above` | Behaviour covered by `a_hostile_syn_cannot_suppress_acknowledgement` (every field at its maximum) and `a_delay_count_beyond_the_window_is_bound_by_it`. The test itself reads `conn->rdp.*`. |
+| `rdp::syn_options_are_bounded_below` | Same as the row above, from the other side of the range. |
 | `rdp::syn_keeps_valid_options` | **Partial.** `window_size`, `delayed_acks` and `ack_delay_count` adoption are covered by the two cadence records; `conn_timeout` and `ack_timeout` adoption are not, and no record varies them. The nearest thing is `packet_timeout`, exercised by the retransmission record. |
 | `rdp::isn_does_not_depend_on_history` | The ISN is a deliberate divergence — the port does not reproduce `rand_r` (entry above). `isn_is_a_function_of_the_clock` records the C's side; the port's is different by design. |
 | `rdp::delayed_acks_is_a_flag` | Covered by `a_nonzero_delayed_acks_is_on_not_a_count`, added the same day. |
 | `rdp::retransmit_count_resets_on_ack` | No observable consequence in the port; see the entry above. Aligned with the C anyway, and said there that no record can catch it. |
-| `rdp::queue_flush_all_releases_buffers` / `_receive_buffers` | libcsp's *global* RDP queue (`csp_rdp_queue.c`). The port's `TxQueue` is per connection. Release on close is covered by `conn::a_closed_connection_can_be_used_again` (`buffers_lost: 0`) and the `drain:` mutation family. |
+| `rdp::queue_flush_all_releases_buffers` | libcsp's *global* RDP queue (`csp_rdp_queue.c`). The port's `TxQueue` is per connection. Release on close is covered by `conn::a_closed_connection_can_be_used_again` (`buffers_lost: 0`) and the `drain:` mutation family. |
+| `rdp::queue_flush_all_releases_receive_buffers` | Same as the row above, for the receive side. |
 | `security::the_checksum_is_stripped_before_delivery` | Now redundant: `a_valid_checksum_is_accepted` is the same scenario and carries `delivered_body` since this cycle. |
 
 **One real gap fell out of this**, and it is smaller than the raw count suggested:
@@ -542,7 +550,8 @@ about to commit.
 a test that *does* record was listed as recording nothing — and I had traced it myself the
 day before. That is the same mistake the tool exists to catch, made by the tool, and it is
 the second time: the first version looked only for a literal `ctest_trace_begin` and missed
-single-level helpers. Now iterated to a fixed point. 128/145, not 127.
+single-level helpers. Now iterated to a fixed point: 128/145 rather than 127/145 as the
+suites stood that day. The current ratio is the one `just untraced` prints, not this one.
 
 **`security` records now carry `delivered_body`, and it moved nothing.**
 `test_the_checksum_is_stripped_before_delivery` asserts both the length *and* the content of
@@ -1736,6 +1745,29 @@ whoever maintains the fork can see what was found and decide for themselves.
     UART. Not a defect in the framing, but a deployment default sharp enough that
     `kiss::encode`'s documentation now states it, backed by a differential test against the
     real `csp_kiss_rx`.
+30. **A truncated SFP transfer is reported as a complete one.** `csp_sfp_recv_fp`
+    (`csp_sfp.c:168-265`) seeds `int error = CSP_ERR_TIMEDOUT`, but every accepted fragment
+    overwrites it with the return of `user->write`, and a successful write returns
+    `CSP_ERR_NONE`. The reassembly loop ends when `csp_read` comes back NULL, falls into
+    the `error:` label, and returns whatever `error` last held — so a transfer that stops
+    early returns **0**, the same code as one that finished.
+
+    Measured on 2026-08-26 rather than read. Ten bytes promised, five delivered, nothing
+    behind them: `ret: 0, writes: 1, assembled: "hello"`. The application is told the
+    message arrived while holding half of it. A caller *can* notice — `user->write` is
+    given `totalsz` on every call, so it can sum the sizes it was handed and compare — but
+    it has to know to. The `error = CSP_ERR_TIMEDOUT` seed shows the intent was the
+    opposite.
+
+    Only reachable with more than one fragment, which is why the earlier SFP tests missed
+    it: all seven handed `csp_sfp_recv_fp` a single packet, so the reassembly loop had
+    never run against the C at all.
+
+    The port returns `Error::Truncated` from `Stream::read_chunk` when the source runs dry
+    before `total` bytes, and `is_complete()` stays false. Corpus case:
+    `sfp::a_transfer_that_stops_early_still_reports_its_last_write` — the two agree on
+    `writes` and on the bytes delivered and disagree only on `ret`, which is the point:
+    the same data, one stack calling it a success.
 
 ---
 

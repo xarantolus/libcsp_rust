@@ -794,8 +794,7 @@ struct SfpInput {
     totalsize: u32,
 }
 
-/// A transfer that is over after its first packet — every SFP case in the corpus is a
-/// single frame, so there is never a second one to hand back.
+/// A transfer that is over after its first packet.
 struct NoMore;
 impl<'p> csp::delivery::PacketSource<'p, 8, 264> for NoMore {
     fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::pool::Packet<'p, 8, 264>> {
@@ -873,6 +872,118 @@ fn replay_sfp_in(pool: &Pool<8, 264>, input: &SfpInput) -> serde_json::Value {
             }
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SfpFragment {
+    body: String,
+    offset: u32,
+    totalsize: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SfpMultiInput {
+    fragments: Vec<SfpFragment>,
+}
+
+/// The fragments queued behind the first, handed over one at a time.
+///
+/// This is what the C's `csp_read` at the bottom of the reassembly loop reaches into, so
+/// the port has to be driven the same way — a stream whose source runs dry is the
+/// difference between a complete transfer and a truncated one, and that difference is the
+/// whole of `a_transfer_that_stops_early_still_reports_its_last_write`.
+struct Queued<'a> {
+    pool: &'a csp::pool::Pool<8, 264>,
+    rest: std::collections::VecDeque<Vec<u8>>,
+}
+
+impl<'a> csp::delivery::PacketSource<'a, 8, 264> for Queued<'a> {
+    fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::pool::Packet<'a, 8, 264>> {
+        let payload = self.rest.pop_front()?;
+        let mut p = self.pool.acquire(0)?;
+        p.set_id(sfp_fragment_id());
+        p.set_payload(&payload).ok()?;
+        Some(p)
+    }
+}
+
+fn sfp_fragment_id() -> Id {
+    Id {
+        pri: 2,
+        flags: csp_core::flags::FRAG,
+        src: PEER_ADDR,
+        dst: LOCAL_ADDR,
+        dport: TEST_PORT,
+        sport: 40,
+    }
+}
+
+/// A transfer of more than one fragment, compared the way the C reports one.
+///
+/// The C calls `user->write` per fragment and returns a single code at the end, so this
+/// drives `read_chunk` in a loop rather than `read_to_slice`: `writes` is how many times
+/// the application was handed data and `assembled` is what it ended up holding. An
+/// aggregate reader would report zero bytes for a transfer the C had already delivered
+/// half of, which would make the two disagree about the payload as well as the verdict and
+/// obscure which of the two the divergence is actually about.
+fn replay_sfp_multi(input: &SfpMultiInput) -> serde_json::Value {
+    use csp::delivery::Delivery;
+    use csp::pool::Pool;
+
+    let framed: Vec<Vec<u8>> = input
+        .fragments
+        .iter()
+        .map(|f| {
+            let mut v = unhex(&f.body);
+            v.extend_from_slice(&f.offset.to_be_bytes());
+            v.extend_from_slice(&f.totalsize.to_be_bytes());
+            v
+        })
+        .collect();
+
+    let pool: Pool<8, 264> = Pool::new();
+    let mut first = pool.acquire(0).unwrap();
+    first.set_id(sfp_fragment_id());
+    first.set_payload(&framed[0]).unwrap();
+
+    let mut src = Queued {
+        pool: &pool,
+        rest: framed[1..].iter().cloned().collect(),
+    };
+
+    let mut assembled: Vec<u8> = Vec::new();
+    let mut writes = 0u32;
+    let ret;
+
+    match Delivery::classify(first, &mut src) {
+        Delivery::Datagram(_) => {
+            return serde_json::json!({ "ret": -103, "writes": 0, "assembled": "" });
+        }
+        Delivery::Stream(mut st) => loop {
+            match st.read_chunk(0, |d, off, _| (d.to_vec(), off as usize)) {
+                Ok(Some((chunk, off))) => {
+                    writes += 1;
+                    if assembled.len() < off + chunk.len() {
+                        assembled.resize(off + chunk.len(), 0);
+                    }
+                    assembled[off..off + chunk.len()].copy_from_slice(&chunk);
+                }
+                Ok(None) => {
+                    ret = 0;
+                    break;
+                }
+                Err(_) => {
+                    ret = -103;
+                    break;
+                }
+            }
+        },
+    }
+
+    let hex: String = assembled.iter().map(|b| format!("{b:02x}")).collect();
+    serde_json::json!({ "ret": ret, "writes": writes, "assembled": hex })
 }
 
 // --- conn -----------------------------------------------------------------------------
@@ -3508,6 +3619,14 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             Some((
                 replay_fragment_read_as_a_datagram(&input),
                 "through a Node, read as a datagram".to_string(),
+            ))
+        }
+        // The multi-fragment cases carry a `fragments` array instead of one flat frame.
+        "sfp" if rec.input.get("fragments").is_some() => {
+            let input: SfpMultiInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((
+                replay_sfp_multi(&input),
+                format!("{} fragment(s)", input.fragments.len()),
             ))
         }
         "sfp" => {
