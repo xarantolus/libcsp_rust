@@ -948,16 +948,24 @@ fn replay_promisc_ownership() -> serde_json::Value {
     let held = pool.available();
     let tap_consumed_a_buffer = u8::from(held <= baseline - 2);
 
-    let tapped = r.promisc_read(&pool).expect("the tap holds a packet");
-    let tapped_payload_matches = u8::from(tapped.with_payload(|d| d == body));
-    let tapped_idx = tapped.into_index();
-    // Distinct from the delivered packet: two live slots, not one aliased twice.
-    let tapped_is_a_distinct_packet = u8::from(delivered_slot.is_some_and(|s| s != tapped_idx));
-
-    drop(pool.from_index(tapped_idx));
-    // Releasing what `promisc_read` handed back returned the buffer, so `read` gave
-    // ownership away rather than lending it.
-    let buffers_back_after_free = u8::from(pool.available() == held + 1);
+    // Recorded, not asserted. This used to `expect` the packet, so a tap that captured
+    // nothing panicked instead of diverging -- the run was red either way, but the failure
+    // named no record, and `just mutants` counts divergences, so every mutation that broke
+    // the tap was scored as noticed by nothing.
+    let (tapped_payload_matches, tapped_is_a_distinct_packet, buffers_back_after_free) =
+        match r.promisc_read(&pool) {
+            Some(tapped) => {
+                let matches = u8::from(tapped.with_payload(|d| d == body));
+                let idx = tapped.into_index();
+                // Distinct from the delivered packet: two live slots, not one aliased twice.
+                let distinct = u8::from(delivered_slot.is_some_and(|s| s != idx));
+                drop(pool.from_index(idx));
+                // Releasing what `promisc_read` handed back returned the buffer, so `read`
+                // gave ownership away rather than lending it.
+                (matches, distinct, u8::from(pool.available() == held + 1))
+            }
+            None => (0, 0, 0),
+        };
 
     let second_read_empty = u8::from(r.promisc_read(&pool).is_none());
     if let Some(s) = delivered_slot {
@@ -981,15 +989,23 @@ fn replay_promisc(case: &str) -> serde_json::Value {
     const EGRESS: u16 = 20;
     const ELSEWHERE: u16 = 25;
 
-    let (tap_on, dedup, dsts): (bool, DedupMode, &[u16]) = match case {
-        "the_tap_sees_a_locally_delivered_packet" => (true, DedupMode::Off, &[LOCAL_ADDR]),
-        "the_tap_sees_a_forwarded_packet" => (true, DedupMode::Off, &[ELSEWHERE]),
+    // `opts` is the endpoint's security policy. `csp_route.c` taps at :252 and applies the
+    // policy at :289, so a refused packet is tapped and then dropped.
+    let (tap_on, dedup, dsts, opts): (bool, DedupMode, &[u16], u32) = match case {
+        "the_tap_sees_a_locally_delivered_packet" => (true, DedupMode::Off, &[LOCAL_ADDR], 0),
+        "the_tap_sees_a_forwarded_packet" => (true, DedupMode::Off, &[ELSEWHERE], 0),
         "the_tap_does_not_see_a_suppressed_duplicate" => {
-            (true, DedupMode::All, &[LOCAL_ADDR, LOCAL_ADDR])
+            (true, DedupMode::All, &[LOCAL_ADDR, LOCAL_ADDR], 0)
         }
         "delivery_is_the_same_with_the_tap_off" => {
-            (false, DedupMode::Off, &[LOCAL_ADDR, ELSEWHERE])
+            (false, DedupMode::Off, &[LOCAL_ADDR, ELSEWHERE], 0)
         }
+        "the_tap_sees_a_packet_the_security_check_rejects" => (
+            true,
+            DedupMode::Off,
+            &[LOCAL_ADDR],
+            csp_core::security::opts::CRC32_REQ,
+        ),
         other => panic!("no promisc replay for {other}"),
     };
 
@@ -997,6 +1013,7 @@ fn replay_promisc(case: &str) -> serde_json::Value {
     let mut r = R::new(LOCAL_ADDR, Version::V2);
     r.bind(TEST_PORT).unwrap();
     r.dedup_mode = dedup;
+    r.endpoint_opts = opts;
     r.set_promisc(tap_on);
 
     let mut ifaces = {

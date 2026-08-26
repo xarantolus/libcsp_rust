@@ -269,6 +269,37 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The tap's third placement, and a replay whose panic hid five mutations
+
+2026-08-26.
+
+**Tapped, then refused.** `csp_route_work` calls `csp_promisc_add` at `csp_route.c:252` and
+applies the endpoint's security policy at :289. A packet the policy rejects is therefore
+seen by the tap and *then* dropped — which is what makes a promiscuous tap usable for
+diagnosing a peer that is being refused. The suite's own comment described the placement
+"after dedup" and "before the is-this-for-me branch" and pinned both; the third boundary was
+only ever read, never measured, and every existing promisc test used a socket with no policy,
+so a tap moved below the check would have kept all of them green.
+`promisc::the_tap_sees_a_packet_the_security_check_rejects` measures it on both sides:
+`delivered: 0`, `tapped: 1`. The port already agreed — this pins an ordering, it does not fix
+one. Moving the port's tap below the gate fails that record and only that record.
+
+**A replay that panicked instead of recording.** `replay_promisc_ownership` did
+`promisc_read(...).expect("the tap holds a packet")`. With the tap broken the run was still
+red, so no regression could slip through — but the failure named no record, and `just
+mutants` counts divergences. Two promiscuous mutations had been in the list all along,
+scoring "4 unit test(s) notice" via the fallback while the three records that actually cover
+the tap sat in the never-moved list. Recording `0` instead of panicking moves them to 6
+records each.
+
+I had first read those three as "no mutation targets the tap", by analogy with the
+connection-reuse records the day before. That was wrong: the mutations existed and were
+firing. The lesson is not the same one twice — a record can fail to move because nothing
+tried it, *or* because the replay cannot express the failure.
+
+`delivery_is_the_same_with_the_tap_off` stays unmoved, correctly: it is the tap-off case, so
+no tap mutation can change it by construction.
+
 ### The other shape mismatch, and a stale number under a paragraph promising measurement
 
 2026-08-26. Two checks, one clean and one not.
@@ -832,13 +863,16 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**89 of 117**.
+**92 of 118**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
 list until 2026-08-26, when the first mutation to break `Conn::find` and `Conn::close` was
-added; both failed immediately. Read the list as "no mutation has tried this yet", and check
-before concluding a record is dead. It has, though, found two that genuinely were:
+added; both failed immediately. The three promiscuous records sat there for a different
+reason again — a mutation *did* break them, and the replay answered with a panic instead of
+a divergence, which the counter does not see. Read the list as "no mutation has produced a
+divergence here yet"; that can mean the guard is untested, or that the replay cannot report.
+Check before concluding a record is dead. It has, though, found two that genuinely were:
 
 - **`replay_eth` contained its own copies of two production checks.** It tested
   `!h.is_csp()` and sliced `payload.get(..seg_size)` inside the replay closure, before

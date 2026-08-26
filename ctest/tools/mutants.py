@@ -294,6 +294,14 @@ MUTANTS = [
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
+  # The promiscuous tap. Its three records sat in the "no mutation could move" list purely
+  # because nothing had ever switched the tap off.
+  ("promisc: the tap captures at all", "csp/src/router.rs",
+   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {",
+   "        if false {\n            if self.promisc_len < self.promisc.len() {"),
+  ("promisc: the tap runs before the security check", "csp/src/router.rs",
+   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {",
+   "        if self.promisc_enabled && self.endpoint_opts == 0 {\n            if self.promisc_len < self.promisc.len() {"),
   ("conn: a second packet finds the open connection", "csp/src/conn.rs",
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        for (i, c) in self.conns.iter().enumerate() {",
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
