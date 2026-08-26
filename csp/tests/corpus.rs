@@ -1089,6 +1089,107 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     })
 }
 
+/// The route-table text format, replayed the way the C measures it: load a string, then
+/// ask where a packet for the address goes.
+///
+/// `rtable` was the one module with neither a golden vector nor a corpus record. Its
+/// parser is the only way a route reaches a flying node from the ground.
+fn replay_rtable(case: &str) -> serde_json::Value {
+    use csp_core::rtable;
+
+    // Load a table string into a real table, applying entries as they parse -- the C's
+    // parser calls `csp_rtable_set` per entry with no rollback, so a later failure leaves
+    // the earlier ones installed.
+    fn load(text: &str) -> (i32, rtable::Table<8>) {
+        let mut t = rtable::Table::<8>::new(Version::V2);
+        let host_bits = Version::V2.host_bits() as u16;
+        let mut applied = 0i32;
+        let res = rtable::parse(text, |r| {
+            // The C's parser refuses a netmask wider than the address space *before*
+            // calling set, which would have clamped it. Both checks are its own.
+            if let Some(m) = r.netmask {
+                if m > host_bits {
+                    return Err(csp_core::Error::InvalidRoute {
+                        reason: csp_core::RouteError::BadNetmask,
+                    });
+                }
+            }
+            if r.address > Version::V2.max_node_id() {
+                return Err(csp_core::Error::InvalidRoute {
+                    reason: csp_core::RouteError::BadAddress,
+                });
+            }
+            if r.iface != "LINK_A" {
+                return Err(csp_core::Error::InvalidRoute {
+                    reason: csp_core::RouteError::MissingInterface,
+                });
+            }
+            t.set(
+                r.address,
+                r.netmask.unwrap_or(host_bits),
+                0,
+                r.via.unwrap_or(rtable::NO_VIA),
+            )?;
+            applied += 1;
+            Ok(())
+        });
+        match res {
+            // The C returns the number of valid entries.
+            Ok(n) => (n as i32, t),
+            // ...and CSP_ERR_INVAL, which is -2, for a refused one.
+            Err(_) => (-2, t),
+        }
+    }
+
+    // Does a packet for `dst` leave by the routed interface? One frame or none, which is
+    // what the C's `goes_by` reports.
+    let frames = |t: &rtable::Table<8>, dst: u16| -> usize {
+        // 3000 and 3001 are in no interface's subnet, so only the table can carry them.
+        usize::from(t.find(dst).is_some())
+    };
+
+    match case {
+        "a_netmask_wider_than_the_address_space_is_refused_by_the_parser" => {
+            let (res, t) = load("3000/99 LINK_A");
+            serde_json::json!({ "load_result": res, "frames": frames(&t, 3000) })
+        }
+        "the_same_netmask_set_directly_is_clamped_not_refused" => {
+            let mut t = rtable::Table::<8>::new(Version::V2);
+            let set_result = -i32::from(t.set(3000, 99, 0, rtable::NO_VIA).is_err());
+            serde_json::json!({ "set_result": set_result, "frames": frames(&t, 3000) })
+        }
+        "a_refused_table_string_keeps_the_entries_before_the_bad_one" => {
+            let (res, t) = load("3000 LINK_A,3001/99 LINK_A");
+            serde_json::json!({
+                "load_result": res,
+                "first_entry_installed": frames(&t, 3000),
+            })
+        }
+        "a_next_hop_survives_the_text_format" => {
+            let (res, t) = load("3000 LINK_A 42");
+            serde_json::json!({
+                "load_result": res,
+                "via_on_tx": t.find(3000).map(|r| r.via).unwrap_or(0),
+            })
+        }
+        "a_route_without_a_next_hop_sends_direct" => {
+            let (res, t) = load("3000 LINK_A");
+            serde_json::json!({
+                "load_result": res,
+                "via_on_tx": t.find(3000).map(|r| r.via).unwrap_or(0),
+            })
+        }
+        "a_one_character_entry_ends_the_parse_and_still_reports_success" => {
+            let (res, t) = load("3000 LINK_A,x,3001 LINK_A");
+            serde_json::json!({
+                "load_result": res,
+                "routes_after_the_short_token": frames(&t, 3001),
+            })
+        }
+        other => panic!("no rtable replay for {other}"),
+    }
+}
+
 fn replay_node_send(case: &str) -> serde_json::Value {
     type S = csp::CspStorage<8, 16, 264, 48, 32>;
     let storage = S::new();
@@ -1528,6 +1629,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         {
             Some((replay_node_send(&rec.case), rec.case.clone()))
         }
+        "rtable" => Some((replay_rtable(&rec.case), rec.case.clone())),
         "route" => Some((replay_route(&rec.case), rec.case.clone())),
         "promisc" => Some((replay_promisc(&rec.case), rec.case.clone())),
         "security" => {
