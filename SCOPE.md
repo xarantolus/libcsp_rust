@@ -662,7 +662,19 @@ The rest of the parser is faithful, including the parts that surprise:
 - a refused string still leaves the entries before the bad one installed, so a non-zero
   error return does not mean the table is unchanged.
 
-Both are pinned by `rtable::` records rather than by reading.
+Both are pinned by `rtable::` records — but the first was pinned by the *test* until
+now. `rtable::parse` made no range checks at all; the replay's callback made them, so
+`"3000/99 LINK_A"` was refused by the harness while the port parsed it happily and
+`Table::set` silently clamped the netmask to /14. An operator's malformed route table was
+reinterpreted rather than refused, and the record said the port matched. The checks now
+live in `parse`, where `csp_rtable_stdio.c:44` has them.
+
+The address check moved with them and is **redundant**: `Table::set` refuses an
+out-of-range address too, so no record can isolate `parse`'s copy — the string is refused
+either way. It is kept because `parse` should be able to reject a malformed string without
+a table to hand, which is what the C's parser does, and it is deliberately not in the
+mutation suite since nothing could notice it. The netmask check is the one that mattered,
+because `set` clamps instead of refusing.
 
 ### Which records can actually fail, measured
 
