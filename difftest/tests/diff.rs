@@ -795,9 +795,13 @@ fn rust_node_exchange_routed(
         match node.work(0) {
             Routed::Idle => break,
             Routed::Delivered { .. } => {}
-            // A control frame the node produced on its own behalf (RDP). The C node under
-            // test here speaks no RDP, so nothing should reach this arm; releasing the
-            // buffer keeps a stray one from looking like a leak instead of a surprise.
+            // A control frame the node produced on its own behalf (RDP). Nothing in *this*
+            // file sends the port an RDP packet, so nothing should reach this arm;
+            // releasing the buffer keeps a stray one from looking like a leak instead of a
+            // surprise. This used to say the C node "speaks no RDP", which was false — the
+            // harness builds with `CSP_USE_RDP=ON` and the C answers a SYN straight from
+            // its router. Believing that comment is why nothing ever sent it one, and why
+            // the port's initiator went so long without emitting the handshake's third leg.
             Routed::Respond { packet, .. } => {
                 drop(node.take_forwarded(packet));
             }
