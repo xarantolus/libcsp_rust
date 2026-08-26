@@ -30,8 +30,9 @@
 //! // pri, dst, dport, sport, flags -- the outbound is handed to an interface to send.
 //! let outbound = node.sendto(2, 2, 12, 40, 0, packet)?;
 //!
-//! // The identity a CMP `IDENT` request is answered with.
-//! assert_eq!(node.identity().hostname, "adcs");
+//! // The identity a CMP `IDENT` request is answered with. `node.identity()` bundles the
+//! // three for `service::respond_cmp`; it needs the `cmp` feature, this accessor does not.
+//! assert_eq!(node.hostname(), "adcs");
 //! # Ok::<(), csp_core::Error>(())
 //! ```
 //!

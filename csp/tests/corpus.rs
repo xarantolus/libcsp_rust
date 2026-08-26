@@ -1,4 +1,18 @@
+#![cfg(all(
+    feature = "rdp",
+    feature = "sfp",
+    feature = "cmp",
+    feature = "hmac",
+    feature = "rtable",
+    feature = "if-eth"
+))]
+
 //! Replay of `corpus/ctest.jsonl` — what the real libcsp did, run against the port.
+//!
+//! The oracle that produced the corpus is built with every protocol compiled in, so this
+//! harness needs the matching features. Without them the file is empty rather than broken:
+//! a differential test against a configuration the oracle was not built for would be
+//! comparing two different libraries.
 //!
 //! The corpus is produced by `just corpus`, which runs `ctest/` against the C. Each record
 //! carries the **inputs** as well as the answer, and this file drives the port from those

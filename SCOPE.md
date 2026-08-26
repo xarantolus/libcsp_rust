@@ -664,6 +664,27 @@ The rest of the parser is faithful, including the parts that surprise:
 
 Both are pinned by `rtable::` records rather than by reading.
 
+### The minimal build was compiled, never run
+
+`just check` built `--no-default-features` for the embedded target and stopped there. Nothing
+in that configuration had ever been *executed*: the library compiled, and its test code had
+drifted far enough that `cargo test --no-default-features` failed with 17 errors — tests
+calling `route_set`, `respond_cmp`, `csp_core::rdp` and so on with no `cfg` gate on them.
+
+A divergence had been living in the gap. `csp_send_direct` puts only its **middle** stage
+inside `#if CSP_USE_RTABLE`; the local-subnet scan and the default-interface scan run either
+way. This port gated the whole of `Router::forward` on the `rtable` feature and substituted
+a stub returning `NoRoute`, so a node built without the routing table relayed **nothing** —
+not to a directly attached subnet, not out a default link. Fixed by deleting the gate:
+`route_policy::destinations` already handles a compiled-out table through a stub whose
+`find_all` returns nothing.
+
+`just check` now runs `cargo test -p csp-core -p csp --no-default-features`, which is **215
+tests** that previously did not run. The two differential harnesses — `csp/tests/corpus.rs`
+and `csp-core/tests/vectors.rs` — carry a file-level `cfg` for the features their oracle was
+built with, so they are empty in that configuration rather than broken: comparing against
+bytes the other build never produced would not be a differential test.
+
 ### One routing policy, not three
 
 `csp_send_direct` decides where a packet goes. This port had **three** implementations of
