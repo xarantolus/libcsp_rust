@@ -202,7 +202,7 @@ can diff against — and that is worth more than its code ever was.
 Not because c2rust performed badly — it did what it says it does — but because the
 distance between "faithful transliteration" and the stated goal (`no_std`, few `unsafe`,
 no global state, no pointers in the API) *is* the library. 90 `static mut` is the exact
-opposite of "all state owned by a `Csp` value"; 2 709 raw pointers is the exact opposite of
+opposite of "all state owned by a `Node` value"; 2 709 raw pointers is the exact opposite of
 "no raw pointers in the public API".
 
 What the transpile is genuinely worth keeping for:

@@ -313,6 +313,7 @@ mod tests {
         // End to end: what the client builds, the server answers, the client decodes.
         use crate::service::{respond, NodeStatus, Request as SvcRequest};
         let status = NodeStatus {
+            ps: b"init",
             mem_free: 4096,
             buf_free: 12,
             uptime_s: 3600,

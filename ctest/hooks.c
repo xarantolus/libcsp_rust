@@ -112,3 +112,30 @@ void csp_usart_lock(void * driver_data) {
 void csp_usart_unlock(void * driver_data) {
 	(void)driver_data;
 }
+
+/* --- clock -------------------------------------------------------------------------- */
+
+static int clock_accepts = 1;
+static csp_timestamp_t clock_now;
+
+void ctest_clock_set_accepts(int accept) {
+	clock_accepts = accept;
+}
+
+csp_timestamp_t ctest_clock_last_set(void) {
+	return clock_now;
+}
+
+/* Overrides the __weak posix implementation, which reads the real wall clock and would put
+   a different number in the corpus on every run. */
+void csp_clock_get_time(csp_timestamp_t * time) {
+	*time = clock_now;
+}
+
+int csp_clock_set_time(const csp_timestamp_t * time) {
+	if (!clock_accepts) {
+		return CSP_ERR_INVAL;
+	}
+	clock_now = *time;
+	return CSP_ERR_NONE;
+}

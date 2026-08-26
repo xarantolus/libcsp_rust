@@ -164,6 +164,14 @@ pub struct Node<
     pub ifaces: crate::iflist::IfList<8, 8>,
     version: Version,
     address: u16,
+    /// What this node calls itself, for CMP `IDENT`.
+    ///
+    /// `Config` has always accepted these and `Node::new` used to drop them, so a node
+    /// configured with a hostname had no way to report it and `IDENT` could not be
+    /// answered with anything the caller had set.
+    hostname: &'a str,
+    model: &'a str,
+    revision: &'a str,
     /// Next ephemeral source port. Wraps within the dynamic range.
     sport_next: u8,
 }
@@ -191,8 +199,46 @@ impl<
             ifaces: crate::iflist::IfList::new(version),
             version,
             address,
+            hostname: config.hostname,
+            model: config.model,
+            revision: config.revision,
             sport_next: EPHEMERAL_FIRST,
         }
+    }
+
+    /// Hostname reported by CMP `IDENT`.
+    pub const fn hostname(&self) -> &'a str {
+        self.hostname
+    }
+
+    /// Hardware model reported by CMP `IDENT`.
+    pub const fn model(&self) -> &'a str {
+        self.model
+    }
+
+    /// This node's identity, ready to hand to
+    /// [`respond_cmp`](crate::service::respond_cmp).
+    ///
+    /// One call rather than three field reads at the call site: an application that
+    /// assembles the struct itself can leave a field out, and an `IDENT` reply missing a
+    /// hostname is indistinguishable from a node that was never given one.
+    ///
+    /// `date` and `time` are empty. The C splices `__DATE__`/`__TIME__` in at compile
+    /// time; an application that wants them passes its own [`Identity`](crate::service::Identity).
+    #[cfg(feature = "cmp")]
+    pub const fn identity(&self) -> crate::service::Identity<'a> {
+        crate::service::Identity {
+            hostname: self.hostname,
+            model: self.model,
+            revision: self.revision,
+            date: "",
+            time: "",
+        }
+    }
+
+    /// Software revision reported by CMP `IDENT`.
+    pub const fn revision(&self) -> &'a str {
+        self.revision
     }
 
     /// This node's address.
@@ -746,6 +792,46 @@ mod tests {
 
     fn node(s: &S) -> N<'_> {
         Node::new(s, Config::new(Version::V1).address(ME))
+    }
+
+    /// The whole path from the public builder to the bytes a peer receives.
+    ///
+    /// `Node::new` used to read only `version` and `address` off the `Config` and drop
+    /// the other three, so `Config::hostname(..)` was a setter with no effect on the only
+    /// type that can route -- and a CMP `IDENT` could not be answered with the identity
+    /// the application had configured. Nothing noticed, because nothing joined the two
+    /// ends up: the builder had tests, the encoder had tests, and no test went from one
+    /// to the other.
+    #[test]
+    fn the_configured_identity_reaches_an_ident_reply() {
+        let s = S::new();
+        let n = Node::<'_, 4, 16, 264, 48, 8, 4>::new(
+            &s,
+            Config::new(Version::V1)
+                .address(ME)
+                .hostname("flight-node")
+                .model("move-iiia")
+                .revision("v2.1"),
+        );
+
+        struct NoHooks;
+        impl crate::hooks::Hooks<16, 264> for NoHooks {}
+
+        let mut out = [0u8; 256];
+        let n_bytes = crate::service::respond_cmp(
+            csp_core::cmp::Query::Ident,
+            &n.identity(),
+            Version::V1,
+            &mut NoHooks,
+            &mut out,
+        )
+        .unwrap()
+        .expect("IDENT is always answerable");
+
+        let reply = csp_core::cmp::Ident::decode(&out[..n_bytes]).unwrap();
+        assert_eq!(reply.hostname, "flight-node");
+        assert_eq!(reply.model, "move-iiia");
+        assert_eq!(reply.revision, "v2.1");
     }
 
     #[test]

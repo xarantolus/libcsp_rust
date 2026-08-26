@@ -14,13 +14,25 @@
 //! Storage is supplied by the caller, so `no_std` needs no allocator:
 //!
 //! ```
-//! use csp::{Csp, CspStorage, Config};
+//! use csp::{Config, CspStorage, Node};
 //! use csp_core::Version;
 //!
-//! // 8 connections, 16 buffers of 264 bytes, 48 ports, 32 queued packets
+//! // 8 connections, 16 buffers of 264 bytes, 48 ports, 32 queued packets, 4 interfaces
 //! let storage = CspStorage::<8, 16, 264, 48, 32>::new();
-//! let csp = Csp::new(&storage, Config::new(Version::V1).address(11));
-//! assert_eq!(csp.address(), 11);
+//! let mut node: Node<8, 16, 264, 48, 32, 4> = Node::new(
+//!     &storage,
+//!     Config::new(Version::V1).address(11).hostname("adcs"),
+//! );
+//!
+//! node.bind(12)?;
+//! let mut packet = node.packet().expect("the pool is empty");
+//! packet.set_payload(b"hello")?;
+//! // pri, dst, dport, sport, flags -- the outbound is handed to an interface to send.
+//! let outbound = node.sendto(2, 2, 12, 40, 0, packet)?;
+//!
+//! // The identity a CMP `IDENT` request is answered with.
+//! assert_eq!(node.identity().hostname, "adcs");
+//! # Ok::<(), csp_core::Error>(())
 //! ```
 //!
 //! ## Ports accept either shape
@@ -75,9 +87,9 @@ pub use service::{NodeStatus, Request};
 pub struct Config<'a> {
     version: Version,
     address: u16,
-    hostname: &'a str,
-    model: &'a str,
-    revision: &'a str,
+    pub(crate) hostname: &'a str,
+    pub(crate) model: &'a str,
+    pub(crate) revision: &'a str,
 }
 
 impl<'a> Config<'a> {
@@ -175,100 +187,14 @@ impl<
     }
 }
 
-/// A CSP node.
-///
-/// Borrows its storage, so the node and its buffers have an explicit relationship instead
-/// of the C's implicit "these statics belong to whoever called `csp_init` last".
-#[derive(Debug)]
-pub struct Csp<
-    'a,
-    const CONNS: usize,
-    const BUFS: usize,
-    const BUFSZ: usize,
-    const PORTS: usize,
-    const QFIFO: usize,
-> {
-    storage: &'a CspStorage<CONNS, BUFS, BUFSZ, PORTS, QFIFO>,
-    version: Version,
-    address: u16,
-    hostname: &'a str,
-    model: &'a str,
-    revision: &'a str,
-}
-
-impl<
-        'a,
-        const CONNS: usize,
-        const BUFS: usize,
-        const BUFSZ: usize,
-        const PORTS: usize,
-        const QFIFO: usize,
-    > Csp<'a, CONNS, BUFS, BUFSZ, PORTS, QFIFO>
-{
-    /// Create a node over the given storage.
-    ///
-    /// Cannot fail, and can be called as many times as there are storages — unlike
-    /// `csp_init()`, which is once per process.
-    pub fn new(
-        storage: &'a CspStorage<CONNS, BUFS, BUFSZ, PORTS, QFIFO>,
-        config: Config<'a>,
-    ) -> Self {
-        Csp {
-            storage,
-            version: config.version,
-            address: config.address,
-            hostname: config.hostname,
-            model: config.model,
-            revision: config.revision,
-        }
-    }
-
-    /// This node's address.
-    pub const fn address(&self) -> u16 {
-        self.address
-    }
-
-    /// The wire version. Immutable by construction.
-    pub const fn version(&self) -> Version {
-        self.version
-    }
-
-    /// Hostname reported by CMP `IDENT`.
-    pub const fn hostname(&self) -> &'a str {
-        self.hostname
-    }
-
-    /// Model reported by CMP `IDENT`.
-    pub const fn model(&self) -> &'a str {
-        self.model
-    }
-
-    /// Revision reported by CMP `IDENT`.
-    pub const fn revision(&self) -> &'a str {
-        self.revision
-    }
-
-    /// The packet pool.
-    pub const fn pool(&self) -> &'a Pool<BUFS, BUFSZ> {
-        &self.storage.pool
-    }
-
-    /// Take a packet from the pool.
-    pub fn packet(&self) -> Option<Packet<'a, BUFS, BUFSZ>> {
-        self.storage.pool.acquire(0)
-    }
-
-    /// Buffers currently free — the CMP `BUF_FREE` service.
-    pub fn buffers_free(&self) -> usize {
-        self.storage.pool.available()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::node::Node;
+
     type S = CspStorage<8, 16, 264, 48, 32>;
+    type N<'a> = Node<'a, 8, 16, 264, 48, 32, 4>;
 
     #[test]
     fn two_nodes_coexist_in_one_process() {
@@ -276,8 +202,8 @@ mod tests {
         // libcsp's state is ~38 file-scope statics.
         let sa = S::new();
         let sb = S::new();
-        let a = Csp::new(&sa, Config::new(Version::V1).address(11).hostname("adcs"));
-        let b = Csp::new(&sb, Config::new(Version::V2).address(2000).hostname("cdh"));
+        let a = N::new(&sa, Config::new(Version::V1).address(11).hostname("adcs"));
+        let b = N::new(&sb, Config::new(Version::V2).address(2000).hostname("cdh"));
 
         assert_eq!(a.address(), 11);
         assert_eq!(b.address(), 2000);
@@ -291,8 +217,8 @@ mod tests {
     fn exhausting_one_nodes_pool_leaves_the_other_untouched() {
         let sa = S::new();
         let sb = S::new();
-        let a = Csp::new(&sa, Config::new(Version::V1).address(1));
-        let b = Csp::new(&sb, Config::new(Version::V1).address(2));
+        let a = N::new(&sa, Config::new(Version::V1).address(1));
+        let b = N::new(&sb, Config::new(Version::V1).address(2));
 
         let mut held = heapless::Vec16::new();
         while let Some(p) = a.packet() {
@@ -328,18 +254,18 @@ mod tests {
         // There is deliberately no setter. In the C this is a mutable global that is
         // silently init-only, and changing it leaks one buffer per packet sent.
         let s = S::new();
-        let node = Csp::new(&s, Config::new(Version::V1).address(1));
+        let node = N::new(&s, Config::new(Version::V1).address(1));
         assert_eq!(node.version(), Version::V1);
         // A different version requires a different node, with its own storage.
         let s2 = S::new();
-        let other = Csp::new(&s2, Config::new(Version::V2).address(1));
+        let other = N::new(&s2, Config::new(Version::V2).address(1));
         assert_eq!(other.version(), Version::V2);
     }
 
     #[test]
     fn packets_come_from_the_nodes_own_pool() {
         let s = S::new();
-        let node = Csp::new(&s, Config::new(Version::V1).address(1));
+        let node = N::new(&s, Config::new(Version::V1).address(1));
         assert_eq!(node.buffers_free(), 16);
         {
             let _p = node.packet().unwrap();

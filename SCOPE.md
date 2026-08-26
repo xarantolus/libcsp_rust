@@ -55,7 +55,7 @@ These become const generics on `CspStorage`, not compile-time constants:
 
 | C source | Rust home | Notes |
 |---|---|---|
-| `csp_init.c` | `Csp::new` / `Config` | the global `csp_conf` becomes a field |
+| `csp_init.c` | `Node::new` / `Config` | the global `csp_conf` becomes a field |
 | `csp_io.c` | `csp/io.rs` | send / recv / sendto / transaction |
 | `csp_conn.c` | `csp/conn.rs` | connection pool; the one real CAS becomes `AtomicU8` |
 | `csp_port.c` | `csp/port.rs` | port table; **fixes the `.bss`-reliance re-init leak** |
@@ -64,7 +64,7 @@ These become const generics on `CspStorage`, not compile-time constants:
 | `csp_buffer.c` | `csp/pool.rs` | **redesigned**: index-based slots, offset instead of `frame_begin`, `AtomicU8` refcount |
 | `csp_id.c` | `csp-core/id.rs` | v1 + v2 header codec — **published**; three consumers hand-roll this today |
 | `csp_iflist.c` | `csp/iflist.rs` | incl. aliases and subnet lookup |
-| `csp_service_handler.c` | `csp/service.rs` | built-in service ports |
+| `csp_service_handler.c` | `csp/service.rs` | built-in service ports; `respond_cmp` is `csp_cmp_handler` plus the reply-or-discard decision around it |
 | `csp_services.c` | `csp/client.rs` | ping / uptime / memfree / buf_free / reboot / shutdown / ps |
 | `csp_crc32.c` | `csp-core/crc32.rs` | CRC32-C — **published**, the Python ground tooling needs it |
 
@@ -659,7 +659,7 @@ whoever maintains the fork can see what was found and decide for themselves.
 
 1. **`csp_port` re-init leak** — `csp_port.c:30` relies on `.bss` and has no
    `csp_port_init()`, so a second `csp_init()` leaks bindings. The C unittests only
-   survive this because libcheck forks per test. `Csp::new` starts clean.
+   survive this because libcheck forks per test. `Node::new` starts clean.
 2. **Duplicate weak `csp_input_hook`** — defined `__weak` twice in one library
    (`csp_route.c:106` and `csp_bridge.c:19`); which wins is link-order dependent. Becomes
    one trait method.
@@ -753,7 +753,7 @@ whoever maintains the fork can see what was found and decide for themselves.
    same 18 sends after switching to v2 leak **one buffer per fragment** until the pool is
    empty and every call returns `CSP_ERR_NOMEM` — with no error reported at the point of
    misuse. Nothing in the API says the field is init-only. In the port the version is an
-   immutable field of the `Csp` value, so this is unrepresentable.
+   immutable field of the `Node` value, so this is unrepresentable.
 19. **CMP `PEEK`/`POKE` are arbitrary memory read and write, on by default.** The handler
     checks only `len <= 200`, then calls `csp_cmp_memcpy` with an address taken straight
     off the wire. The default `csp_cmp_memcpy` (`csp_cmp_mem.c:15`) is a bare `memcpy`
@@ -841,7 +841,7 @@ done without.
 
 1. **A forwarded packet was destroyed and never sent.** `Router::forward` reported
    `Routed::Forwarded { iface, via }` and then `drop(packet)`, with a comment deferring to
-   a `Csp::forward` **that was never written**. Nothing anywhere re-sent it. So the node
+   a `Node::forward` **that was never written**. Nothing anywhere re-sent it. So the node
    routed nothing at all: every packet addressed to another node was silently discarded
    while the router reported success and incremented `forwarded`. `Routed::Forwarded` now
    carries the pool slot index, reclaimed with `Node::take_forwarded`.

@@ -12,18 +12,21 @@ zero raw pointers, zero `extern "C"` in the shipped crates.** They build for
 Storage is caller-owned, sized by const generics, so `no_std` needs no allocator:
 
 ```rust
-use csp::{Csp, CspStorage, Config};
+use csp::{Config, CspStorage, Node};
 use csp_core::Version;
 
-// connections, buffers, buffer size, ports, queued packets
-// the flight configuration is <16, 64, 264, 48, 100>
+// connections, buffers, buffer size, ports, queued packets, interfaces
+// the flight configuration is <16, 64, 264, 48, 100, 4>
 let storage = CspStorage::<8, 16, 264, 48, 32>::new();
-let node = Csp::new(&storage, Config::new(Version::V1)
+let mut node: Node<8, 16, 264, 48, 32, 4> = Node::new(&storage, Config::new(Version::V1)
     .address(11)
     .hostname("move-iiia-adcs"));
 ```
 
-`Csp::new` cannot fail and can be called once per storage. `csp_init()` is once per
+`hostname`, `model` and `revision` are what a CMP `IDENT` request is answered with; reach
+them as a set with `node.identity()`, which is what `service::respond_cmp` takes.
+
+`Node::new` cannot fail and can be called once per storage. `csp_init()` is once per
 *process* — it returns `CSP_ERR_INVAL` on a second call, because libcsp's state is ~38
 file-scope statics. Two nodes with different addresses **and different wire versions**
 coexisting is a test in this crate.
@@ -266,6 +269,35 @@ Handles are generation-tagged. Closing a connection and opening a new one recycl
 index, so a caller holding the old handle would otherwise operate on someone else's
 connection — the use-after-free a raw `csp_conn_t *` invites. A stale handle returns
 `Error::NoTransferInProgress`.
+
+## Built-in services, including CMP
+
+Neither this crate nor libcsp serves the built-in ports by itself. The C's application
+calls `csp_service_handler(packet)` from its own receive loop
+(`libcsp/examples/csp_server.c:77`); here it classifies with `service::Request::decode` and
+answers with `service::respond`, or `service::respond_cmp` for port 0.
+
+```rust
+match Request::decode(dport, payload)? {
+    Request::Cmp => {
+        let query = csp_core::cmp::parse_request(payload)?;
+        service::respond_cmp(query, &node.identity(), node.version(), &mut hooks, out)?
+    }
+    req => service::respond(req, payload, &status, out)?,
+}
+```
+
+`Ok(None)` means **send nothing**, and it is how every refusal is answered: an unknown
+interface, a route the node will not install, a clock it could not set, a memory window the
+application does not expose, a process list it cannot produce. That is the C's `goto
+discard` in `csp_service_handler`, and it is deliberate — a peer cannot tell "refused" from
+"not listening" without a timeout, and the port does not volunteer the difference.
+
+The parts a CMP request can reach that are not the node's own — interface counters, the
+routing table, the clock, node memory — come from [`Hooks`], and **every one of them
+defaults to refusing**. `csp_cmp_route_set_v2_handler` installs whatever an unauthenticated
+peer asks for, which is one packet away from pointing a node's default route at an
+interface that goes nowhere; there is then no route left to be told otherwise over.
 
 ## Compile-time invariants
 
