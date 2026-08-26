@@ -666,12 +666,29 @@ Both are pinned by `rtable::` records rather than by reading.
 
 **Scratch arrays must be sized by `RXQ`.** `Table::close`, `close_all` and `expire_idle`
 all refuse rather than partially draining a connection's receive queue — a slot removed but
-not reported is a slot nobody releases. Three call sites passed fixed literals (`[0u16; 8]`
-on the RST path, `[0u16; 32]` in `tick` and `shutdown`) while `RXQ` is a const generic, so a
-queue deeper than the literal made the drain fail *in silence*: measured at nine buffers
+not reported is a slot nobody releases. **Five** call sites passed fixed literals — `[0u16; 8]` on the
+RST path, `[0u16; 32]` in `tick`, `shutdown`, `Node::unbind` and `Node::close` — while
+`RXQ` is a const generic, so a queue deeper than the literal made the drain fail *in
+silence*: measured at nine buffers
 lost for good when a peer reset a connection holding nine unread packets. `tick`'s sweep
-would retry, but a reset happens once and `shutdown` runs once. All three now size by `RXQ`,
-which is the bound on a single queue and therefore guarantees progress.
+would retry, but a reset happens once and `shutdown` runs once. All five now size by `RXQ`, the bound on a
+single queue, and the two that call a stop-when-full API (`unbind`, `shutdown`) loop.
+
+The two found later are the worse pair, because neither is a background sweep that gets
+another chance:
+
+- **`Node::unbind`** called `close_port` once. Past the array's capacity the remaining
+  connections stayed **open on a port the application had stopped serving** — still
+  matching incoming packets, which is the exact situation unbinding exists to prevent —
+  each holding a buffer per unread packet. Measured: three connections of twelve packets,
+  two closed, one left open with twelve buffers gone.
+- **`Node::close`** propagated `BufferTooSmall` with `?`. An application closing a
+  connection whose queue was deeper than 32 got an *error* from the one call it makes when
+  it has nothing left to try, and the connection stayed open. Measured:
+  `BufferTooSmall { needed: 33 }`.
+
+Sizing by `RXQ` makes both unreachable rather than unlikely: `rx_len <= RXQ` by
+construction, so the refusal branch cannot be taken.
 
 `rdp::Action` names **one** action per step, and for in-order data that action is `Deliver`
 — so the acknowledgement can only come from the separate `poll_ack`. Nothing called it, so

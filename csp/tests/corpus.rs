@@ -1174,6 +1174,85 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
 ///
 /// `rtable` was the one module with neither a golden vector nor a corpus record. Its
 /// parser is the only way a route reaches a flying node from the ground.
+/// A CMP request served by a real `Node`: routed to a bound port 0, read by the
+/// application, answered with `respond_cmp`.
+///
+/// The other CMP records replay `respond_cmp` as a function, which is what let the whole
+/// server go missing once already -- the C routes every one of its CMP cases through
+/// `csp_route_work` and a bound socket. This drives the same path the C does, so "the
+/// application can reach the server at all" is measured and not assumed.
+#[cfg(feature = "cmp")]
+fn replay_cmp_through_a_node() -> serde_json::Value {
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+
+    struct NoHooks;
+    impl csp::hooks::Hooks<16, 264> for NoHooks {}
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(csp_core::ports::CMP).unwrap();
+
+    // Padded to the full reply size, which is the smallest request the C answers.
+    let mut req = [0u8; 256];
+    let k = csp::client::cmp_request(csp_core::cmp::code::IDENT, &[], &mut req).unwrap();
+    let mut p = n.packet().expect("the pool is empty");
+    p.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: PEER,
+        dst: NODE,
+        dport: csp_core::ports::CMP,
+        sport: 40,
+    });
+    p.set_payload(&req[..k]).unwrap();
+    n.router.receive(p, 0);
+
+    let identity = oracle_identity();
+    let mut replies = 0usize;
+    let mut reply_len = 0usize;
+    let (mut reply_type, mut reply_code) = (-1i32, -1i32);
+
+    loop {
+        match n.work(0) {
+            csp::Routed::Delivered { conn, .. } => {
+                while let Ok(Some(pkt)) = n.read(conn) {
+                    let got = pkt.with_payload(<[u8]>::to_vec);
+                    let mut out = [0u8; 256];
+                    let mut hooks = NoHooks;
+                    if let Ok(q) = csp_core::cmp::parse_request(&got) {
+                        if let Ok(Some(len)) = csp::service::respond_cmp(
+                            q,
+                            &identity,
+                            Version::V2,
+                            &mut hooks,
+                            &mut out,
+                        ) {
+                            replies += 1;
+                            reply_len = len;
+                            reply_type = out[0] as i32;
+                            reply_code = out[1] as i32;
+                        }
+                    }
+                    drop(pkt);
+                }
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    serde_json::json!({
+        "replies": replies,
+        "reply_len": reply_len,
+        "reply_type": reply_type,
+        "reply_code": reply_code,
+    })
+}
+
 fn replay_rtable(case: &str) -> serde_json::Value {
     use csp_core::rtable;
 
@@ -1527,6 +1606,10 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "sfp" => {
             let input: SfpInput = serde_json::from_value(rec.input.clone()).unwrap();
             Some((replay_sfp(&input), format!("{input:?}")))
+        }
+        #[cfg(feature = "cmp")]
+        "cmp" if rec.case == "a_full_size_ident_request_is_answered" => {
+            Some((replay_cmp_through_a_node(), "through a Node".to_string()))
         }
         "cmp" if rec.case == "an_ident_reply_carries_the_configured_identity" => {
             // The identity fields only. The C's `date`/`time` come from __DATE__/__TIME__
