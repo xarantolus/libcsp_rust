@@ -518,6 +518,31 @@ int shim_node_recv(uint8_t port, uint16_t *src, uint16_t *dst, uint8_t *dport,
 	return 1;
 }
 
+/*
+ * Serve one request on `port` the way a real node's service task does: accept, read,
+ * and hand the packet to `csp_service_handler`, which answers with
+ * `csp_sendto_reply(packet, packet, CSP_O_SAME)` -- so the reply lands in the captured
+ * egress like any other frame.
+ *
+ * This is what makes the *client* direction testable at all. Every node-level case before
+ * it drove the server direction: a frame in, a delivery or a forward out. Nothing had a
+ * real C node answer a request the port had sent, which is why the port shipped for months
+ * with every reply to every connection it opened silently dropped.
+ *
+ * Returns 1 if a request was served, 0 if nothing was waiting.
+ */
+int shim_node_serve(uint8_t port) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	csp_conn_t *conn = csp_accept(&shim_sockets[port], 0);
+	if (conn == NULL) { return 0; }
+	csp_packet_t *packet = csp_read(conn, 0);
+	if (packet == NULL) { csp_close(conn); return 0; }
+	/* Ownership passes to the handler: it either replies with the packet or frees it. */
+	csp_service_handler(packet);
+	csp_close(conn);
+	return 1;
+}
+
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 

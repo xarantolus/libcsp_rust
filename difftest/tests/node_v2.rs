@@ -26,6 +26,7 @@
 //! and 20 mask to subnet 0 — one subnet, no forwarding, and a test that passes by
 //! asserting nothing happened.
 
+use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};
 use csp_core::{Id, Version};
 use difftest::*;
@@ -373,4 +374,175 @@ fn any_interface_address_and_both_broadcast_forms_are_ours() {
             r.tx.len()
         );
     }
+}
+
+/// The port as a **client**, against a real C node that answers.
+///
+/// Every other node-level test here drives the server direction: a frame goes in, and a
+/// delivery or a forward comes out. None of them had a C node reply to something the port
+/// had sent — which is exactly how the port shipped with `deliver_local` refusing every
+/// reply to every connection it opened, because a reply arrives on the ephemeral source
+/// port `connect` chose and nothing binds that.
+///
+/// The reply here is produced by libcsp itself: `csp_service_handler` echoes a `CSP_PING`
+/// and `csp_sendto_reply` puts it on the wire. Nothing in the harness composes it.
+#[test]
+fn a_reply_from_a_real_c_node_reaches_the_connection_that_asked() {
+    const CSP_PING: u8 = 1;
+
+    let _g = lock();
+    setup();
+    assert_eq!(c_node_bind(CSP_PING), 0, "bind the ping service");
+
+    let storage = CspStorage::<8, 24, 300, 64, 8>::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(NODE_ADDR + 1));
+    node.ifaces
+        .add("test", NODE_ADDR + 1, NETMASK, true)
+        .unwrap();
+
+    // The port opens the connection and sends the request.
+    let conn = node
+        .connect(2, NODE_ADDR, CSP_PING, 0, 1000)
+        .expect("connect to the C node");
+    let mut req = node.packet().expect("pool");
+    req.set_payload(b"round-trip").unwrap();
+    let out = node.send(conn, req, 1000).expect("send");
+    // `send` decides where the packet goes; it does not frame it. The header is prepended
+    // by whoever transmits, so a test that skipped this read an empty frame and blamed the
+    // C node for not answering.
+    let (iface, mut pkt) = match out {
+        Outbound::Transmit { iface, packet, .. } => (iface, packet),
+        other => panic!("the C node is on our own subnet, so this must route: {other:?}"),
+    };
+    let _ = iface;
+    pkt.prepend_header(VERSION).expect("prepend");
+    let request_frame = pkt.with_frame(|f| f.to_vec());
+
+    // A real C node receives it, its service handler answers, and the reply is whatever
+    // libcsp put on the wire.
+    let replies = c_node_serve(&request_frame, CSP_PING);
+    assert_eq!(
+        replies.len(),
+        1,
+        "the C node answers a ping with exactly one frame"
+    );
+
+    // Feed that reply back and read it off the connection the port opened.
+    let mut inject = node.packet().expect("pool");
+    inject
+        .set_frame(VERSION, &replies[0])
+        .expect("the C's own frame");
+    node.router.receive(inject, 0);
+
+    let mut got = Vec::new();
+    loop {
+        match node.work(1100) {
+            Routed::Delivered { conn: c, .. } => {
+                while let Ok(Some(p)) = node.read(c) {
+                    got.push(p.with_payload(|d| d.to_vec()));
+                    drop(p);
+                }
+            }
+            Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        got.len(),
+        1,
+        "the reply must reach the connection that asked for it"
+    );
+    assert_eq!(
+        got[0], b"round-trip",
+        "a ping is echoed verbatim, so the body must come back unchanged"
+    );
+}
+
+/// The CMP client against a real C CMP server.
+///
+/// `client::cmp_request` builds the request and `client::check_cmp_reply` validates the
+/// answer, and until `c_node_serve` existed neither had ever seen a reply libcsp actually
+/// produced — both halves were only ever tested against bytes this repository composed.
+/// `csp_cmp_handler` is what answers here.
+#[test]
+fn the_cmp_client_understands_what_a_real_c_node_answers() {
+    use csp_core::cmp;
+
+    const CSP_CMP: u8 = 0;
+
+    let _g = lock();
+    setup();
+    assert_eq!(c_node_bind(CSP_CMP), 0, "bind the CMP service");
+
+    let storage = CspStorage::<8, 24, 300, 64, 8>::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(NODE_ADDR + 1));
+    node.ifaces
+        .add("test", NODE_ADDR + 1, NETMASK, true)
+        .unwrap();
+
+    let conn = node
+        .connect(2, NODE_ADDR, CSP_CMP, 0, 1000)
+        .expect("connect to the C node");
+
+    let mut body = [0u8; 128];
+    let n = csp::client::cmp_request(cmp::code::IDENT, &[], &mut body).expect("build IDENT");
+
+    let mut req = node.packet().expect("pool");
+    req.set_payload(&body[..n]).unwrap();
+    let out = node.send(conn, req, 1000).expect("send");
+    let mut pkt = match out {
+        Outbound::Transmit { packet, .. } => packet,
+        other => panic!("must route: {other:?}"),
+    };
+    pkt.prepend_header(VERSION).expect("prepend");
+    let request_frame = pkt.with_frame(|f| f.to_vec());
+
+    let replies = c_node_serve(&request_frame, CSP_CMP);
+    assert_eq!(replies.len(), 1, "the C node answers an IDENT");
+
+    let mut inject = node.packet().expect("pool");
+    inject
+        .set_frame(VERSION, &replies[0])
+        .expect("the C's frame");
+    node.router.receive(inject, 0);
+
+    let mut got = Vec::new();
+    loop {
+        match node.work(1100) {
+            Routed::Delivered { conn: c, .. } => {
+                while let Ok(Some(p)) = node.read(c) {
+                    got.push(p.with_payload(|d| d.to_vec()));
+                    drop(p);
+                }
+            }
+            Routed::Idle => break,
+            _ => continue,
+        }
+    }
+    assert_eq!(got.len(), 1, "the IDENT reply reaches the connection");
+
+    // The client's own validator, on bytes libcsp produced rather than bytes we wrote.
+    let hdr = csp::client::check_cmp_reply(cmp::code::IDENT, &got[0])
+        .expect("the client accepts a real C node's IDENT reply");
+    assert_eq!(hdr.code, cmp::code::IDENT);
+
+    // And the fields line up with the C's `struct csp_cmp_ident_msg`. `Ident::decode`
+    // takes the whole message, header included -- `Ident::LEN` counts those two bytes.
+    let parsed = cmp::Ident::decode(&got[0]).expect("the reply parses as an IDENT");
+    assert_eq!(
+        got[0].len(),
+        cmp::Ident::LEN,
+        "the C's reply is exactly sizeof(struct csp_cmp_ident_msg)"
+    );
+    // The shim node sets no hostname, so the identity strings are empty -- but `date` and
+    // `time` come from __DATE__/__TIME__ and are always populated. They are the last two
+    // fields, so reading them proves every preceding field width matches the C's struct:
+    // one byte of drift anywhere earlier and these would be garbage.
+    assert!(
+        parsed.date.len() >= 6 && parsed.time.contains(':'),
+        "date {:?} / time {:?} came out misaligned, so a field width disagrees with the C",
+        parsed.date,
+        parsed.time
+    );
 }
