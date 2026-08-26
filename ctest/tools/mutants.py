@@ -65,6 +65,11 @@ MUTANTS = [
   ("conn: a connection is an endpoint too", "csp/src/router.rs",
    "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
    "        if !self.is_bound(id.dport) {"),
+  # A reset connection and a full window are different refusals: one is permanent and the
+  # other clears. Conflating them made an application retry for ever against a dead peer.
+  ("rdp: a reset is not back-pressure", "csp/src/node.rs",
+   "            if !self.is_rdp_open(conn) {\n                return Err(Error::ConnectionReset);\n            }\n",
+   ""),
   # The handshake's third leg. Without it a peer sits in SYN_RCVD and gives up -- and the
   # first data packet hides it, because that carries an ACK too.
   ("rdp: the initiator answers SYN|ACK", "csp-core/src/rdp.rs",

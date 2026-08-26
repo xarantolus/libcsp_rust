@@ -574,6 +574,14 @@ impl<
         let cur_len = packet.with_payload(<[u8]>::len);
         #[cfg(feature = "rdp")]
         if id.has_flag(csp_core::flags::RDP) {
+            // Two different refusals, and a caller has to tell them apart: a full window
+            // clears when an acknowledgement arrives, a reset connection never does.
+            // Returning `SendWindowFull` for both meant an application retried for ever
+            // against a peer that had hung up. `csp_rdp_send` (`csp_rdp.c:863`) separates
+            // them the same way — `CSP_ERR_RESET` when the state is not open.
+            if !self.is_rdp_open(conn) {
+                return Err(Error::ConnectionReset);
+            }
             let Some(h) = self.router.conns.begin_rdp_send(conn, now_ms) else {
                 return Err(Error::SendWindowFull);
             };
