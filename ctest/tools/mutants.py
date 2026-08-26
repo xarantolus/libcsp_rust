@@ -362,6 +362,15 @@ MUTANTS = [
   ("rdp: a retransmission keeps its own length", "csp/src/router.rs",
    "                                (len, ())\n                            });",
    "                                (b.len(), ())\n                            });"),
+  ("rdp: an acknowledgement releases what it covers", "csp/src/router.rs",
+   "                    TxAction::Release { token } => drop(pool.from_index(token)),",
+   "                    TxAction::Release { token } => { let _ = token; }"),
+  ("rdp: snd_una advances on the peer's ack", "csp-core/src/rdp.rs",
+   "                if h.has(ACK) {\n                    self.snd_una = h.ack_nr.wrapping_add(1);\n                    self.retransmits = 0;\n                }",
+   "                if h.has(ACK) {\n                    self.retransmits = 0;\n                }"),
+  ("rdp: consecutive sends take consecutive sequences", "csp-core/src/rdp.rs",
+   "        self.snd_nxt = self.snd_nxt.wrapping_add(1);\n        Some(h)",
+   "        Some(h)"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

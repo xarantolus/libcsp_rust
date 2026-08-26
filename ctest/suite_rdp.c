@@ -853,6 +853,67 @@ static void deliver_byte(uint16_t seq, uint16_t ack_nr, char byte) {
    agree on, and the part the give-up arithmetic does not reach. The total-frame record next
    door is a `diverges`, which cannot catch a send path that stops holding what it sent:
    breaking it leaves the two disagreeing either way. This one can. */
+/* Three packets in a row, then the peer acknowledges them.
+ *
+ * Two functional questions in one exchange, neither of which a single-packet test can ask:
+ * do consecutive sends take consecutive sequence numbers, and does an acknowledgement
+ * actually release what it covers? `csp_rdp_check_timeouts` frees a queued packet whose
+ * sequence is before `snd_una`; if that never happens the sender retransmits data the peer
+ * already has, for as long as the connection lives. */
+START_TEST(test_three_sends_are_sequential_and_an_ack_releases_them)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	ack_handshake(conn->rdp.snd_iss);
+	const uint16_t iss = conn->rdp.snd_iss;
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+	/* Buffer accounting, because "nothing was retransmitted" is also true of a node that
+	   dropped the queue entry and leaked its buffer. Releasing on acknowledgement is the
+	   only thing that gives the pool back. */
+	const int free_before = csp_buffer_remaining();
+
+	uint16_t seqs[3];
+	for (int i = 0; i < 3; i++) {
+		csp_packet_t * out = csp_buffer_get(0);
+		ck_assert_ptr_nonnull(out);
+		out->data[0] = (uint8_t)('a' + i);
+		out->length = 1;
+		csp_send(accepted, out);
+		seqs[i] = tx_seq;
+	}
+	const int sequential = (seqs[0] == (uint16_t)(iss + 1)) &&
+						   (seqs[1] == (uint16_t)(iss + 2)) &&
+						   (seqs[2] == (uint16_t)(iss + 3));
+
+	/* The peer acknowledges all three at once: ack_nr is the last one it took. */
+	put_header_and_route(new_rdp_packet(), RDP_ACK, 1002, seqs[2]);
+
+	/* Nothing may be retransmitted after that, however long we wait. */
+	const unsigned int before = test_tx_count;
+	for (int i = 0; i < 40; i++) {
+		ctest_clock_advance(250);
+		csp_conn_check_timeouts();
+	}
+	const unsigned int after_ack = test_tx_count - before;
+	const int buffers_lost = free_before - csp_buffer_remaining();
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "three_sends_are_sequential_and_an_ack_releases_them",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packets", 3);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("sequential", sequential);
+		ctest_trace_int("frames_after_the_ack", (int64_t)after_ack);
+		ctest_trace_int("buffers_lost", (int64_t)buffers_lost);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_one_retransmission_after_the_packet_timeout)
 {
 	setup_stack();
@@ -1623,6 +1684,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_three_sends_are_sequential_and_an_ack_releases_them);
 	tcase_add_test(tc_ack, test_one_retransmission_after_the_packet_timeout);
 	tcase_add_test(tc_ack, test_unacknowledged_data_is_retransmitted_then_given_up_on);
 	tcase_add_test(tc_ack, test_a_gap_filled_late_delivers_both_in_order);
