@@ -541,12 +541,20 @@ START_TEST(test_without_delayed_acks_every_packet_is_acknowledged)
 
 	const uint16_t iss = conn->rdp.snd_iss;
 	unsigned int before = test_tx_count;
+	/* The sequence each acknowledgement names, not just how many there were. An ack that
+	   never advances is still an ack: the peer would retransmit everything after the first
+	   packet, and a count alone cannot tell that apart from a healthy connection. */
+	uint16_t acked[3] = { 0, 0, 0 };
 	for (uint16_t i = 1; i <= 3; i++) {
 		deliver_data((uint16_t)(1000 + i), iss);
+		acked[i - 1] = tx_ack;
 	}
 	const unsigned int acks = test_tx_count - before;
 
 	ck_assert_uint_eq(acks, 3);
+	ck_assert_uint_eq(acked[0], 1001);
+	ck_assert_uint_eq(acked[1], 1002);
+	ck_assert_uint_eq(acked[2], 1003);
 
 	if (ctest_tracing()) {
 		ctest_trace_begin("rdp", "without_delayed_acks_every_packet_is_acknowledged", "must_match");
@@ -557,6 +565,11 @@ START_TEST(test_without_delayed_acks_every_packet_is_acknowledged)
 		ctest_trace_obj_end();
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_arr_begin("acked");
+		for (int k = 0; k < 3; k++) {
+			ctest_trace_int(NULL, (int64_t)acked[k]);
+		}
+		ctest_trace_arr_end();
 		ctest_trace_obj_end();
 		ctest_trace_end();
 	}

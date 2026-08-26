@@ -623,6 +623,7 @@ The receiving half is now wired (`Router::deliver_rdp`, gated on `CSP_FRDP` exac
 | A `SYN` is answered with `SYN\|ACK` carrying this node's ISN and acknowledging the peer's | `corpus`: `rdp::a_syn_is_answered_with_syn_ack` |
 | The handshake's third leg provokes no further frame | `corpus`: `rdp::the_handshakes_final_ack_is_not_itself_answered` |
 | Data reaches the application with the five-byte trailer removed | `corpus`: `rdp::data_reaches_the_application_without_the_rdp_trailer` |
+| Every delivered packet is acknowledged, with an advancing sequence | `corpus`: `rdp::without_delayed_acks_every_packet_is_acknowledged` |
 | The initial sequence number moves with the clock | `router.rs::the_sequence_a_peer_receives_moves_with_the_clock` |
 
 `conn.rs` passed a literal `0` as the ISN for every connection — constant across reboots and
@@ -632,6 +633,19 @@ least a function of the clock (`csp_rdp.c:548`, `rand_r` seeded from `csp_get_ms
 `Router::initial_seq` now derives it from `now_ms`. It is **not** a random number and is not
 treated as one: a sans-io core has no entropy source, and the C's own ISN is guessable by
 anyone who can estimate the peer's uptime to the millisecond.
+
+`rdp::Action` names **one** action per step, and for in-order data that action is `Deliver`
+— so the acknowledgement can only come from the separate `poll_ack`. Nothing called it, so
+the first version of this wiring delivered RDP data to the application and acknowledged none
+of it: correct to the application, and a peer that retransmits every packet until
+`MAX_RETRANSMITS` and then gives up. The ack is now queued alongside the delivery and
+surfaces on the next `work` call, the same as a fan-out destination.
+
+Fixing that exposed a second divergence in `csp-core`, invisible while nothing polled an ack
+after a handshake: the **server** SYN path set `rcv_lsa = seq_nr - 1`, which is the *client*
+path's assignment (`csp_rdp.c:601`, where acking at once is the point). `csp_rdp.c:556` sets
+all three of `rcv_cur`/`rcv_irs`/`rcv_lsa` equal on the server path, so the handshake leaves
+nothing owing. Ours emitted one gratuitous ack after every incoming connection.
 
 **Still not done: this node cannot open an RDP connection.** `Node::connect` continues to
 refuse `RDP_REQ` with `Error::Unsupported { feature: Rdp }`, and the application send path
