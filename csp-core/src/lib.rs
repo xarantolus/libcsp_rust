@@ -83,6 +83,15 @@ pub enum Error {
     },
     /// The input ended before a complete item could be decoded.
     Truncated,
+    /// An RDP connection cannot take another packet yet.
+    ///
+    /// Either it is not open, or `snd_nxt` has reached `snd_una + window_size - 1` and the
+    /// peer has not acknowledged anything since. `csp_rdp_send` blocks on a semaphore
+    /// here; a sans-io node has nowhere to block, so the caller drains `work` and retries.
+    ///
+    /// Distinct from the failures around it because it is *temporary*: the same packet on
+    /// the same connection succeeds once an acknowledgement arrives.
+    SendWindowFull,
     /// A field does not fit the wire format it is being encoded into.
     ///
     /// The C silently shifts an oversized value into the neighbouring field — encoding a

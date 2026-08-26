@@ -286,42 +286,65 @@ acknowledgement-only, matching.
 not in sequence, send EACK and store packet"*. Measured, it stores and answers **nothing** —
 no EAK goes out. I would have implemented the comment.
 
-### The port's RDP is receive-only: there is no send path
+### The RDP send path, built -- and the C does not stop when it says it stops
 
-2026-08-26, following the transmit queue named yesterday. The gap is much larger than an
-unused queue, and I had been describing it as the smaller thing.
+2026-08-26. Yesterday's measurement was that the port had no RDP send path at all:
+`Node::send` filled in the header and routed, with no trailer, no sequence number and
+nothing queued. That half now exists.
 
-`rdp::unacknowledged_data_is_retransmitted_then_given_up_on` — `diverges`. An application
-sends one packet on an established RDP connection and the peer never acknowledges it.
-Measured, under a 1000 ms `packet_timeout` swept every 250 ms:
+- `Connection::begin_send` mirrors `csp_rdp_send`: refuses unless open and the window has
+  room (`snd_nxt` no further than `snd_una + window_size - 1`), then stamps
+  `seq_nr = snd_nxt`, `ack_nr = rcv_cur`, sets `ACK` and advances. A full window is
+  `Error::SendWindowFull` -- where the C blocks on `tx_wait`, a sans-io node reports
+  back-pressure and the caller drains `work` and retries.
+- `Node::send` appends the trailer, keeps a copy in the connection's `TxQueue`, and routes
+  the original.
+- `Router::tick` sweeps: release what `snd_una` covers, retransmit what timed out with the
+  acknowledgement refreshed to `rcv_cur` ("Update to latest outgoing ACK"), give up past
+  `MAX_RETRANSMITS`. Retransmissions leave through `work` as any node-originated frame does.
+- `Table::close` drains the transmit queue too -- the third place a connection holds pool
+  slots -- and the shared `RXQ` budget now covers all three.
 
-| | first send | total frames | frames afterwards |
-|---|---|---|---|
-| libcsp | 1 | **29** | 0 |
-| the port | 1 | **1** | 0 |
+**`rdp::unacknowledged_data_is_retransmitted_then_given_up_on` stays `diverges`, and the
+reason is the C.** One packet, never acknowledged:
 
-The C retransmits on `packet_timeout`, counts one attempt per sweep, and stops past
-`CSP_RDP_MAX_RETRANSMITS`, leaving the connection for the application to close. The port
-sends once and never repeats.
+| | total frames |
+|---|---|
+| libcsp, `conn_timeout` 20 s | 29 |
+| libcsp, `conn_timeout` 5 s | **10** |
+| the port | 12 |
 
-**What is actually missing.** `Node::send` fills the header in from the connection and routes
-the packet — that is all. It attaches no RDP trailer, assigns no sequence number, and queues
-nothing: `snd_nxt` does not appear anywhere in `csp/src`. So a port node cannot be the
-*sender* on an RDP connection at all; a C peer would not recognise what it emits as RDP data.
-Everything measured until now — handshake, delivery, acknowledgement cadence, resets,
-reordering — is the **receive** half, which is why none of it caught this.
+The C's total scales with `conn_timeout`, not with `CSP_RDP_MAX_RETRANSMITS`. Measured, not
+inferred: halving the connection timeout changes the count. What happens is that
+`csp_rdp_check_timeouts` logs "No progress after 10 retransmissions, closing" and calls
+`csp_conn_close` -- but on an **accepted** handle that only wakes user-space, leaving the
+connection for the application to close. `csp_conn_check_timeouts` keeps sweeping it and
+keeps retransmitting, until the CLOSE-WAIT branch finally returns early. The give-up does not
+give up.
 
-`csp-core::rdp::TxQueue::poll` is already written to the C's semantics: release what
-`snd_una` covers, retransmit past `packet_timeout`, one count per sweep, `GiveUp` past the
-limit. It has no caller, like `RxQueue` had none until yesterday.
+The port stops at 12: one send and eleven attempts, which is what
+`retransmits > MAX_RETRANSMITS` is written to mean. Reproducing the C here would mean
+reproducing a retransmit storm past the point the library itself declared the peer dead, on a
+link where every frame costs power. Recorded as a divergence with the arithmetic rather than
+matched.
 
-**Not attempted here, deliberately.** The send half needs sequence assignment and trailer
-framing on the application's path, the packet held rather than handed away, retransmissions
-emerging from `work` instead of from `send`'s return value, release on acknowledgement, and
-the window blocking the C does when the queue is full. That is a change to the
-application-facing send API, not a wiring job, and half of it landed and reported as done is
-exactly the failure this exercise exists to catch. The record asserts the disagreement so it
-cannot drift, and this entry says what "RDP works" currently means: it receives.
+**Two records, deliberately.** `a_sent_data_packet_carries_an_rdp_trailer` and
+`one_retransmission_after_the_packet_timeout` are `must_match`; the total-frame one is the
+`diverges`. That split exists because **a divergence record cannot protect the code it
+describes** -- breaking the send path leaves the two disagreeing either way. The mutation
+sweep said exactly that: three send-path mutations noticed by nothing until the two
+`must_match` records were added.
+
+**A bug the new record caught immediately.** `with_payload_mut` hands the closure the whole
+slot and *sets* the length from what it returns. Taking `b.len()` for it stretched every
+retransmission to the full 256-byte buffer and wrote the refreshed acknowledgement past the
+real trailer. The frame still carried `hello` and a valid header, so nothing but a length
+comparison would have seen it.
+
+**Still not covered:** multi-packet sequencing -- both records send one packet at a time --
+and the window's behaviour under load. `SendWindowFull` has a unit test
+(`the_send_window_bounds_what_may_be_claimed`) and no C comparison, because the C blocks
+there rather than returning.
 
 ### The receive reorder queue is wired in; the transmit queue still is not
 
@@ -1303,7 +1326,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**109 of 138**.
+**111 of 140**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
