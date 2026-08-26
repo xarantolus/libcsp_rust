@@ -2049,3 +2049,18 @@ It now runs the cheap packages first and pays for `difftest` only when nothing c
 noticed. The guarantee is unchanged — no mutation is reported unnoticed without difftest
 having been tried — and the measurement is **259 s against >3000 s**, on the same 127
 mutations, same machine, same day.
+
+**2026-08-26: RDP at v1 through a node.** Every node-level RDP test was v2. v1 is not a
+cosmetic difference: 5 address bits against 14, a 4-byte header against 6, 6-bit ports. The
+RDP trailer sits at the end of the payload either way, but everything around it moves.
+
+**No defect.** The handshake and data carry over v1 exactly as at v2, against a real C peer
+that answers the `SYN` from its router. `csp_conf.version` is init-only, so this is its own
+binary (`node_rdp_v1.rs`) — one process, one C node, one wire version.
+
+The test asserts the frame's **shape**, not just that it worked: a v1 SYN is
+`header_size(V1) + SYN_OPTIONS_LEN + HEADER_LEN` = 33 bytes, where v2 is 35. Without that
+it would pass identically at either version and prove nothing about v1 — measured by
+setting `VERSION` to `V2` and watching it fail 35 against 33. A second assertion states
+that the two header sizes differ, so the first one stops being a distinguisher loudly rather
+than silently if that ever changes.
