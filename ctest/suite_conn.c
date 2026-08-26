@@ -30,12 +30,19 @@
 #define NETMASK 12
 
 static csp_iface_t ingress_if;
+/* A second subnet, so "the broadcast of the interface it arrived on" can be told apart
+   from "a broadcast address this node knows about". */
+static csp_iface_t other_if;
 static csp_socket_t sock;
+
+/* Frames that left, which is how a forward is distinguished from a delivery. */
+static unsigned int tx_count;
 
 static int discard_tx(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
 	(void)iface;
 	(void)via;
 	(void)from_me;
+	tx_count++;
 	csp_buffer_free(packet);
 	return CSP_ERR_NONE;
 }
@@ -57,7 +64,20 @@ static void setup_stack(void) {
 	csp_bind(&sock, TEST_PORT);
 	csp_listen(&sock, CSP_CONN_RXQUEUE_LEN);
 
+	tx_count = 0;
 	ctest_clock_set(CTEST_CLOCK_EPOCH_MS);
+}
+
+/* The same, plus a second interface on its own subnet. */
+static void setup_two_subnets(void) {
+	setup_stack();
+	memset(&other_if, 0, sizeof(other_if));
+	other_if.addr = 40;
+	other_if.netmask = NETMASK;
+	other_if.name = "OTHER";
+	other_if.nexthop = discard_tx;
+	csp_iflist_add(&other_if);
+	tx_count = 0;
 }
 
 /* One packet from a distinct peer port, so it cannot match an existing connection. */
@@ -281,6 +301,131 @@ START_TEST(test_a_connection_is_offered_to_the_application_only_once)
 }
 END_TEST
 
+/* --- broadcast delivery ---
+ *
+ * `is_to_me` is three conditions, and the broadcast one is narrower than it looks:
+ * `csp_id_is_broadcast(packet->id.dst, input.iface)` names the **ingress** interface, not
+ * every interface the node has. So the broadcast address of a *different* subnet is not
+ * for this node and gets forwarded, while the ingress subnet's broadcast is delivered and
+ * deliberately **not** forwarded on.
+ *
+ * Measured as what the application receives and how many frames leave, because those are
+ * the two halves that can disagree: a node that treated every known broadcast as its own
+ * would deliver the third case and never relay it, and a node that treated none of them as
+ * its own would relay all three and deliver nothing.
+ */
+
+/* Deliver one packet to `dst` on INGRESS and report whether the application got it. */
+static bool arrives_for_the_application(uint16_t dst) {
+	csp_packet_t * packet = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(packet);
+	packet->id.pri = 2;
+	packet->id.src = 11;
+	packet->id.dst = dst;
+	packet->id.dport = TEST_PORT;
+	packet->id.sport = 40;
+	packet->id.flags = 0;
+	memcpy(packet->data, "hi", 2);
+	packet->length = 2;
+	csp_qfifo_write(packet, &ingress_if, NULL);
+	csp_route_work();
+
+	csp_conn_t * conn = csp_accept(&sock, 0);
+	if (conn == NULL) {
+		return false;
+	}
+	bool any = false;
+	csp_packet_t * p;
+	while ((p = csp_read(conn, 0)) != NULL) {
+		csp_buffer_free(p);
+		any = true;
+	}
+	csp_close(conn);
+	return any;
+}
+
+/* INGRESS is 10/12, so it owns 8..11 and 11 is its broadcast. */
+#define INGRESS_BROADCAST 11
+/* OTHER is 40/12, so it owns 40..43 and 43 is its broadcast. */
+#define OTHER_BROADCAST 43
+/* All ones in 14 host bits: broadcast for every interface, by the second clause of
+   csp_id_is_broadcast. */
+#define MAX_NODE_ID 16383
+
+START_TEST(test_the_ingress_subnets_broadcast_is_delivered_and_not_relayed)
+{
+	setup_two_subnets();
+
+	const bool got = arrives_for_the_application(INGRESS_BROADCAST);
+
+	ck_assert(got);
+	ck_assert_uint_eq(tx_count, 0);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "the_ingress_subnets_broadcast_is_delivered_and_not_relayed",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("dst", INGRESS_BROADCAST);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", got ? 1 : 0);
+		ctest_trace_int("frames_out", (int64_t)tx_count);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+START_TEST(test_the_all_ones_address_is_delivered_and_not_relayed)
+{
+	setup_two_subnets();
+
+	const bool got = arrives_for_the_application(MAX_NODE_ID);
+
+	ck_assert(got);
+	ck_assert_uint_eq(tx_count, 0);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "the_all_ones_address_is_delivered_and_not_relayed",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("dst", MAX_NODE_ID);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", got ? 1 : 0);
+		ctest_trace_int("frames_out", (int64_t)tx_count);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* The discriminating case. 43 is a broadcast address -- of OTHER's subnet -- but the packet
+   came in on INGRESS, so it is not for this node and is relayed rather than delivered. */
+START_TEST(test_another_subnets_broadcast_is_relayed_not_delivered)
+{
+	setup_two_subnets();
+
+	const bool got = arrives_for_the_application(OTHER_BROADCAST);
+
+	ck_assert(!got);
+	ck_assert_uint_eq(tx_count, 1);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "another_subnets_broadcast_is_relayed_not_delivered",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("dst", OTHER_BROADCAST);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", got ? 1 : 0);
+		ctest_trace_int("frames_out", (int64_t)tx_count);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * conn_suite(void)
 {
 	Suite * s = suite_create("Conn");
@@ -291,6 +436,12 @@ Suite * conn_suite(void)
 	tcase_add_test(tc, test_a_second_packet_reuses_the_same_connection);
 	tcase_add_test(tc, test_a_connection_is_offered_to_the_application_only_once);
 	suite_add_tcase(s, tc);
+
+	TCase * tc_bc = tcase_create("broadcast");
+	tcase_add_test(tc_bc, test_the_ingress_subnets_broadcast_is_delivered_and_not_relayed);
+	tcase_add_test(tc_bc, test_the_all_ones_address_is_delivered_and_not_relayed);
+	tcase_add_test(tc_bc, test_another_subnets_broadcast_is_relayed_not_delivered);
+	suite_add_tcase(s, tc_bc);
 
 	return s;
 }
