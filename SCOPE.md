@@ -386,6 +386,33 @@ application calls `csp_service_handler` from its own receive loop
 `Router` never calls them. Worth stating because the opposite would mean a node answering
 `CSP_REBOOT` that its author never opted into.
 
+### `shutdown` released neither connections nor pending forwards
+
+Measured on 2026-08-26 by watching the buffer pool across `Router::shutdown`, which
+documents itself as *"Release everything the router is holding"*. It released the input
+queue and the promiscuous tap and nothing else.
+
+- **Packets queued on a connection.** A node torn down with anything unread lost a buffer
+  per packet. Pre-existing.
+- **Fan-out destinations reported but not collected.** Introduced by the fan-out change one
+  day earlier: the pending queue holds a pool slot per destination and shutdown walked past
+  it.
+
+`Table::close_all` closes every open connection and hands back what each held, and
+`shutdown` now drains that and the pending forwards.
+
+**The test that should have caught it was named for it and did not test it.**
+`shutdown_releases_everything` calls `tick` first — *"drain what is on connections too"* —
+which expires the connections and empties them, so `shutdown` is handed a node that is
+already clean. The path it is named after was never exercised.
+`shutdown_alone_releases_connections_and_pending_forwards` does that, with no tick, and
+fails under either mutation.
+
+**`just mutants` now counts unit tests as well as corpus records.** `shutdown` has no libcsp
+equivalent, so no corpus record can cover it; counting only records reported the mutation as
+a hole when the real answer is "covered, elsewhere". A `0` in that column now means nothing
+at all noticed.
+
 ### The promiscuous tap in the routing path: checked, and correct
 
 Measured on 2026-08-26. libcsp's own promiscuous tests drive `csp_promisc_add` directly,

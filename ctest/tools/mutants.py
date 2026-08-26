@@ -52,6 +52,12 @@ MUTANTS = [
   ("conn: announced only once", "csp/src/router.rs",
    "                if is_new {\n                    self.queue_accept(handle);\n                }",
    "                self.queue_accept(handle);"),
+  ("shutdown: frees connections", "csp/src/router.rs",
+   "            let (closed, n) = self.conns.close_all(&mut drained);",
+   "            let (closed, n) = (0usize, 0usize); let _ = &mut drained;"),
+  ("shutdown: frees pending forwards", "csp/src/router.rs",
+   "            drop(pool.from_index(packet));\n            // pop_pending counts a forward it is about to report; nothing is being",
+   "            let _ = packet;\n            // pop_pending counts a forward it is about to report; nothing is being"),
   ("route: fan-out to every match", "csp/src/router.rs",
    "                Some(c) => self.push_pending(iface, via, c.into_index()),",
    "                Some(_c) => {}"),
@@ -70,13 +76,30 @@ for name, path, old, new in MUTANTS:
         print(f"{name:34s} MUTATION DID NOT APPLY -- pattern gone")
         continue
     p.write_text(orig.replace(old, new, 1))
-    r = subprocess.run(["cargo","test","-p","csp","--all-features","--test","corpus"],
+    # The whole csp suite, not just the corpus: a port-only invariant -- one libcsp has no
+    # equivalent of, like `shutdown` -- can only be covered by a unit test, and counting
+    # corpus records alone would report it as a hole.
+    # --no-fail-fast: a broken unit test must not stop the corpus binary from running, or
+    # every mutation that trips a unit test would report the corpus as blind to it.
+    r = subprocess.run(["cargo","test","-p","csp","--all-features","--no-fail-fast"],
                        capture_output=True, text=True)
     p.write_text(orig)
     out = r.stdout + r.stderr
     if "error[" in out or "could not compile" in out:
         print(f"{name:34s} did not compile")
         continue
-    hits = re.findall(r"^  ([a-z_]+::[a-z_0-9]+)", out, re.M)
-    caught = len(hits)
-    print(f"{name:34s} {caught:3d} record(s) notice" + ("   <-- NOTHING NOTICED" if caught == 0 else ""))
+    # Corpus divergences are the two-space-indented "suite::case" lines the runner prints.
+    records = len(re.findall(r"^  ([a-z_]+::[a-z_0-9]+)", out, re.M))
+    # Any failing test, corpus or unit, opens a "---- <name> stdout ----" block. If the
+    # corpus noticed, its block is one of them; otherwise every block is a unit test.
+    blocks = len(re.findall(r"^---- (\S+) stdout ----", out, re.M))
+    unit_only = blocks if records == 0 else 0
+
+    if records:
+        where = f"{records:3d} record(s)"
+    elif unit_only:
+        where = f"{unit_only:3d} unit test(s)"
+    else:
+        where = "  0"
+    flag = "   <-- NOTHING NOTICED" if (records == 0 and unit_only == 0) else ""
+    print(f"{name:34s} {where} notice{flag}")
