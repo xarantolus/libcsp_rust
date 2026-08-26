@@ -169,7 +169,7 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | Socket / client API | `csp/node.rs` — connect, bind, unbind, accept, read, send ×4, recvfrom, transaction, close | done |
 | Interface registry | `csp/iflist.rs` — add/remove, lookup by name/addr/subnet/broadcast, `check_default`, aliases | done |
 | Client service calls | `csp/client.rs` — ping, ping_noreply, ps, reboot, shutdown, memfree, buf_free, uptime, CMP requests | done |
-| Hooks | `csp/hooks.rs` — 14 of the C's 15, incl. the CMP memory hooks, all defaulting safely | done |
+| Hooks | `csp/hooks.rs` — 14 of the C's 15, incl. the CMP memory hooks; every fallible default refuses | done |
 | Interface counters | `csp/iface.rs` — all ten, with `note_refusal` routing a security refusal to the right one | done |
 | CAN / CFP | `csp-core/cfp.rs` (CFP1 + CFP2) | done |
 | KISS | `csp-core/kiss.rs` | done |
@@ -385,6 +385,37 @@ application calls `csp_service_handler` from its own receive loop
 (`examples/csp_server.c:77`). The port's `service`/`cmp` modules are opt-in the same way —
 `Router` never calls them. Worth stating because the opposite would mean a node answering
 `CSP_REBOOT` that its author never opted into.
+
+### The crypto hooks defaulted to reporting success on plaintext
+
+Found on 2026-08-26 by running `cargo llvm-cov` over the suite for the first time.
+`csp/src/hooks.rs` had the lowest function coverage of any module (82.86%), and six of the
+fourteen `Hooks` defaults were never entered by any test — including both crypto hooks.
+
+Every fallible default in that trait errs toward refusing: `on_power_request` returns
+`Refuse` ("should say so rather than appear to accept and do nothing"), `set_clock` returns
+`false`, `mem_read`/`mem_write` return `AddressRefused`. Except:
+
+```rust
+fn encrypt(&mut self, _data: &mut [u8], len: usize) -> Option<usize> { Some(len) }
+```
+
+`Some(len)` with the buffer untouched means **"encrypted"** — for plaintext. A node that
+switched on a tunnel without supplying crypto would have transmitted in the clear while
+every layer above it believed otherwise. `decrypt` was the same, handing the application
+whatever the peer sent.
+
+**The C is the safer of the two here**, which is unusual enough to be worth stating: its
+`__weak csp_crypto_encrypt` and `csp_crypto_decrypt` both return `-1` (`csp_if_tun.c:7,16`).
+The port inverted the default on the one hook whose failure direction is "transmit in the
+clear".
+
+Nothing in the port calls them yet — `if-tun` is out of scope — but `Hooks` is public API,
+and a caller writing a tunnel inherits the default. Both now return `None`, and
+`every_fallible_default_refuses` covers the rest of the value-returning defaults that
+`the_default_hooks_are_safe_and_say_nothing` never reached: it checked three of fourteen.
+
+SCOPE.md's own claim that the hooks were "all defaulting safely" was, for these two, false.
 
 ### `shutdown` released neither connections nor pending forwards
 
