@@ -1883,3 +1883,46 @@ node rather than a destination.
 
 `just mutants` keeps it honest: collapsing the fan-out back to a single destination is
 caught by two records.
+
+**Closed on 2026-08-26: a connection was not an endpoint.** `deliver_local` refused any
+packet whose destination port was not bound, before ever consulting the connection table.
+`csp_route_deliver` (`csp_route.c:276-285`) looks up *both* — the socket table and
+`csp_conn_find_existing` — and drops only when neither matches, because a reply to a
+connection this node opened arrives on the ephemeral source port `connect` chose and
+nothing ever binds that.
+
+So **every reply to every connection the port opened was dropped** as `PortNotBound`:
+`Node::connect` produced a connection that could not receive. The client API, the CMP
+client and RDP's `SYN|ACK` were all dead for the same reason. 495 tests, two module audits
+and the whole corpus passed, because nothing had ever put a reply into a node that had
+called `connect` — every node-level test drove the *server* direction.
+
+Found by coverage rather than by reading: `Action::SendSyn` showed as never executed, which
+led to `Event::Connect` being constructed nowhere, which led to `Node::connect` refusing
+RDP, and the client path came apart from there.
+
+Corpus case: `conn::a_reply_reaches_the_connection_that_asked_for_it` — the C delivers
+`"pong"` to the connection, the port delivered nothing. Mutation
+`conn: a connection is an endpoint too` restores the old order and the record fails.
+
+**A correction to how this was nearly reported.** The first version of that C test read the
+ephemeral port with `csp_conn_sport`, which returns `idin.sport` — the *remote* port.
+`csp_conn_dport` is the one that returns the ephemeral port a client connection listens on.
+With the wrong accessor the C also dropped the reply, and the measurement said the two
+stacks agreed. The "nothing bound this port" guard passed either way, since the remote port
+20 is also unbound. A test that confirms the C agrees with a broken port is worse than no
+test, and this one was two characters away from being that.
+
+**Also closed: the RDP client.** `Node::connect(RDP_REQ)` used to return
+`Error::Unsupported`. `csp-core`'s `State::SynSent` and `Action::SendSyn` were complete and
+unit-tested the whole time, and unreachable, because nothing constructed `Event::Connect` —
+the router carried a match arm for an action it could never receive. `connect` now seeds the
+sequence number, queues the `SYN`, and `Node::is_rdp_open` reports when the peer's
+`SYN|ACK` has opened the connection. `csp_rdp_connect` blocks until that reply arrives;
+sans-io has nowhere to block, so the caller drives it.
+
+The C's own SYN is measured by `rdp::an_rdp_connect_puts_a_syn_on_the_wire`: `csp_connect`
+emits the frame *before* it blocks on the semaphore its router task would release, so the
+frame is comparable even though the call is not. Flags, acknowledgement and option-block
+length match. The sequence number is excluded on purpose — it is the ISN, and the port
+deliberately does not reproduce `rand_r(csp_get_ms())`.

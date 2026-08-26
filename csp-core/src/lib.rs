@@ -220,6 +220,16 @@ pub enum Error {
         /// Which part of the entry was wrong.
         reason: RouteError,
     },
+    /// Nothing knows how to reach this address.
+    ///
+    /// Distinct from the ordinary send path, which hands the packet back as
+    /// `Outbound::NoRoute` so the caller can reuse the buffer. This is for the calls with
+    /// no packet to give back — opening an RDP connection, where the `SYN` the node built
+    /// for itself cannot leave.
+    Unroutable {
+        /// The address that could not be reached.
+        dst: u16,
+    },
     /// A protection this build does not implement was asked for.
     ///
     /// Refusing is the safe answer: the alternative is to set the feature's bit in the

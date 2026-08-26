@@ -1699,6 +1699,78 @@ START_TEST(test_a_stream_fragment_survives_being_carried_over_rdp)
 }
 END_TEST
 
+/* --- the client half of the handshake ---
+ *
+ * Every RDP test above has this node *answering* a peer's SYN. `csp_connect(.., CSP_O_RDP)`
+ * is the other direction, and the port refuses it outright: `Node::connect` returns
+ * `Error::Unsupported`, so `csp-core`'s `Event::Connect` is constructed nowhere outside its
+ * own unit tests and the router's `Action::SendSyn` arm cannot be reached. Coverage is what
+ * surfaced that -- the arm is dead code that reads like working client support.
+ *
+ * `csp_rdp_connect` puts the SYN on the wire and *then* blocks on a semaphore only the
+ * router task can release, so in a single-threaded harness the frame is observable and the
+ * call is not. The connection timeout is dropped to 50 ms first, because that wait is
+ * real-time (a pthread condvar) rather than virtual: at the 20 s default this test would
+ * sleep for forty seconds across its two attempts.
+ *
+ * What is recorded is the SYN itself -- the flags a peer sees, the sequence number, and the
+ * six option words the C proposes -- which is exactly what a port implementing the client
+ * has to reproduce. */
+START_TEST(test_an_rdp_connect_puts_a_syn_on_the_wire)
+{
+	setup_stack();
+
+	unsigned int w, ct, pt, da, at, adc;
+	csp_rdp_get_opt(&w, &ct, &pt, &da, &at, &adc);
+	csp_rdp_set_opt(w, 50 /* conn_timeout */, pt, da, at, adc);
+
+	uint32_t opts[6] = { 0 };
+	unsigned int syn_frames = 0;
+	uint8_t syn_flags = 0;
+	uint16_t syn_seq = 0, syn_ack = 0, syn_payload = 0;
+
+	/* Capture the first frame only: the retry emits an identical second SYN. */
+	csp_conn_t * conn = csp_connect(2, PEER_ADDR, TEST_PORT, 0, CSP_O_RDP);
+
+	syn_frames = test_tx_count;
+	syn_flags = tx_flags;
+	syn_seq = tx_seq;
+	syn_ack = tx_ack;
+	syn_payload = tx_payload_len;
+
+	/* No peer answered, so the C gives up and hands back nothing. */
+	ck_assert_ptr_null(conn);
+	ck_assert_uint_gt(syn_frames, 0);
+	ck_assert_uint_eq(syn_flags, RDP_SYN);
+	ck_assert_uint_eq(syn_payload, sizeof(opts));
+	/* The sequence number is the ISN, and a SYN naming sequence 0 would be a machine that
+	   never randomised it. The value itself is `rand_r`-derived and not something the port
+	   reproduces, so it is asserted as a property rather than recorded. */
+	ck_assert_uint_ne(syn_seq, 0);
+
+	csp_rdp_set_opt(w, ct, pt, da, at, adc);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "an_rdp_connect_puts_a_syn_on_the_wire", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("clock_ms", CTEST_CLOCK_EPOCH_MS);
+		ctest_trace_int("conn_timeout_ms", 50);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("syn_flags", syn_flags);
+		ctest_trace_int("syn_ack", syn_ack);
+		ctest_trace_int("option_bytes", syn_payload);
+		/* `syn_seq` is deliberately absent. It is the ISN, which the C derives from
+		   `rand_r(csp_get_ms())` and the port does not reproduce -- a recorded divergence,
+		   covered on the C side by `isn_is_a_function_of_the_clock`. Including it would
+		   force this record to `diverges` and stop it pinning the three fields that do have
+		   to agree. It is asserted above as a property instead. */
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* The same cell, but with a transfer that does not fit in one fragment.
  *
  * The test above hands `csp_sfp_recv_fp` a packet that completes the transfer on the spot,
@@ -1792,6 +1864,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_hs, test_data_reaches_the_application_without_the_rdp_trailer);
 	tcase_add_test(tc_hs, test_a_stream_fragment_survives_being_carried_over_rdp);
 	tcase_add_test(tc_hs, test_a_multi_fragment_stream_reassembles_over_rdp);
+	tcase_add_test(tc_hs, test_an_rdp_connect_puts_a_syn_on_the_wire);
 	tcase_add_test(tc_hs, test_a_hostile_syn_cannot_suppress_acknowledgement);
 	suite_add_tcase(s, tc_hs);
 

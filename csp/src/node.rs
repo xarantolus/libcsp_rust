@@ -400,6 +400,19 @@ impl<
         self.router.conns.is_live(conn)
     }
 
+    /// True once an RDP connection has completed its handshake.
+    ///
+    /// [`Node::connect`] returns as soon as the `SYN` is queued, so a caller that opened an
+    /// RDP connection needs to know when the peer has answered — data sent before that is
+    /// outside the send window and refused. Always false for a connection that is not RDP.
+    #[cfg(feature = "rdp")]
+    pub fn is_rdp_open(&self, conn: Handle) -> bool {
+        self.router
+            .conns
+            .rdp(conn)
+            .is_ok_and(csp_core::rdp::Connection::is_open)
+    }
+
     /// Largest SFP payload per fragment on this connection.
     ///
     /// One method. Both firmware consumers reimplement this same
@@ -431,7 +444,11 @@ impl<
     /// option that does not reach the header is a protection the caller asked for and
     /// silently did not get.
     ///
-    /// `RDP_REQ` is refused. See [`Node::rdp_unsupported`].
+    /// With `RDP_REQ` the connection is not usable on return: a `SYN` is queued, and the
+    /// next [`Node::work`] hands it to the wire as `Routed::Respond`. The connection is
+    /// open once the peer's `SYN|ACK` has been fed back through `receive`. `csp_connect`
+    /// blocks until that happens; there is nowhere to block here, so the caller drives it.
+    /// Without the `rdp` feature `RDP_REQ` is refused outright.
     pub fn connect(
         &mut self,
         pri: u8,
@@ -471,6 +488,28 @@ impl<
             sport: dport,
         };
         self.router.conns.set_id_in(h, idin)?;
+
+        // An RDP connection is not usable the moment it is allocated: the peer has to
+        // answer a SYN first. The frame is queued rather than returned, so `connect` keeps
+        // its shape and the caller's next `work()` transmits it like any other outbound
+        // frame. `is_open` reports when the handshake finished.
+        #[cfg(feature = "rdp")]
+        if flags & csp_core::flags::RDP != 0 {
+            if let Err(e) =
+                self.router
+                    .rdp_connect(&self.storage.pool, &self.ifaces, h, idout, now_ms)
+            {
+                // Do not leave a half-open connection holding a slot when the SYN could
+                // not be built or routed.
+                let mut drained = [0u16; RXQ];
+                if let Ok(n) = self.router.conns.close(h, &mut drained) {
+                    for slot in drained.iter().take(n) {
+                        drop(self.storage.pool.from_index(*slot));
+                    }
+                }
+                return Err(e);
+            }
+        }
         Ok(h)
     }
 
@@ -481,11 +520,15 @@ impl<
     fn conn_flags(opts: u32) -> Result<u8> {
         use csp_core::security::opts as o;
 
+        let mut flags = 0u8;
+        #[cfg(feature = "rdp")]
+        if opts & o::RDP_REQ != 0 {
+            flags |= csp_core::flags::RDP;
+        }
+        #[cfg(not(feature = "rdp"))]
         if opts & o::RDP_REQ != 0 {
             return Err(Self::rdp_unsupported());
         }
-
-        let mut flags = 0u8;
         if opts & o::HMAC_REQ != 0 {
             flags |= csp_core::flags::HMAC;
         }
@@ -495,15 +538,14 @@ impl<
         Ok(flags)
     }
 
-    /// Why `RDP_REQ` is refused.
+    /// Why `RDP_REQ` is refused in a build without the `rdp` feature.
     ///
-    /// The RDP state machine in `csp_core::rdp` is complete, but nothing in this crate
-    /// drives it: no `SYN` is sent, no received packet is fed to it, and there is no
-    /// retransmission queue. Setting `flags::RDP` anyway would be worse than refusing —
-    /// the peer would read the first five bytes of payload as an RDP header.
+    /// Setting `flags::RDP` without the state machine behind it would be worse than
+    /// refusing — the peer would read the first five bytes of payload as an RDP header.
     ///
     /// This mirrors what the C does when built without `CSP_USE_RDP`: `csp_connect`
     /// records `CSP_DBG_ERR_UNSUPPORTED` and returns no connection.
+    #[cfg(not(feature = "rdp"))]
     fn rdp_unsupported() -> Error {
         Error::Unsupported {
             feature: csp_core::Feature::Rdp,
@@ -1386,6 +1428,7 @@ mod tests {
 
     /// A connection that flags RDP and does not speak it is worse than no connection: the
     /// peer reads the first five payload bytes as an RDP header.
+    #[cfg(not(feature = "rdp"))]
     #[test]
     fn connect_refuses_rdp_rather_than_flagging_it() {
         let s = S::new();
@@ -1395,6 +1438,80 @@ mod tests {
             Err(Error::Unsupported {
                 feature: csp_core::Feature::Rdp
             })
+        );
+    }
+
+    /// Opening an RDP connection puts a `SYN` on the wire and does not report the
+    /// connection as usable until the peer has answered it.
+    ///
+    /// Asserted through what a peer would see and what the application may do, not through
+    /// the state machine's own fields: a `connect` that returned an open connection before
+    /// the handshake finished would let the caller send data the peer discards.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn connect_over_rdp_sends_a_syn_and_opens_only_on_the_reply() {
+        use csp_core::rdp;
+
+        const PEER: u16 = 8;
+
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("test", ME, 5, true).unwrap();
+
+        let h = n
+            .connect(2, PEER, 20, csp_core::security::opts::RDP_REQ, 1000)
+            .expect("an RDP connect is accepted");
+
+        // The SYN reaches the wire, carrying the option block a peer needs to answer.
+        let mut syn = None;
+        loop {
+            match n.work(1000) {
+                Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("a live slot");
+                    syn = p.with_payload(|b| rdp::Header::decode(b).ok().map(|hd| (hd, b.len())));
+                    drop(p);
+                }
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        let (hd, len) = syn.expect("connect queued a SYN");
+        assert_eq!(hd.flags, rdp::SYN);
+        assert_eq!(len - rdp::HEADER_LEN, rdp::SYN_OPTIONS_LEN);
+
+        // Until the peer answers, the connection is not open and carries no data.
+        assert!(!n.is_rdp_open(h));
+
+        // The peer's SYN|ACK, acknowledging the sequence we proposed. It has to be
+        // addressed to the ephemeral source port `connect` chose, or it matches no
+        // connection and the handshake never finishes.
+        let info = n.conn_info(h).expect("the connection is live");
+        let mut reply = n.packet().expect("the pool is empty");
+        reply.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: ME,
+            dport: info.dport,
+            sport: info.sport,
+        });
+        let ack = rdp::Header {
+            flags: rdp::SYN | rdp::ACK,
+            seq_nr: 500,
+            ack_nr: hd.seq_nr,
+        };
+        let mut buf = [0u8; rdp::HEADER_LEN + rdp::SYN_OPTIONS_LEN];
+        let opts = rdp::SynOptions::default();
+        let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+        let bn = opts.encode(&mut body).unwrap();
+        let k = ack.encode(&body[..bn], &mut buf).unwrap();
+        reply.set_payload(&buf[..k]).unwrap();
+        n.router.receive(reply, 0);
+        while !matches!(n.work(1100), Routed::Idle) {}
+
+        assert!(
+            n.is_rdp_open(h),
+            "the connection opens once the peer's SYN|ACK arrives"
         );
     }
 
