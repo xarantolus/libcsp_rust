@@ -2088,3 +2088,29 @@ the held frame fails the second with `["first"]` where two were expected.
 frame arrives without a fresh event, so the data was sitting on the connection unread. The
 test now reads the connection itself. It looked exactly like the port dropping the
 overtaking packet, which is the defect it was written to find.
+
+**2026-08-26: deduplication, node against node.** Covered in `ctest/` against a real C node,
+but not in the differential harness where the recent defects surfaced. `csp_dedup_is_duplicate`
+keys on a CRC32 over the **framed** bytes — after `csp_id_prepend`, so the header is part of
+the key — with a 16-entry ring and a 100 ms window; the port's `Dedup` claims the same. That
+was two readings of two implementations. `node_dedup.rs` compares them.
+
+**No defect.** Three cases, all matching: dedup **off** (the default on both sides) delivers
+the duplicate twice; **incoming** delivers it once; two frames differing only in source port
+are not duplicates for either. The off case matters as much as the on case — a port that
+deduplicated by default would look identical to a correct one in any test that only checked
+the on case, and would silently swallow a ground station's retransmitted command.
+
+Verified by control: forcing `applies` to true fails the off case, and keying on the last
+five bytes instead of the whole frame fails the distinct case.
+
+**Two harness mistakes, both mine.** The cases first shared their frames, so the third
+re-injected one the C had seen microseconds earlier — still inside the 100 ms window and
+still in the 16-entry ring — and the C suppressed it for reasons unrelated to the case. It
+also compared a warm C ring against a cold port one, since `rust_dedup_exchange` builds a
+fresh node per call. Every case now uses frames never sent before.
+
+And the first attempt at the second control silently did nothing: a `\&` escape in a
+non-raw Python string meant the replacement never matched, so the test "passed" against
+unmutated code. A control that does not mutate proves exactly as much as a test that cannot
+fail. It now asserts the anchor was found and that the text changed.
