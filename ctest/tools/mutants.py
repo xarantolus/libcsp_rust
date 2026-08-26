@@ -336,6 +336,9 @@ MUTANTS = [
   ("rdp: a reset is answered", "csp-core/src/rdp.rs",
    "                    self.state = State::CloseWait;\n                    return Action::SendControl(Header {\n                        flags: ACK | RST,",
    "                    self.state = State::CloseWait;\n                    return Action::SendControl(Header {\n                        flags: ACK,"),
+  ("rdp: an extended acknowledgement carries no data", "csp-core/src/rdp.rs",
+   "                if h.has(EAK) {\n                    if h.has(ACK) {",
+   "                if false {\n                    if h.has(ACK) {"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

@@ -269,6 +269,44 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### EAK: a flag the port defined and never read
+
+2026-08-26. The last RDP flag with no test on either side. `csp-core` declared `EAK = 0x02`
+and never looked at it; `csp_rdp.c` acts on it twice.
+
+**A peer could hand the application data by flagging it as acknowledgement.**
+`csp_rdp.c:712` treats an extended acknowledgement as acknowledgement only — `snd_una` moves,
+the retransmit counter clears, then `goto discard_open` throws the packet away *including any
+payload*. The port took the payload branch first, so a packet carrying `ACK|EAK` and a body
+was delivered to the application as an ordinary message, and answered. Measured: the C
+delivers 0 bytes and sends nothing; the port delivered 2 and replied `ACK`. Now
+acknowledgement-only, matching.
+
+**The C's own comment is wrong about the other path.** `csp_rdp.c:722` reads *"If message is
+not in sequence, send EACK and store packet"*. Measured, it stores and answers **nothing** —
+no EAK goes out. I would have implemented the comment.
+
+### Out-of-order RDP data is dropped, and the reorder queue that exists is unused
+
+`rdp::out_of_sequence_data_is_answered_but_not_delivered` — `diverges`, and the reason is a
+real gap rather than a decision.
+
+Data arriving with a gap: the C queues it (`csp_rdp_rx_queue_add`) silently, to be delivered
+once the missing packet fills the hole. The port drops it and answers a plain `ACK`, so the
+peer retransmits — the data eventually arrives, but a lost packet costs a round trip per
+following packet instead of one.
+
+`csp-core::rdp::RxQueue` exists, with reorder tests including the sequence wrap. **Nothing
+uses it**: `Connection::step`'s `Open` arm re-acknowledges out-of-window data instead of
+holding it. That is the same shape as every RDP finding in this exercise — a correct piece of
+the core that the layer above never calls — and it is the fourth instance.
+
+Not closed here: wiring the receive queue in is a functional change with its own delivery
+ordering to verify, not something to bolt on at the end of a cycle. Removing the gratuitous
+`ACK` alone would match this record and make the port *worse* — silent loss with no signal to
+the sender — which is optimising for the test rather than for the peer. Recorded as measured,
+with the record asserting the disagreement so it cannot drift unnoticed.
+
 ### One spoofed RST dropped the link — the port had no blind-reset defence
 
 2026-08-26. Thirty tests in `suite_rdp.c` and not one sent a reset: teardown was the half of
@@ -1210,7 +1248,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**106 of 134**.
+**108 of 136**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that

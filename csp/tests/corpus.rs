@@ -1236,6 +1236,118 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// One crafted packet on an established connection: what the application gets, and what
+/// goes back on the wire.
+///
+/// Covers the two EAK paths, the flag `csp-core` defines and never reads. `csp_rdp.c:712`
+/// treats an extended acknowledgement as acknowledgement *only* -- `snd_una` moves, the
+/// retransmit counter resets, and `goto discard_open` throws the packet away including any
+/// payload. And data arriving with a gap is queued silently: measured, the C answers
+/// nothing, which is not what its own comment ("send EACK and store packet") suggests.
+#[cfg(feature = "rdp")]
+fn replay_rdp_one_packet(flags: u8, seq_offset: u16, payload: &[u8]) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    let (mut delivered, mut delivered_bytes) = (0u32, 0u32);
+    let mut frames = 0u32;
+    let mut last_flags = 0u8;
+
+    let mut feed = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                    payload: &[u8],
+                    flags: u8,
+                    seq: u16,
+                    ack: u16,
+                    count: bool| {
+        let mut buf = [0u8; 64];
+        buf[..payload.len()].copy_from_slice(payload);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hlen = h.encode(&[], &mut buf[payload.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..payload.len() + hlen]).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => {
+                    if count {
+                        frames += 1;
+                    }
+                    if let Some(pk) = n.take_forwarded(packet) {
+                        if count {
+                            last_flags = pk.with_payload(|b| {
+                                rdp::Header::decode(b).map(|h| h.flags).unwrap_or(0)
+                            });
+                        }
+                        drop(pk);
+                    }
+                }
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(pkt)) = n.read(conn) {
+                        if count {
+                            delivered += 1;
+                            delivered_bytes += pkt.with_payload(|d| d.len() as u32);
+                        }
+                        drop(pkt);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    feed(&mut n, &syn[..olen], rdp::SYN, 1000, 0, false);
+    let iss = n
+        .accept()
+        .and_then(|h| n.router.conns.rdp(h).ok().map(|r| r.snd_iss))
+        .unwrap_or(0);
+    feed(&mut n, &[], rdp::ACK, 1001, iss, false);
+
+    // `rcv_cur` is 1000 after the handshake.
+    feed(&mut n, payload, flags, 1000 + seq_offset, iss, true);
+
+    serde_json::json!({
+        "delivered": delivered,
+        "delivered_bytes": delivered_bytes,
+        "frames_back": frames,
+        "reply_flags": if frames > 0 { last_flags & 0x0F } else { 0 },
+    })
+}
+
 /// A peer resetting an established connection, in sequence and out of it.
 ///
 /// `csp_rdp.c` honours a reset only when `seq_nr == rcv_cur + 1`: it moves to CLOSE_WAIT and
@@ -3040,6 +3152,16 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "rdp" if rec.case == "malformed_syns_do_not_exhaust_the_table" => Some((
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "an_eak_carries_no_data_to_the_application" => Some((
+            replay_rdp_one_packet(csp_core::rdp::ACK | csp_core::rdp::EAK, 1, b"xy"),
+            "ACK|EAK carrying two bytes".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "out_of_sequence_data_is_answered_but_not_delivered" => Some((
+            replay_rdp_one_packet(csp_core::rdp::ACK, 2, b"z"),
+            "data one sequence number ahead".to_string(),
         )),
         #[cfg(feature = "rdp")]
         "rdp" if rec.case.contains("_rst_") => {
