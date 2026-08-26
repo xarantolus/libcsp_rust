@@ -324,10 +324,24 @@ START_TEST(test_rdp_retransmits_are_limited)
 	ck_assert_ptr_nonnull(find_rdp_conn());
 
 	const unsigned int tx_after_syn = test_tx_count;
+	/* What the original SYN/ACK carried, before any repeat. */
+	const uint16_t first_seq = tx_seq;
+	const uint16_t first_ack = tx_ack;
 
-	/* The peer never acknowledges the SYN/ACK. */
+	/* The peer never acknowledges the SYN/ACK. Snapshotted at the first repeat: a repeat
+	   carrying different sequence numbers is rejected by the peer and looks, from the
+	   outside, exactly like no repeat at all -- so counting frames is not enough. */
+	uint16_t repeat_seq = 0, repeat_ack = 0;
+	uint8_t repeat_flags = 0;
+	bool have_repeat = false;
 	for (int i = 0; (i < 1000) && (find_rdp_conn() != NULL); i++) {
 		csp_conn_check_timeouts();
+		if (!have_repeat && test_tx_count > tx_after_syn) {
+			repeat_seq = tx_seq;
+			repeat_ack = tx_ack;
+			repeat_flags = tx_flags;
+			have_repeat = true;
+		}
 		ctest_clock_advance(20);
 	}
 
@@ -356,6 +370,10 @@ START_TEST(test_rdp_retransmits_are_limited)
 		ctest_trace_int("at_least_max_retransmits", sent >= CSP_RDP_MAX_RETRANSMITS ? 1 : 0);
 		/* And it stops: a node that retransmitted forever would never reach here. */
 		ctest_trace_int("connection_gone", find_rdp_conn() == NULL ? 1 : 0);
+		/* The repeat is the same frame: same flags, same sequence, same acknowledgement. */
+		ctest_trace_int("repeat_is_syn_ack", repeat_flags == (RDP_SYN | RDP_ACK) ? 1 : 0);
+		ctest_trace_int("repeat_seq_matches_first", repeat_seq == first_seq ? 1 : 0);
+		ctest_trace_int("repeat_ack_matches_first", repeat_ack == first_ack ? 1 : 0);
 		ctest_trace_obj_end();
 		ctest_trace_end();
 	}

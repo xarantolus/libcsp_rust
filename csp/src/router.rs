@@ -1092,6 +1092,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     ///
     /// Returns how many connections were closed. Must be called regularly — the RDP state
     /// machine reads no clock on purpose, so nothing else advances its timers.
+    // `ifaces` routes the frames the RDP timers produce; with RDP off there are none.
+    #[cfg_attr(not(feature = "rdp"), allow(unused_variables))]
     pub fn tick<const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
         pool: &Pool<B, SZ>,
