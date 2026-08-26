@@ -661,6 +661,9 @@ fn replay_eth(input: &EthInput) -> EthObserved {
 #[serde(deny_unknown_fields)]
 struct RdpInput {
     delayed_acks: u8,
+    /// Only the clamp case sets this; the others open with the C helper's window of 4.
+    #[serde(default)]
+    window_size: u32,
     #[serde(default)]
     ack_delay_count: u32,
     #[serde(default)]
@@ -2730,6 +2733,48 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
         )),
+        "rdp" if rec.case == "a_delay_count_beyond_the_window_is_bound_by_it" => {
+            let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // Through `decode_clamped`, not by constructing `SynOptions` directly. The
+            // whole point is the bound the *negotiated* window puts on `ack_delay_count`,
+            // and a hand-built options struct skips the only code that applies it -- which
+            // is exactly what the neighbouring cadence replay does, and why none of them
+            // could ever have caught a wrong bound.
+            let proposed = csp_core::rdp::SynOptions {
+                window_size: input.window_size,
+                conn_timeout: 20_000,
+                packet_timeout: 1_000,
+                delayed_acks: input.delayed_acks != 0,
+                ack_timeout: 250,
+                ack_delay_count: input.ack_delay_count,
+            };
+            let mut wire = [0u8; csp_core::rdp::SYN_OPTIONS_LEN];
+            let n = proposed.encode(&mut wire).unwrap();
+            let opts =
+                csp_core::rdp::SynOptions::decode_clamped(&wire[..n], csp::router::RDP_MAX_WINDOW)
+                    .expect("a complete option block");
+
+            let mut c = csp_core::rdp::Connection::new(1000, opts);
+            c.state = csp_core::rdp::State::Open;
+            c.rcv_cur = 1000;
+            c.rcv_lsa = 1000;
+            let mut running = Vec::new();
+            let mut acks = 0;
+            for i in 1..=5u16 {
+                c.rcv_cur = 1000 + i;
+                if c.poll_ack(0).is_some() {
+                    acks += 1;
+                }
+                running.push(acks);
+            }
+            Some((
+                serde_json::json!({ "acks_after_n_packets": running }),
+                format!(
+                    "window {}, delay count {}",
+                    input.window_size, input.ack_delay_count
+                ),
+            ))
+        }
         "rdp" if rec.case == "the_delay_count_fires_one_packet_after_it" => {
             let input: RdpInput = serde_json::from_value(rec.input.clone()).unwrap();
             // The C records the running total after each of five packets.

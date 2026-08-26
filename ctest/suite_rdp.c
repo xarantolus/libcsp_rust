@@ -697,6 +697,58 @@ END_TEST
  * which is *strictly* after, so the ack fires once the outstanding count exceeds the
  * delay -- at count + 1, not at count. Measured rather than argued, because an
  * implementation using `>=` is off by exactly one packet and nothing else looks wrong. */
+/* `csp_rdp.c:576` clamps the peer's proposed `ack_delay_count` to `conn->rdp.window_size`
+   -- the window *it just negotiated*, not a compile-time maximum. Every other cadence test
+   opens with `window_size = 4` and an `ack_delay_count` below it, so the clamp never fires
+   and the relationship between the two is never exercised.
+
+   Here a peer proposes a two-packet window and a delay count of 250. If the count is bound
+   by the negotiated window it becomes 2 and acknowledgements resume at the window rate; if
+   it were bound by anything larger the sender would wait far longer for one, on a window
+   that only allows two packets in flight -- a stall a peer would see as a dead link. The
+   cadence is the observable, and it is the only place the negotiated window shows up on
+   the wire at all. */
+START_TEST(test_a_delay_count_beyond_the_window_is_bound_by_it)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 2 /* window */, 20000, 1000, 1 /* delayed */, 250, 250 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int acks_at[5];
+	const unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 5; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+		acks_at[i - 1] = test_tx_count - before;
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_delay_count_beyond_the_window_is_bound_by_it",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("window_size", 2);
+		ctest_trace_int("delayed_acks", 1);
+		ctest_trace_int("ack_delay_count", 250);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_arr_begin("acks_after_n_packets");
+		for (int i = 0; i < 5; i++) {
+			ctest_trace_int(NULL, (int64_t)acks_at[i]);
+		}
+		ctest_trace_arr_end();
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+
+	/* A count of 250 left unbound would never acknowledge within five packets. */
+	ck_assert_uint_gt(acks_at[4], 0);
+}
+END_TEST
+
 START_TEST(test_the_delay_count_fires_one_packet_after_it)
 {
 	setup_stack();
@@ -1063,6 +1115,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_delay_count_beyond_the_window_is_bound_by_it);
 	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
 	tcase_add_test(tc_ack, test_an_ack_is_sent_even_with_nothing_to_acknowledge);
 	tcase_add_test(tc_ack, test_acks_stop_when_the_application_is_not_reading);
