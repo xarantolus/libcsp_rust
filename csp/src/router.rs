@@ -768,7 +768,23 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 // had already been reset -- and left the table slot allocated, so a peer
                 // could fill the table with packets a real handshake never sent.
                 let refused = is_new && (h.flags & csp_core::rdp::RST) != 0;
+                // An *established* connection answering a reset keeps its slot -- it must
+                // still answer anything the peer sends afterwards -- but not the packets
+                // queued on it. `csp_rdp.c` replies and then `discard_close`s straight into
+                // `csp_conn_close`, which releases them; an application that will never
+                // read them would otherwise hold a pool buffer each until the sweep.
+                let reset_established = !is_new
+                    && (h.flags & csp_core::rdp::RST) != 0
+                    && self
+                        .conns
+                        .rdp(handle)
+                        .is_ok_and(|c| c.state == csp_core::rdp::State::CloseWait);
                 let out = self.emit_rdp(pool, id, ifaces, h, &[], is_new && !refused, handle);
+                if reset_established {
+                    while let Ok(Some(slot)) = self.conns.dequeue_rx(handle) {
+                        drop(pool.from_index(slot));
+                    }
+                }
                 if refused {
                     let mut drained = [0u16; RXQ];
                     if let Ok(n) = self.conns.close(handle, &mut drained) {
