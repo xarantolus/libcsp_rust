@@ -341,10 +341,27 @@ retransmission to the full 256-byte buffer and wrote the refreshed acknowledgeme
 real trailer. The frame still carried `hello` and a valid header, so nothing but a length
 comparison would have seen it.
 
-**Still not covered:** multi-packet sequencing -- both records send one packet at a time --
-and the window's behaviour under load. `SendWindowFull` has a unit test
-(`the_send_window_bounds_what_may_be_claimed`) and no C comparison, because the C blocks
-there rather than returning.
+**Multi-packet sequencing and release-on-acknowledgement**, the two gaps this entry named
+when the send path landed, are now measured.
+`rdp::three_sends_are_sequential_and_an_ack_releases_them` sends three packets, checks each
+takes the next sequence number, then has the peer acknowledge all three at once and waits ten
+seconds. Both stacks: sequential, nothing retransmitted, no buffers lost.
+
+The buffer count is not decoration. "Nothing was retransmitted" is *also* true of a node that
+drops the queue entry and leaks its buffer, and that is exactly what happened when the
+release was tried against the record: breaking `TxAction::Release` changed no frame count at
+all, because `poll` clears the entry either way. Only `buffers_lost: 3` sees it. Two of the
+three send-path invariants would otherwise have been pinned by nothing:
+
+| broken | caught by frames | caught by buffers |
+|---|---|---|
+| `snd_nxt` does not advance | yes | — |
+| `snd_una` does not advance on the peer's ack | yes | — |
+| the acknowledged buffer is never released | **no** | yes |
+
+**Still not covered:** the window's behaviour under load. `SendWindowFull` has a unit test
+(`the_send_window_bounds_what_may_be_claimed`) and no C comparison, because the C blocks on a
+semaphore there rather than returning, so there is nothing to compare an answer against.
 
 ### The receive reorder queue is wired in; the transmit queue still is not
 
@@ -1326,7 +1343,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**111 of 140**.
+**112 of 141**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
