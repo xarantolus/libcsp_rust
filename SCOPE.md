@@ -286,6 +286,43 @@ acknowledgement-only, matching.
 not in sequence, send EACK and store packet"*. Measured, it stores and answers **nothing** —
 no EAK goes out. I would have implemented the comment.
 
+### The port's RDP is receive-only: there is no send path
+
+2026-08-26, following the transmit queue named yesterday. The gap is much larger than an
+unused queue, and I had been describing it as the smaller thing.
+
+`rdp::unacknowledged_data_is_retransmitted_then_given_up_on` — `diverges`. An application
+sends one packet on an established RDP connection and the peer never acknowledges it.
+Measured, under a 1000 ms `packet_timeout` swept every 250 ms:
+
+| | first send | total frames | frames afterwards |
+|---|---|---|---|
+| libcsp | 1 | **29** | 0 |
+| the port | 1 | **1** | 0 |
+
+The C retransmits on `packet_timeout`, counts one attempt per sweep, and stops past
+`CSP_RDP_MAX_RETRANSMITS`, leaving the connection for the application to close. The port
+sends once and never repeats.
+
+**What is actually missing.** `Node::send` fills the header in from the connection and routes
+the packet — that is all. It attaches no RDP trailer, assigns no sequence number, and queues
+nothing: `snd_nxt` does not appear anywhere in `csp/src`. So a port node cannot be the
+*sender* on an RDP connection at all; a C peer would not recognise what it emits as RDP data.
+Everything measured until now — handshake, delivery, acknowledgement cadence, resets,
+reordering — is the **receive** half, which is why none of it caught this.
+
+`csp-core::rdp::TxQueue::poll` is already written to the C's semantics: release what
+`snd_una` covers, retransmit past `packet_timeout`, one count per sweep, `GiveUp` past the
+limit. It has no caller, like `RxQueue` had none until yesterday.
+
+**Not attempted here, deliberately.** The send half needs sequence assignment and trailer
+framing on the application's path, the packet held rather than handed away, retransmissions
+emerging from `work` instead of from `send`'s return value, release on acknowledgement, and
+the window blocking the C does when the queue is full. That is a change to the
+application-facing send API, not a wiring job, and half of it landed and reported as done is
+exactly the failure this exercise exists to catch. The record asserts the disagreement so it
+cannot drift, and this entry says what "RDP works" currently means: it receives.
+
 ### The receive reorder queue is wired in; the transmit queue still is not
 
 2026-08-26. Closing the gap named the day before.
@@ -1266,7 +1303,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**109 of 137**.
+**109 of 138**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
