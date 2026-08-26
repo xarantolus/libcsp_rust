@@ -92,3 +92,9 @@
 {"suite":"route","case":"a_table_routed_destination_leaves_unchanged","verdict":"must_match","observed":{"frames":1,"left_by":["link_a"],"dst_on_wire":[3000],"buffers_lost":0}}
 {"suite":"route","case":"a_local_subnet_beats_the_default_interface","verdict":"must_match","observed":{"frames":1,"left_by":["link_a"],"dst_on_wire":[10],"buffers_lost":0}}
 {"suite":"route","case":"an_application_send_to_a_broadcast_is_rewritten_too","verdict":"must_match","observed":{"frames":1,"left_by":["link_a"],"dst_on_wire":[16383],"buffers_lost":0}}
+{"suite":"rtable","case":"a_netmask_wider_than_the_address_space_is_refused_by_the_parser","verdict":"must_match","input":{"table":"3000_slash_99_link_a","host_bits":14},"observed":{"load_result":-2,"frames":0}}
+{"suite":"rtable","case":"the_same_netmask_set_directly_is_clamped_not_refused","verdict":"must_match","input":{"netmask_asked_for":99,"host_bits":14},"observed":{"set_result":0,"frames":1}}
+{"suite":"rtable","case":"a_refused_table_string_keeps_the_entries_before_the_bad_one","verdict":"must_match","input":{"table":"good_then_bad"},"observed":{"load_result":-2,"first_entry_installed":1}}
+{"suite":"rtable","case":"a_one_character_entry_ends_the_parse_and_still_reports_success","verdict":"diverges","input":{"table":"good_short_good"},"observed":{"load_result":1,"routes_after_the_short_token":0}}
+{"suite":"rtable","case":"a_next_hop_survives_the_text_format","verdict":"must_match","input":{"table":"addr_iface_via","via_written":42},"observed":{"load_result":1,"via_on_tx":42}}
+{"suite":"rtable","case":"a_route_without_a_next_hop_sends_direct","verdict":"must_match","input":{"table":"addr_iface"},"observed":{"load_result":1,"via_on_tx":65535}}

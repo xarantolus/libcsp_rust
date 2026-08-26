@@ -48,9 +48,16 @@ static char left_by[MAX_SEEN][CSP_IFLIST_NAME_MAX + 1];
 static uint16_t dst_on_wire[MAX_SEEN];
 static unsigned int seen;
 
+/* The next hop each frame was handed to the interface with. A route's `via` is not in the
+   packet -- it is the argument the driver is told to address the frame to -- so it is
+   observable here and nowhere else. */
+static uint16_t via_on_tx[MAX_SEEN];
+
 static int record_tx(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
-	(void)via;
 	(void)from_me;
+	if (seen < MAX_SEEN) {
+		via_on_tx[seen] = via;
+	}
 	if (seen < MAX_SEEN) {
 		const char * n = (iface && iface->name) ? iface->name : "?";
 		strncpy(left_by[seen], n, CSP_IFLIST_NAME_MAX);
@@ -82,6 +89,7 @@ static void setup_stack(bool two_links) {
 	seen = 0;
 	memset(left_by, 0, sizeof(left_by));
 	memset(dst_on_wire, 0, sizeof(dst_on_wire));
+	memset(via_on_tx, 0, sizeof(via_on_tx));
 	ctest_clock_set(CTEST_CLOCK_EPOCH_MS);
 }
 
@@ -379,6 +387,218 @@ START_TEST(test_an_application_send_to_a_broadcast_is_rewritten_too)
 }
 END_TEST
 
+/* --- the route-table text format ---
+ *
+ * `csp_rtable_load` is the only way a route reaches a flying node from the ground, and it
+ * had no oracle at all: `rtable` is the one module with neither a golden vector nor a
+ * corpus record, so its parser was verified against nothing but a reading of
+ * `csp_rtable_stdio.c`.
+ *
+ * Every case below is measured as **where a packet for the address goes afterwards**, not
+ * as what the parser returned. A parser that accepts a string and installs the wrong route
+ * returns success either way.
+ */
+
+/* Load a table string and report the interface a packet for `dst` then leaves by, or ""
+   for nothing at all. The return value of the load is reported separately. */
+static const char * goes_by(uint16_t dst) {
+	seen = 0;
+	memset(left_by, 0, sizeof(left_by));
+	memset(dst_on_wire, 0, sizeof(dst_on_wire));
+	route_to(dst);
+	return seen ? left_by[0] : "";
+}
+
+/* A netmask wider than the address space.
+ *
+ * `csp_rtable_set` **clamps** it to `csp_id_get_host_bits()` (csp_rtable_cidr.c:109), but
+ * the parser **rejects** it before ever calling that (csp_rtable_stdio.c:44). The two
+ * paths to the same table disagree, and only the string path is reachable from the ground.
+ */
+START_TEST(test_a_netmask_wider_than_the_address_space_is_refused_by_the_parser)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("3000/99 LINK_A");
+
+	ck_assert_int_eq(res, CSP_ERR_INVAL);
+	/* And nothing was installed: 3000 is in no subnet, so with no route and no default
+	   it goes nowhere. */
+	ck_assert_str_eq(goes_by(3000), "");
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "a_netmask_wider_than_the_address_space_is_refused_by_the_parser",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_ident("table", "3000_slash_99_link_a");
+		ctest_trace_int("host_bits", (int)csp_id_get_host_bits());
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("frames", (int64_t)seen);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* The same netmask, set directly rather than parsed: clamped, and the route works. This is
+   the control that makes the case above a real asymmetry rather than a blanket refusal. */
+START_TEST(test_the_same_netmask_set_directly_is_clamped_not_refused)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_set(3000, 99, &link_a, CSP_NO_VIA_ADDRESS);
+
+	ck_assert_int_eq(res, CSP_ERR_NONE);
+	ck_assert_str_eq(goes_by(3000), "LINK_A");
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "the_same_netmask_set_directly_is_clamped_not_refused",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("netmask_asked_for", 99);
+		ctest_trace_int("host_bits", (int)csp_id_get_host_bits());
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("set_result", res);
+		ctest_trace_int("frames", (int64_t)seen);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* A bad entry after a good one. The parser returns CSP_ERR_INVAL for the whole string, but
+   the good entry was already applied and stays -- there is no rollback. So a rejected
+   table string still changes the routing table, which is the part an operator would not
+   expect from a non-zero error return. */
+START_TEST(test_a_refused_table_string_keeps_the_entries_before_the_bad_one)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("3000 LINK_A,3001/99 LINK_A");
+
+	ck_assert_int_eq(res, CSP_ERR_INVAL);
+	/* The first entry survived the refusal. */
+	ck_assert_str_eq(goes_by(3000), "LINK_A");
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "a_refused_table_string_keeps_the_entries_before_the_bad_one",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_ident("table", "good_then_bad");
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("first_entry_installed", (int64_t)seen);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* A one-character entry ends the parse.
+ *
+ * `while (str && (strlen(str) > 1))` is the loop *condition*, not a skip: the short token
+ * stops the whole scan, everything after it is dropped, and the function returns the count
+ * so far -- a positive number that reads as success. An operator who types a stray comma
+ * loses every route after it and is told the load worked.
+ */
+START_TEST(test_a_one_character_entry_ends_the_parse_and_still_reports_success)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("3000 LINK_A,x,3001 LINK_A");
+
+	/* Positive: one entry accepted, and no error. */
+	ck_assert_int_eq(res, 1);
+	ck_assert_str_eq(goes_by(3000), "LINK_A");
+	/* The entry after the short token never made it. */
+	ck_assert_str_eq(goes_by(3001), "");
+
+	if (ctest_tracing()) {
+		/* The port skips a short entry and carries on rather than stopping; recorded in
+		   SCOPE.md, so this is a divergence and not a match. */
+		ctest_trace_begin("rtable", "a_one_character_entry_ends_the_parse_and_still_reports_success",
+						  "diverges");
+		ctest_trace_obj_begin("input");
+		ctest_trace_ident("table", "good_short_good");
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("routes_after_the_short_token", 0);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* A route's next hop survives the text format.
+ *
+ * `"<addr> <iface> <via>"` is the four-field shape, and the `via` is handed to the
+ * interface rather than written into the packet: a driver that must address a frame to an
+ * intermediate node -- a CAN gateway, say -- gets it from there. Nothing recorded it, so a
+ * parser that read the address and interface and dropped the third field produced a route
+ * that looked right and delivered to the wrong neighbour.
+ */
+START_TEST(test_a_next_hop_survives_the_text_format)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("3000 LINK_A 42");
+	ck_assert_int_eq(res, 1);
+
+	ck_assert_str_eq(goes_by(3000), "LINK_A");
+	ck_assert_uint_eq(via_on_tx[0], 42);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "a_next_hop_survives_the_text_format", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_ident("table", "addr_iface_via");
+		ctest_trace_int("via_written", 42);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("via_on_tx", (int64_t)via_on_tx[0]);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* Without a via the interface is told CSP_NO_VIA_ADDRESS, meaning "address it to the
+   destination itself". The control for the case above. */
+START_TEST(test_a_route_without_a_next_hop_sends_direct)
+{
+	setup_stack(false);
+	csp_rtable_clear();
+
+	const int res = csp_rtable_load("3000 LINK_A");
+	ck_assert_int_eq(res, 1);
+
+	ck_assert_str_eq(goes_by(3000), "LINK_A");
+	ck_assert_uint_eq(via_on_tx[0], CSP_NO_VIA_ADDRESS);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rtable", "a_route_without_a_next_hop_sends_direct", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_ident("table", "addr_iface");
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("load_result", res);
+		ctest_trace_int("via_on_tx", (int64_t)via_on_tx[0]);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * route_suite(void)
 {
 	Suite * s = suite_create("Route");
@@ -393,6 +613,16 @@ Suite * route_suite(void)
 	tcase_add_test(tc, test_a_table_routed_destination_leaves_unchanged);
 	tcase_add_test(tc, test_a_local_subnet_beats_the_default_interface);
 	tcase_add_test(tc, test_an_application_send_to_a_broadcast_is_rewritten_too);
+	suite_add_tcase(s, tc);
+
+	TCase * tc_rt = tcase_create("rtable_text");
+	tcase_add_test(tc_rt, test_a_netmask_wider_than_the_address_space_is_refused_by_the_parser);
+	tcase_add_test(tc_rt, test_the_same_netmask_set_directly_is_clamped_not_refused);
+	tcase_add_test(tc_rt, test_a_refused_table_string_keeps_the_entries_before_the_bad_one);
+	tcase_add_test(tc_rt, test_a_one_character_entry_ends_the_parse_and_still_reports_success);
+	tcase_add_test(tc_rt, test_a_next_hop_survives_the_text_format);
+	tcase_add_test(tc_rt, test_a_route_without_a_next_hop_sends_direct);
+	tc = tc_rt;
 	suite_add_tcase(s, tc);
 
 	return s;

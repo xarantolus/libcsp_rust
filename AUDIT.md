@@ -781,7 +781,9 @@ questionable when they were made held up:
 
 ## Test-suite audit (2026-08-25)
 
-All 465 tests reviewed against ten criteria. Findings, measured rather than eyeballed.
+All 465 tests as they stood at the time of this audit, reviewed against ten criteria.
+Findings, measured rather than eyeballed. (`just numbers` prints the current total; it is
+larger now, and this figure is deliberately left as the audit's own denominator.)
 
 ### Fixed
 
@@ -801,10 +803,26 @@ All 465 tests reviewed against ten criteria. Findings, measured rather than eyeb
 - **C9 weak assertions** — the two flagged (`frame_is_empty_until...`, `clear_empties_the_table`) assert exactly the property under test. False positives.
 - **C2 artefact vs behaviour** — every forwarding test now compares the interface as well as the frame, fixed last cycle after a byte-only comparison passed while the port used the wrong link.
 
-### Not fixed — the structural one
+### Fixed since — the structural one
 
-**Criterion 4, at module level: `rdp` (49 tests), `cmp` (27), `eth` (22) and `security` (13) have no external oracle at all.** No golden vectors, no differential test against the C. 111 tests — a quarter of the suite — verified only against my own reading of the C.
+**As written, at the time of the audit: `rdp` (49 tests), `cmp` (27), `eth` (22) and `security` (13) had no external oracle at all.** No golden vectors, no differential test against the C. 111 tests — a quarter of the suite — verified only against my own reading of the C.
 
-That is the same shape as the node layer before the C-node harness existed, and the node layer turned out to contain a total functional failure (`Router::forward` destroying every packet) plus two precedence bugs. `rdp` is the largest module in the port and implements a reliability protocol; `security` is the authentication gate. Neither has ever been run against libcsp.
+**That is no longer true.** `ctest/` builds a real libcsp node and records what it does;
+all four modules now have corpus records replayed against the port (`just numbers` prints
+the current count per suite — at the time of writing, `cmp` 27, `security` 17, `eth` 16,
+`rdp` 8). The C oracle found a defect on nearly every pass over them, which is what the
+paragraph below predicted.
+
+`rtable` was the last module with neither a golden vector nor a corpus record — its parser
+is the only way a route reaches a flying node from the ground — and now has six. Every
+module in `csp-core` has an external oracle.
+
+The original reasoning, kept because it was right:
+
+That is the same shape as the node layer before the C-node harness existed, and the node layer turned out to contain a total functional failure (`Router::forward` destroying every packet) plus two precedence bugs. `rdp` is the largest module in the port and implements a reliability protocol; `security` is the authentication gate. Neither had ever been run against libcsp.
 
 `rdp` and `security` are reachable from the existing node harness — the C node links `csp_rdp.c` already. `cmp` needs `csp_service_handler` wired to a bound port. `eth` needs no node at all, only a codec-level shim like the CFP one.
+
+All four were done that way, and the prediction held: the oracle found the CMP server
+missing entirely, an RDP node that acknowledged nothing it delivered, and a handshake that
+left a gratuitous ack owing. Each is written up in `SCOPE.md`.

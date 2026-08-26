@@ -634,6 +634,36 @@ least a function of the clock (`csp_rdp.c:548`, `rand_r` seeded from `csp_get_ms
 treated as one: a sans-io core has no entropy source, and the C's own ISN is guessable by
 anyone who can estimate the peer's uptime to the millisecond.
 
+### A one-character entry ends the C's route-table parse
+
+`csp_rtable_stdio.c:25` is `while (str && (strlen(str) > 1))`. That is the loop
+**condition**, not a per-entry skip: the first token of one character or fewer stops the
+whole scan, every entry after it is silently dropped, and the function returns the count of
+entries accepted *so far* — a positive number that reads as success.
+
+Measured in `rtable::a_one_character_entry_ends_the_parse_and_still_reports_success`
+(the cases live in `ctest/suite_route.c`; the trace suite is `rtable`):
+loading `"3000 LINK_A,x,3001 LINK_A"` returns **1**, installs the first route and drops the
+third. An operator who types a stray comma loses every route after it and is told the load
+worked.
+
+`rtable::parse` **skips** the short entry and carries on, so the same string installs both
+routes and returns 2. A route table is uploaded from the ground and cannot be inspected
+afterwards except by trying it; silently discarding the tail of one, while reporting
+success, is the kind of failure that is only discovered when a link that should exist does
+not. Recorded as a divergence rather than reproduced.
+
+The rest of the parser is faithful, including the parts that surprise:
+
+- a netmask wider than the address space is **refused by the parser**
+  (`csp_rtable_stdio.c:44`) even though `csp_rtable_set` would have *clamped* it
+  (`csp_rtable_cidr.c:109`) — the two paths to the same table disagree, and only the string
+  path is reachable from the ground;
+- a refused string still leaves the entries before the bad one installed, so a non-zero
+  error return does not mean the table is unchanged.
+
+Both are pinned by `rtable::` records rather than by reading.
+
 **Scratch arrays must be sized by `RXQ`.** `Table::close`, `close_all` and `expire_idle`
 all refuse rather than partially draining a connection's receive queue — a slot removed but
 not reported is a slot nobody releases. Three call sites passed fixed literals (`[0u16; 8]`
