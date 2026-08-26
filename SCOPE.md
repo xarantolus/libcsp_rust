@@ -664,6 +664,16 @@ The rest of the parser is faithful, including the parts that surprise:
 
 Both are pinned by `rtable::` records rather than by reading.
 
+**Broadcast is judged against the interface it arrived on.** `csp_route.c:235` is
+`csp_id_is_broadcast(packet->id.dst, input.iface)` — the *ingress* interface, not every
+interface the node has. So a packet addressed to another subnet's broadcast is **not** for
+this node and is relayed, while the ingress subnet's broadcast is delivered and
+deliberately not relayed on. Widening it to "any interface I know about" is the plausible
+wrong fix and would both swallow traffic meant for a neighbouring subnet and stop relaying
+it. Measured in the three `conn::..._broadcast_...` records, which count what the
+application receives *and* how many frames leave, because those are the two halves that can
+disagree.
+
 **Scratch arrays must be sized by `RXQ`.** `Table::close`, `close_all` and `expire_idle`
 all refuse rather than partially draining a connection's receive queue — a slot removed but
 not reported is a slot nobody releases. **Five** call sites passed fixed literals — `[0u16; 8]` on the
