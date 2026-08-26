@@ -359,9 +359,25 @@ three send-path invariants would otherwise have been pinned by nothing:
 | `snd_una` does not advance on the peer's ack | yes | — |
 | the acknowledged buffer is never released | **no** | yes |
 
-**Still not covered:** the window's behaviour under load. `SendWindowFull` has a unit test
-(`the_send_window_bounds_what_may_be_claimed`) and no C comparison, because the C blocks on a
-semaphore there rather than returning, so there is nothing to compare an answer against.
+**The send window, and a claim of mine that was too broad.** This entry said the window had
+"no C comparison, because the C blocks rather than returning". Half right. Measured with a
+probe under libcheck's timeout: with a window of two, `csp_send` **returns for both packets**
+and only the third never comes back -- `csp_rdp_send` loops around
+`csp_bin_sem_wait(&conn->rdp.tx_wait, conn->rdp.conn_timeout)` whose only exits need another
+thread, so in a single-threaded harness it hangs. The *overflow* is uncomparable; the
+*boundary* was comparable all along and I had written it off.
+
+`rdp::a_window_of_two_admits_exactly_two` now pins it: two proposed, two on the wire,
+sequential, on both stacks. The two failure directions need different tests, which is why
+both exist:
+
+| the bound is | caught by |
+|---|---|
+| one too small (a window of two admits one) | the record -- one frame instead of two |
+| one too large (a window of two admits three) | `the_send_window_bounds_what_may_be_claimed`, because the record only offers two |
+
+Neither catches the other. Only the overflow *call* remains outside the oracle, and that is a
+property of the C's threading model rather than something left undone.
 
 ### The receive reorder queue is wired in; the transmit queue still is not
 
@@ -1343,7 +1359,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**112 of 141**.
+**113 of 142**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
