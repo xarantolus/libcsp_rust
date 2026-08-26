@@ -820,6 +820,56 @@ static void drain_accepted(unsigned int * count, unsigned int * bytes) {
 	}
 }
 
+/* Reordering: does a gap-filling packet bring the one that overtook it with it?
+ *
+ * `csp_rdp.c:723` stores an out-of-sequence packet with `csp_rdp_rx_queue_add` and, once the
+ * hole is filled, walks the queue delivering what it can. `csp-core::rdp::RxQueue` exists
+ * with reorder tests -- including the sequence wrap -- and nothing calls it, so the port
+ * drops the overtaking packet and the sender pays a round trip for it (SCOPE.md).
+ *
+ * `B` is sent first at rcv_cur+2, then `A` at rcv_cur+1. What the application reads, in
+ * order, is the answer: "AB" if the queue works, "A" alone if the second packet was lost. */
+static void deliver_byte(uint16_t seq, uint16_t ack_nr, char byte) {
+	csp_packet_t * packet = new_rdp_packet();
+	packet->data[0] = (uint8_t)byte;
+	packet->length = 1;
+	put_header_and_route(packet, RDP_ACK, seq, ack_nr);
+}
+
+START_TEST(test_a_gap_filled_late_delivers_both_in_order)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+	const uint16_t base = conn->rdp.rcv_cur;
+
+	deliver_byte((uint16_t)(base + 2), iss, 'B'); /* overtakes */
+	deliver_byte((uint16_t)(base + 1), iss, 'A'); /* fills the gap */
+
+	uint8_t got[8];
+	unsigned int n = 0;
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	if (accepted != NULL) {
+		csp_packet_t * p;
+		while ((p = csp_read(accepted, 0)) != NULL) {
+			for (uint16_t i = 0; (i < p->length) && (n < sizeof(got)); i++) {
+				got[n++] = p->data[i];
+			}
+			csp_buffer_free(p);
+		}
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_gap_filled_late_delivers_both_in_order", "must_match");
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered_bytes", (int64_t)n);
+		ctest_trace_hex("delivered_body", got, n);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_an_eak_carries_no_data_to_the_application)
 {
 	setup_stack();
@@ -846,9 +896,8 @@ END_TEST
    sequence, send EACK and store packet". Measured, it stores and answers *nothing* -- the
    comment describes an EACK the code does not send on this path.
  *
- * `diverges`: the port answers with a plain `ACK` instead of staying silent, because it
- * drops the packet rather than holding it. `csp-core` has an `RxQueue` with reorder tests
- * and the connection path never uses it (SCOPE.md). */
+ * The port holds it too, since the reorder queue was wired in -- so neither side answers
+ * and neither delivers until the gap fills. */
 START_TEST(test_out_of_sequence_data_is_answered_but_not_delivered)
 {
 	setup_stack();
@@ -865,8 +914,8 @@ START_TEST(test_out_of_sequence_data_is_answered_but_not_delivered)
 
 	unsigned int count, bytes;
 	drain_accepted(&count, &bytes);
-	eak_record_verdict("out_of_sequence_data_is_answered_but_not_delivered", "diverges",
-					   count, bytes, tx_flags, frames);
+	eak_record("out_of_sequence_data_is_answered_but_not_delivered", count, bytes, tx_flags,
+			   frames);
 }
 END_TEST
 
@@ -1439,6 +1488,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_gap_filled_late_delivers_both_in_order);
 	tcase_add_test(tc_ack, test_an_eak_carries_no_data_to_the_application);
 	tcase_add_test(tc_ack, test_out_of_sequence_data_is_answered_but_not_delivered);
 	tcase_add_test(tc_ack, test_an_in_sequence_rst_is_answered);

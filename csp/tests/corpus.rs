@@ -1236,6 +1236,99 @@ fn replay_promisc(case: &str) -> serde_json::Value {
 /// on input a peer fully controls. What is compared is only what that peer can see: how
 /// many frames came back, what the first one carried, and whether the node then had a
 /// connection to hand its application.
+/// Two data packets in the order given, then everything the application can read.
+///
+/// `csp_rdp.c` stores an out-of-sequence packet and walks the queue once the gap is filled,
+/// so a packet that overtook its predecessor is still delivered, in sequence order. What is
+/// compared is the bytes the application ends up with and their order -- nothing about how
+/// either side holds them meanwhile.
+#[cfg(feature = "rdp")]
+fn replay_rdp_reordered(packets: &[(u16, u8)]) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let opts = rdp::SynOptions {
+        window_size: 4,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut syn = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+    let olen = opts.encode(&mut syn).unwrap();
+
+    let mut got: Vec<u8> = Vec::new();
+    let mut feed = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
+                    payload: &[u8],
+                    flags: u8,
+                    seq: u16,
+                    ack: u16,
+                    collect: bool| {
+        let mut buf = [0u8; 64];
+        buf[..payload.len()].copy_from_slice(payload);
+        let h = rdp::Header {
+            flags,
+            seq_nr: seq,
+            ack_nr: ack,
+        };
+        let hlen = h.encode(&[], &mut buf[payload.len()..]).unwrap();
+        let Some(mut p) = n.packet() else { return };
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        p.set_payload(&buf[..payload.len() + hlen]).unwrap();
+        n.router.receive(p, 0);
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Delivered { conn, .. } => {
+                    while let Ok(Some(pkt)) = n.read(conn) {
+                        if collect {
+                            pkt.with_payload(|d| got.extend_from_slice(d));
+                        }
+                        drop(pkt);
+                    }
+                }
+                csp::Routed::Idle => break,
+                _ => {}
+            }
+        }
+    };
+
+    feed(&mut n, &syn[..olen], rdp::SYN, 1000, 0, false);
+    let iss = n
+        .accept()
+        .and_then(|h| n.router.conns.rdp(h).ok().map(|r| r.snd_iss))
+        .unwrap_or(0);
+    feed(&mut n, &[], rdp::ACK, 1001, iss, false);
+
+    for (offset, byte) in packets {
+        feed(&mut n, &[*byte], rdp::ACK, 1000 + offset, iss, true);
+    }
+
+    serde_json::json!({
+        "delivered_bytes": got.len(),
+        "delivered_body": tohex(&got),
+    })
+}
+
 /// One crafted packet on an established connection: what the application gets, and what
 /// goes back on the wire.
 ///
@@ -3152,6 +3245,12 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "rdp" if rec.case == "malformed_syns_do_not_exhaust_the_table" => Some((
             replay_rdp_syn_flood(),
             "bad SYNs, then an honest peer".to_string(),
+        )),
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "a_gap_filled_late_delivers_both_in_order" => Some((
+            // `B` overtakes, then `A` fills the gap.
+            replay_rdp_reordered(&[(2, b'B'), (1, b'A')]),
+            "B at +2 then A at +1".to_string(),
         )),
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "an_eak_carries_no_data_to_the_application" => Some((

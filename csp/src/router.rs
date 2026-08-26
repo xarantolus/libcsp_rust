@@ -734,6 +734,26 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
 
         match action {
+            // Ahead of the gap: held under its sequence number until the missing packet
+            // arrives, rather than dropped and re-acknowledged. `csp_rdp.c:723` does the
+            // same with `csp_rdp_rx_queue_add`. The trailer is stripped now, so what comes
+            // back out later is what the application should see.
+            rdp::Action::Hold(seq) => {
+                let mut packet = packet;
+                let kept = packet
+                    .with_payload(|b| rdp::Header::strip(b).map(|x| x.len()))
+                    .unwrap_or(0);
+                packet.with_payload_mut(|_| (kept, ()));
+                let slot = packet.into_index();
+                if self.conns.hold_rx(handle, seq, slot).is_err() {
+                    // No room to hold it. Drop rather than leak the slot; the peer
+                    // retransmits, which is what happened to every such packet before.
+                    drop(pool.from_index(slot));
+                    self.counters.rx_queue_full += 1;
+                    return Routed::Dropped(DropReason::ReceiveQueueFull);
+                }
+                Routed::Dropped(DropReason::RdpConsumed)
+            }
             rdp::Action::Deliver => {
                 // Strip the trailer so the application sees only its own bytes.
                 let mut packet = packet;
@@ -744,6 +764,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 match self.conns.enqueue_rx(handle, packet.into_index()) {
                     Ok(true) => {
                         self.counters.delivered += 1;
+                        // This packet may have filled a gap. Everything behind it that was
+                        // waiting is now in sequence, so hand it over in order.
+                        self.release_held(handle);
                         // No `queue_accept` here, unlike the plain path: an RDP connection
                         // can only reach `Deliver` once it is open, and it was announced
                         // when the handshake created it.
@@ -814,8 +837,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 // never read it -- a closed connection that kept its buffers would leak
                 // one pool slot per unread packet.
                 //
-                // Sized by `RXQ`, not a literal. `Table::close` refuses rather than
-                // partially draining, so a scratch array shorter than the receive queue
+                // Sized by `drain_capacity(RXQ)`, not a literal and not `RXQ`.
+                // `Table::close` drains the receive queue *and* the reorder queue and
+                // refuses rather than partially draining, so an array shorter than both
                 // makes the close fail *silently* and the connection keeps every buffer
                 // for good. A reset happens once; unlike `tick`'s sweep there is no later
                 // pass to put it right.
@@ -830,6 +854,33 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 }
                 Routed::Dropped(DropReason::RdpConsumed)
             }
+        }
+    }
+
+    /// Deliver everything the just-delivered packet unblocked, in sequence order.
+    ///
+    /// Stops at the first gap, so a queue holding 5 and 6 while 4 is missing stays put.
+    #[cfg(feature = "rdp")]
+    fn release_held(&mut self, handle: Handle) {
+        loop {
+            let Ok(next) = self.conns.rdp(handle).map(|c| c.next_expected()) else {
+                return;
+            };
+            let Some(slot) = self.conns.take_held(handle, next) else {
+                return;
+            };
+            let advanced = self
+                .conns
+                .rdp_mut(handle)
+                .map(|c| c.release_held(next))
+                .unwrap_or(false);
+            if !advanced || self.conns.enqueue_rx(handle, slot) != Ok(true) {
+                // Either the sequence moved under us or the application's queue is full.
+                // The slot is ours; releasing it is the only thing that does not leak.
+                self.counters.rx_queue_full += 1;
+                return;
+            }
+            self.counters.delivered += 1;
         }
     }
 
@@ -1501,6 +1552,83 @@ mod tests {
     /// never returned. `tick` retries its sweep, but a reset happens once.
     ///
     /// Counted in buffers the pool has back, which is what the application runs out of.
+    /// A connection torn down while it is still holding an out-of-order packet must give
+    /// that buffer back too. The reorder queue is a second place a connection can be
+    /// holding pool slots, and `Table::close` drains only what it knows about.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn a_held_out_of_order_packet_is_returned_on_close() {
+        use csp_core::rdp;
+        type P = Pool<16, 264>;
+        type R = Router<4, 4, 48, 8>;
+        let pool = P::new();
+        let mut r = R::new(10, Version::V2);
+        r.bind(12).unwrap();
+        let mut ifaces = crate::iflist::IfList::<4, 4>::new(Version::V2);
+        ifaces.add("test", 10, 14, true).unwrap();
+
+        let before = pool.available();
+        let mut feed = |r: &mut R, flags: u8, seq: u16, ack: u16, body: &[u8]| {
+            let mut buf = [0u8; 64];
+            buf[..body.len()].copy_from_slice(body);
+            let h = rdp::Header {
+                flags,
+                seq_nr: seq,
+                ack_nr: ack,
+            };
+            let n = h.encode(&[], &mut buf[body.len()..]).unwrap();
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP,
+                src: 11,
+                dst: 10,
+                dport: 12,
+                sport: 40,
+            });
+            p.set_payload(&buf[..body.len() + n]).unwrap();
+            r.receive(p, 0);
+            loop {
+                match r.work(&pool, &mut ifaces, 0) {
+                    Routed::Respond { packet, .. } | Routed::Forwarded { packet, .. } => {
+                        drop(pool.from_index(packet));
+                    }
+                    Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        };
+
+        let mut ob = [0u8; rdp::SYN_OPTIONS_LEN];
+        let ol = rdp::SynOptions::default().encode(&mut ob).unwrap();
+        feed(&mut r, rdp::SYN, 1000, 0, &ob[..ol]);
+        let h = r.accept().expect("the handshake announces the connection");
+        let iss = r.conns.rdp(h).unwrap().snd_iss;
+        feed(&mut r, rdp::ACK, 1001, iss, &[]);
+
+        // Two packets that overtake the gap at 1001, so both are held.
+        feed(&mut r, rdp::ACK, 1002, iss, b"b");
+        feed(&mut r, rdp::ACK, 1003, iss, b"c");
+        assert!(
+            pool.available() < before,
+            "the held packets must actually be held, or this proves nothing"
+        );
+
+        let mut drained = [0u16; 8];
+        let n = r
+            .conns
+            .close(h, &mut drained)
+            .expect("RXQ bounds both queues");
+        for slot in drained.iter().take(n) {
+            drop(pool.from_index(*slot));
+        }
+        assert_eq!(
+            pool.available(),
+            before,
+            "closing must return what the reorder queue was holding"
+        );
+    }
+
     #[cfg(feature = "rdp")]
     #[test]
     fn a_reset_connection_returns_every_buffer_it_held() {
