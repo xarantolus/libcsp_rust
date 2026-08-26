@@ -1478,6 +1478,7 @@ fn replay_route(case: &str) -> serde_json::Value {
         "a_broadcast_rewrite_carries_to_the_other_interface" => (true, false, LINK_A_BROADCAST),
         // Reached through the routing table, not a subnet: no interface owns 3000.
         "a_table_routed_destination_leaves_unchanged" => (false, false, 3000),
+        "split_horizon_vetoes_a_second_link_on_the_same_subnet" => (true, false, TARGET),
         other => panic!("no route replay for {other}"),
     };
 
@@ -1521,7 +1522,9 @@ fn replay_route(case: &str) -> serde_json::Value {
         sport: 40,
     });
     p.set_payload(b"onward").unwrap();
-    r.receive(p, 0);
+    // Arrives on LINK_A (index 1) for the split-horizon case, INGRESS (0) otherwise.
+    let ingress = u8::from(case == "split_horizon_vetoes_a_second_link_on_the_same_subnet");
+    r.receive(p, ingress);
 
     // `work` is a step: drain it until it stops producing, so a router that fans out over
     // several calls is counted the same as one that reports them together.
