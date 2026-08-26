@@ -1,3 +1,5 @@
+{"suite":"hmac","case":"a_mac_over_the_payload_only","verdict":"must_match","input":{"include_header":0,"payload":"616263"},"observed":{"tagged":"6162639b4a918f","verified":1,"recovered":"616263"}}
+{"suite":"hmac","case":"a_mac_over_the_header_and_payload","verdict":"must_match","input":{"include_header":1,"payload":"616263","header":"000000000000"},"observed":{"tagged":"6162633cc7498b","verified":1,"recovered":"616263"}}
 {"suite":"rdp","case":"a_syn_without_options_is_rejected","verdict":"must_match","observed":{"frames_out":1,"reply_flags":1,"accepted_after":0}}
 {"suite":"rdp","case":"a_syn_with_partial_options_is_rejected","verdict":"must_match","observed":{"frames_out":1,"reply_flags":1,"accepted_after":0}}
 {"suite":"rdp","case":"malformed_syns_do_not_exhaust_the_table","verdict":"must_match","input":{"bad_syns":24},"observed":{"honest_peer_opened":1,"honest_peer_got_syn_ack":1}}

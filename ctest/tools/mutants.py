@@ -310,6 +310,12 @@ MUTANTS = [
   ("rdp: the delay count is bound by the negotiated window", "csp-core/src/rdp.rs",
    "            ack_delay_count: clamp(w(5), 1, window_size),",
    "            ack_delay_count: clamp(w(5), 1, max_window),"),
+  # Which bytes the wire MAC covers. A tag computed over the wrong span still verifies
+  # against itself, so every self-test passes and every real peer rejects the packet --
+  # libcsp's own expected bytes are the only thing that catches it.
+  ("hmac: the header is inside the tag when asked for", "csp-core/src/hmac.rs",
+   "    if coverage == Coverage::HeaderAndPayload {\n        inner.update(header);\n    }\n    inner.update(payload);",
+   "    inner.update(payload);"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
