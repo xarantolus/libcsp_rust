@@ -830,6 +830,16 @@ impl Connection {
                 if h.has(ACK) && h.ack_nr == self.snd_iss {
                     self.snd_una = h.ack_nr.wrapping_add(1);
                     self.ack_timestamp = now_ms;
+                    // The peer answered, so the attempts spent getting here are spent, not
+                    // owed. `csp_rdp.c` clears the counter on this ack and the port's other
+                    // two transitions into an open state already did; this one did not.
+                    //
+                    // **No record can catch this today.** `retransmits` is read in exactly
+                    // one place -- the `SynRcvd` arm of `Tick`, for the `SYN|ACK` repeat --
+                    // and a connection never returns to `SynRcvd`, so a stale value is
+                    // never consulted again. Changed because it is what the C does and what
+                    // the neighbouring arms do, not because anything observed it.
+                    self.retransmits = 0;
                     self.state = State::Open;
                     return Action::Opened;
                 }

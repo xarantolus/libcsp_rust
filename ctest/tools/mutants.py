@@ -316,6 +316,8 @@ MUTANTS = [
   ("hmac: the header is inside the tag when asked for", "csp-core/src/hmac.rs",
    "    if coverage == Coverage::HeaderAndPayload {\n        inner.update(header);\n    }\n    inner.update(payload);",
    "    inner.update(payload);"),
+  ("rdp: delayed_acks is a flag, not a count", "csp-core/src/rdp.rs",
+   "            delayed_acks: w(3) != 0,", "            delayed_acks: w(3) == 1,"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.

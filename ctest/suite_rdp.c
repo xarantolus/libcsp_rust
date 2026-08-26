@@ -384,6 +384,7 @@ START_TEST(test_rdp_delayed_acks_is_a_flag)
 	const csp_conn_t * conn = find_rdp_conn();
 	ck_assert_ptr_nonnull(conn);
 	ck_assert_uint_eq(conn->rdp.delayed_acks, 1);
+
 }
 END_TEST
 
@@ -708,6 +709,49 @@ END_TEST
    that only allows two packets in flight -- a stall a peer would see as a dead link. The
    cadence is the observable, and it is the only place the negotiated window shows up on
    the wire at all. */
+/* `delayed_acks` is a flag, not a count: `csp_rdp.c` normalises any non-zero proposal to 1.
+   `test_rdp_delayed_acks_is_a_flag` checks the field, which is how the C spells it; this
+   checks what a peer sees. A receiver that read the value as a *count* would acknowledge on
+   a different schedule, and the field assertion alone cannot tell the two apart. Proposed
+   as 2 with a delay count of 2, so the cadence must match
+   `the_delay_count_fires_one_packet_after_it`, which proposes 1. */
+START_TEST(test_a_nonzero_delayed_acks_is_on_not_a_count)
+{
+	setup_stack();
+	const uint32_t opts[6] = { 3, 20000, 500, 2 /* not 1 */, 250, 2 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int acks_at[5];
+	const unsigned int before = test_tx_count;
+	for (uint16_t i = 1; i <= 5; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+		acks_at[i - 1] = test_tx_count - before;
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_nonzero_delayed_acks_is_on_not_a_count", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("delayed_acks", 2);
+		ctest_trace_int("ack_delay_count", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("normalised_to_on", conn->rdp.delayed_acks == 1);
+		ctest_trace_arr_begin("acks_after_n_packets");
+		for (int i = 0; i < 5; i++) {
+			ctest_trace_int(NULL, (int64_t)acks_at[i]);
+		}
+		ctest_trace_arr_end();
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_a_delay_count_beyond_the_window_is_bound_by_it)
 {
 	setup_stack();
@@ -1115,6 +1159,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_a_nonzero_delayed_acks_is_on_not_a_count);
 	tcase_add_test(tc_ack, test_a_delay_count_beyond_the_window_is_bound_by_it);
 	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
 	tcase_add_test(tc_ack, test_an_ack_is_sent_even_with_nothing_to_acknowledge);
