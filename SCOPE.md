@@ -269,6 +269,36 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The wire MAC's coverage was never compared to the C
+
+2026-08-26, found with `just untraced`: `suite_hmac.c` had two tests and no records.
+
+`difftest` covers `mac_full(key, msg)` — the raw HMAC primitive — against the real C on
+random keys and messages. Nothing covered `csp_hmac_append(packet, include_header)`: **which
+bytes are authenticated** and where the four tag bytes land. The flag selects
+`frame_begin..frame_length` or `data..length`, and libcsp's own test carries a different
+expected tag for each (`9b4a918f` payload-only, `3cc7498b` with the header) over the same
+`abc` under the zeroed static key.
+
+The port reproduces both, byte for byte. **No defect** — this closes a gap in what was
+checked.
+
+Why it was worth checking rather than reading: computing the tag over the wrong span is
+invisible to every self-test. Forcing the port to `PayloadOnly` regardless of the flag still
+reports `verified: 1`, because it verifies against its own computation — it simply emits
+`9b4a918f` where a peer expects `3cc7498b`. A self-consistent implementation with the wrong
+coverage passes everything it owns and fails against every real peer, with nothing in the
+error to say why. Only the C's expected bytes catch that, and now one record does.
+
+**One field deliberately not compared.** On the include-header path `csp_hmac_verify`
+decrements only `frame_length`, while `csp_hmac_append` incremented *both* it and `length` —
+so after a verify, `packet->length` still counts the four MAC bytes and an application
+reading `data[0..length]` sees them as payload. That is a real libcsp trap, and it is also
+bookkeeping the port's slice-returning API cannot have. The record compares what the caller
+recovers, not the length field; comparing the field would have manufactured a divergence
+instead of finding one. It caught me first: deriving the header span as
+`frame_length - length` gave 2 bytes for what is a 6-byte v2 header.
+
 ### The negotiated window never bounded anything, in any test
 
 2026-08-26. `csp_rdp.c:576` clamps the peer's proposed `ack_delay_count` to
@@ -1010,7 +1040,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**100 of 127**.
+**101 of 129**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that

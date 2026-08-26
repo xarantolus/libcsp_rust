@@ -240,6 +240,16 @@ struct DedupInput {
 /// The window cases: one pair of identical packets with a chosen gap between them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HmacInput {
+    include_header: u8,
+    payload: String,
+    /// The exact header bytes the MAC covered; absent when it covered only the payload.
+    #[serde(default)]
+    header: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DedupWindowInput {
     mode: u8,
     gap_ms: u32,
@@ -557,6 +567,40 @@ fn replay_cmp(input: &CmpInput) -> CmpObserved {
             reply_code: out[1] as i32,
         },
         Ok(None) | Err(_) => none,
+    }
+}
+
+/// libcsp's own expected MAC bytes, replayed.
+///
+/// `csp_hmac_append(packet, include_header)` writes four bytes a peer must reproduce
+/// exactly, and the flag decides which span they cover: `frame_begin..frame_length` when
+/// set, `data..length` when clear. `difftest` covers the raw `mac_full(key, msg)` primitive
+/// against the real C, but nothing covered the packet-level operation -- so which bytes get
+/// authenticated, and where the tag lands, was compared to no oracle. The key is libcsp's
+/// zeroed static `csp_hmac_key`, never set by these tests.
+fn replay_hmac(input: &HmacInput) -> serde_json::Value {
+    use csp_core::crc32::Coverage;
+    let key = [0u8; 16];
+    let payload = unhex(&input.payload);
+    let header = unhex(&input.header);
+    let coverage = if input.include_header != 0 {
+        Coverage::HeaderAndPayload
+    } else {
+        Coverage::PayloadOnly
+    };
+
+    let mut buf = [0u8; 64];
+    let Ok(n) = csp_core::hmac::append(&key, &header, &payload, coverage, &mut buf) else {
+        return serde_json::json!({ "tagged": "", "verified": 0, "recovered": "" });
+    };
+    let tagged = tohex(&buf[..n]);
+    match csp_core::hmac::verify_over(&key, &header, &buf[..n], coverage) {
+        Ok(recovered) => serde_json::json!({
+            "tagged": tagged,
+            "verified": 1,
+            "recovered": tohex(recovered),
+        }),
+        Err(_) => serde_json::json!({ "tagged": tagged, "verified": 0, "recovered": "" }),
     }
 }
 
@@ -2677,6 +2721,13 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             Some((
                 serde_json::to_value(SecurityJson::from(got)).unwrap(),
                 format!("{input:?}"),
+            ))
+        }
+        "hmac" => {
+            let input: HmacInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((
+                replay_hmac(&input),
+                format!("include_header={}", input.include_header),
             ))
         }
         "dedup" if rec.input.get("gap_ms").is_some() => {
