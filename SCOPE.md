@@ -682,6 +682,19 @@ packet has left it, so there is no other place they can come from.
 the thirteen-byte `IF_STATS` request, which the router counts too) and the `ingress_drop`
 field now on all four `dedup::` records (0, 1, 1, 2 across the modes).
 
+`autherr` and `rx_error` are the same story on the authentication path.
+`csp_route_security_check` takes the ingress interface and charges it directly — a bad MAC
+or a policy-required MAC that is absent goes to `autherr` (`csp_route.c:83`, `:87`), a bad
+CRC or a required-but-absent one to `rx_error` (`:68`, `:72`) — and `autherr` on a link is
+how an operator sees that link being probed. This port kept only node-wide totals, so a node
+under attack answered `IF_STATS` with a zero for every interface.
+
+The 17 `security::` records already carried `rx_error` and `autherr` from the C, and passed
+anyway: the replay was reporting the **router's** totals rather than the interface's. With
+one interface in the scenario the two numbers coincide, so the record compared a different
+quantity and matched. It now reads `Entry::stats`, which is what the C recorded and what
+`IF_STATS` returns.
+
 `tx`/`txbytes` stay with `iface::Iface`, which already keeps them, because that is where the
 C keeps them too (`csp_io.c:287`).
 
