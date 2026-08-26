@@ -269,6 +269,37 @@ care.
 C's bound is `CSP_BUFFER_SIZE`, which made the port look permissive when it was only better
 provisioned. The replay now sizes its buffer to the oracle's.
 
+### The panic that hid mutations was a class, not an instance
+
+2026-08-26, following straight on from the promiscuous-tap finding below. If one `expect` in
+a replay could hide five mutations for a whole subsystem, the question is how many others
+did. The fingerprint is in the sweep's own output: a mutation scoring "N unit test(s)
+notice" is one the corpus reported nothing about.
+
+`rdp: a control frame reaches the wire` scored 5 unit tests and no records — while
+`rdp::a_syn_is_answered_with_syn_ack` observes `frames`, `flags` and `seq_is_own_iss`, all of
+which must change if no control frame is emitted. It was the same cause:
+`n.accept().expect("the handshake opened a connection")`, twice. Recording the failure
+instead moves that mutation to **7 records**, and a port that answers no SYN now names all
+seven rather than panicking on one. The connection replay had a third instance
+(`expect("the first packet announces the connection")`), fixed the same way.
+
+**The durable part is in the sweep.** A replay panic opens a `---- the_port_reproduces_what_the_c_did
+stdout ----` block, which the counter was charging to the unit-test fallback — so the
+mutation looked covered and the records that actually cover the code sat in the never-moved
+list looking vacuous. `mutants.py` now recognises the two harness test names and prints
+`REPLAY PANICKED` instead of a count. It found a third case on its first run.
+
+That third case was a **badly-formed mutation, not a harness defect**: dropping the
+`payload.len() < seg_size` guard leaves the slice on the next line out of range, so the
+mutation modelled a crash rather than a wrong answer. Rewritten to span both lines and clamp
+— which is what a receiver would actually get wrong, and what `csp_eth_rx` refuses via
+`ETH_HDR + seg_size > received_len`. One record notices.
+
+Remaining "unit test(s) notice" entries are port-only invariants with no C equivalent
+(`shutdown`, the `drain` sizing family, node identity, the hooks default) plus the three
+tied to the ISN divergence. Those are the case the fallback exists for.
+
 ### The tap's third placement, and a replay whose panic hid five mutations
 
 2026-08-26.
@@ -863,7 +894,7 @@ its name.
 lists the ones none could. The file header had long claimed "a replay that does not call
 into `csp`/`csp_core` is measuring nothing"; nothing enforced it, and `every_record_has_a_replay`
 only checks that a replay *exists*. The number turns that prose into a figure: currently
-**92 of 118**.
+**93 of 118**.
 
 It is a measure of the *mutation suite's* reach, not proof that the other 28 are vacuous —
 most are guards no mutation happens to break. Both connection-reuse records sat in that
