@@ -857,6 +857,131 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
     }
 
+    /// Route an already-built packet and queue it for the caller to transmit.
+    ///
+    /// The tail of `queue_rdp_from_tick`, for a frame that exists rather than one being
+    /// composed from a header.
+    #[cfg(feature = "rdp")]
+    fn queue_built<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        _pool: &'p Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        idout: Id,
+        mut packet: Packet<'p, B, SZ>,
+    ) {
+        packet.set_id(idout);
+        let mut hops = [crate::route_policy::Hop {
+            iface: 0,
+            via: 0,
+            dst: 0,
+        }; 1];
+        match crate::route_policy::destinations(
+            ifaces,
+            &self.routes,
+            self.version,
+            idout.dst,
+            None,
+            &mut hops,
+        ) {
+            crate::route_policy::Outcome::Hops(_) => {
+                let slot = packet.into_index();
+                self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
+            }
+            _ => {
+                self.counters.no_route += 1;
+            }
+        }
+    }
+
+    /// Retransmit, release and give up on this node's unacknowledged packets.
+    ///
+    /// Returns how many connections it closed. Each retransmission is a *copy* -- the held
+    /// packet has to stay held, because the peer may not answer this one either, which is
+    /// what `csp_buffer_copy` into a fresh buffer does in `csp_rdp_check_timeouts`.
+    #[cfg(feature = "rdp")]
+    fn sweep_unacked<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        now_ms: u32,
+    ) -> usize {
+        use csp_core::rdp::TxAction;
+
+        let mut handles = [None; CONNS];
+        let mut n_handles = 0;
+        for h in self.conns.rdp_handles() {
+            if n_handles < handles.len() {
+                handles[n_handles] = Some(h);
+                n_handles += 1;
+            }
+        }
+
+        let mut closed = 0;
+        for handle in handles.iter().take(n_handles).flatten().copied() {
+            // Sized by `RXQ`: the queue cannot hold more than the shared budget allows, and
+            // a short array would leave entries unexamined with their timers unreset.
+            let mut actions = [TxAction::GiveUp; RXQ];
+            let Ok(count) = self.conns.poll_unacked(handle, now_ms, &mut actions) else {
+                continue;
+            };
+            let Ok(id) = self.conns.id_out(handle) else {
+                continue;
+            };
+            for action in actions.iter().take(count) {
+                match *action {
+                    TxAction::Release { token } => drop(pool.from_index(token)),
+                    TxAction::Retransmit { token, .. } => {
+                        // Copy, keep the original queued. Out of buffers means this attempt
+                        // is skipped, not that the packet is lost -- the next sweep tries
+                        // again, because the entry stays.
+                        let Some(held) = pool.from_index(token) else {
+                            continue;
+                        };
+                        let copy = held.deep_copy();
+                        // `from_index` took ownership; hand it straight back so the entry
+                        // still has something to retransmit next time.
+                        let _ = held.into_index();
+                        let Some(mut c) = copy else { continue };
+                        // "Update to latest outgoing ACK" -- the C rewrites `ack_nr` on
+                        // every retransmission so the peer learns what has arrived since.
+                        if let Ok(rcv_cur) = self.conns.rdp(handle).map(|r| r.rcv_cur) {
+                            // `with_payload_mut` hands over the whole slot capacity, not
+                            // the payload: the closure's return value *sets* the length.
+                            // Taking `b.len()` for it stretched every retransmission to the
+                            // full buffer and wrote the refreshed acknowledgement past the
+                            // real trailer. The length has to come from `with_payload`.
+                            let len = c.with_payload(<[u8]>::len);
+                            c.with_payload_mut(|b| {
+                                if len >= csp_core::rdp::HEADER_LEN && len <= b.len() {
+                                    let at = len - csp_core::rdp::HEADER_LEN;
+                                    if let Ok(mut hd) = csp_core::rdp::Header::decode(&b[at..len]) {
+                                        hd.ack_nr = rcv_cur;
+                                        let mut t = [0u8; csp_core::rdp::HEADER_LEN];
+                                        if let Ok(k) = hd.encode(&[], &mut t) {
+                                            b[at..at + k].copy_from_slice(&t[..k]);
+                                        }
+                                    }
+                                }
+                                (len, ())
+                            });
+                        }
+                        self.queue_built(pool, ifaces, id, c);
+                    }
+                    TxAction::GiveUp => {
+                        let mut drained = [0u16; RXQ];
+                        if let Ok(k) = self.conns.close(handle, &mut drained) {
+                            for slot in drained.iter().take(k) {
+                                drop(pool.from_index(*slot));
+                            }
+                            closed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        closed
+    }
+
     /// Deliver everything the just-delivered packet unblocked, in sequence order.
     ///
     /// Stops at the first gap, so a queue holding 5 and 6 while 4 is missing stays put.
@@ -1220,6 +1345,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             // it, and a retransmission is not a new one.
             let _ = self.queue_rdp_from_tick(pool, *id, ifaces, *h);
         }
+
+        // The transmit sweep: release what the peer acknowledged, resend what timed out,
+        // give up once the attempts run out. `csp_rdp_check_timeouts` does this for every
+        // connection on each call, counting one attempt per sweep rather than per packet.
+        #[cfg(feature = "rdp")]
+        let closed = closed + self.sweep_unacked(pool, ifaces, now_ms);
 
         if closed > 0 {
             self.purge_dead_accepts();

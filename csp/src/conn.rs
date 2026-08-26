@@ -82,9 +82,25 @@ struct Entry<const RXQ: usize> {
     /// The entries are pool slot indices; the connection never owns a packet itself.
     #[cfg(feature = "rdp")]
     rx_reorder: rdp::RxQueue<RXQ>,
+    /// Copies of packets sent but not yet acknowledged, for retransmission. Slot indices
+    /// again -- a connection that loses these is not reliable, whatever its headers say.
+    #[cfg(feature = "rdp")]
+    tx_unacked: rdp::TxQueue<RXQ>,
 }
 
 impl<const RXQ: usize> Entry<RXQ> {
+    /// How many unacknowledged copies the transmit queue is holding.
+    fn unacked_len(&self) -> usize {
+        #[cfg(feature = "rdp")]
+        {
+            self.tx_unacked.len()
+        }
+        #[cfg(not(feature = "rdp"))]
+        {
+            0
+        }
+    }
+
     /// How many packets the reorder queue is holding.
     fn held_len(&self) -> usize {
         #[cfg(feature = "rdp")]
@@ -114,6 +130,8 @@ impl<const RXQ: usize> Entry<RXQ> {
             rdp: rdp::Connection::new(0, rdp::SynOptions::default()),
             #[cfg(feature = "rdp")]
             rx_reorder: rdp::RxQueue::new(),
+            #[cfg(feature = "rdp")]
+            tx_unacked: rdp::TxQueue::new(),
         }
     }
 
@@ -306,7 +324,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         // because `hold_rx` refuses once the two together reach it -- so an existing
         // `[0u16; RXQ]` is still large enough, and a peer cannot pin more than one
         // connection's worth of pool by never filling a gap.
-        let needed = c.rx_len + c.held_len();
+        let needed = c.rx_len + c.held_len() + c.unacked_len();
         if drained.len() < needed {
             return Err(Error::BufferTooSmall { needed });
         }
@@ -321,6 +339,12 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         }
         #[cfg(feature = "rdp")]
         while let Some(idx) = c.rx_reorder.take_any() {
+            drained[n] = idx;
+            n += 1;
+        }
+        // The unacknowledged copies are the third place a connection holds pool slots.
+        #[cfg(feature = "rdp")]
+        while let Some(idx) = c.tx_unacked.take_any() {
             drained[n] = idx;
             n += 1;
         }
@@ -470,6 +494,53 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         None
     }
 
+    /// Claim the RDP header for one outgoing data packet on this connection.
+    ///
+    /// `None` when the connection is not open or the send window is full -- where the C
+    /// blocks on `tx_wait`. Sans-io has nowhere to block, so the caller sees back-pressure.
+    #[cfg(feature = "rdp")]
+    pub fn begin_rdp_send(&mut self, h: Handle, now_ms: u32) -> Option<rdp::Header> {
+        self.entry_mut(h).ok()?.rdp.begin_send(now_ms)
+    }
+
+    /// Hold a copy of a sent packet until the peer acknowledges it.
+    #[cfg(feature = "rdp")]
+    pub fn hold_unacked(&mut self, h: Handle, seq_nr: u16, slot: u16, now_ms: u32) -> Result<()> {
+        let c = self.entry_mut(h)?;
+        if c.rx_len + c.rx_reorder.len() + c.tx_unacked.len() >= RXQ {
+            return Err(Error::BufferTooSmall { needed: RXQ + 1 });
+        }
+        c.tx_unacked.push(seq_nr, slot, now_ms)
+    }
+
+    /// What to do with each unacknowledged packet, now.
+    ///
+    /// Releases what the peer has acknowledged, retransmits what has timed out, and asks
+    /// the caller to give up once the attempts run out -- `csp_rdp_check_timeouts`'s
+    /// transmit sweep, one attempt counted per sweep rather than per packet.
+    #[cfg(feature = "rdp")]
+    pub fn poll_unacked(
+        &mut self,
+        h: Handle,
+        now_ms: u32,
+        out: &mut [rdp::TxAction],
+    ) -> Result<usize> {
+        let c = self.entry_mut(h)?;
+        let (timeout, una) = (c.rdp.opts.packet_timeout, c.rdp.snd_una);
+        Ok(c.tx_unacked.poll(now_ms, timeout, una, out))
+    }
+
+    /// Every connection that could have something to retransmit.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_handles(&self) -> impl Iterator<Item = Handle> + '_ {
+        self.conns.iter().enumerate().filter_map(|(i, c)| {
+            (c.state == State::Open && !c.tx_unacked.is_empty()).then_some(Handle {
+                idx: i as u16,
+                generation: c.generation,
+            })
+        })
+    }
+
     /// Hold a packet that arrived ahead of the gap, under its sequence number.
     ///
     /// Fails when the queue is full, which is the caller's cue to drop the packet rather
@@ -481,7 +552,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         // connection and then never fills a gap pins a whole reorder queue of pool slots
         // on top of a full receive queue, and every `drained` array in the crate -- all
         // sized `RXQ` -- becomes too short to release them.
-        if c.rx_len + c.rx_reorder.len() >= RXQ {
+        if c.rx_len + c.rx_reorder.len() + c.tx_unacked.len() >= RXQ {
             return Err(Error::BufferTooSmall { needed: RXQ + 1 });
         }
         c.rx_reorder.insert(seq_nr, slot)

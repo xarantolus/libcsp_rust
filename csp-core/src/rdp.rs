@@ -441,6 +441,19 @@ impl<const N: usize> TxQueue<N> {
         self.retransmits = 0;
     }
 
+    /// Take any queued entry, without caring which.
+    ///
+    /// For releasing what a dead connection still holds. [`flush`](Self::flush) does the
+    /// same into a caller-sized array; this one suits a caller draining in a loop.
+    pub fn take_any(&mut self) -> Option<u16> {
+        for e in self.entries.iter_mut() {
+            if let Some(entry) = e.take() {
+                return Some(entry.token);
+            }
+        }
+        None
+    }
+
     /// Abandon everything, returning the tokens so the caller can release them.
     ///
     /// Not optional: the queue holds tokens, so anything left behind leaks.
@@ -675,6 +688,43 @@ impl Connection {
         // [0,0,1,1,1] for a count of 2.
         let outstanding = self.rcv_cur.wrapping_sub(self.rcv_lsa);
         outstanding as u32 > self.opts.ack_delay_count
+    }
+
+    /// Claim the header for one outgoing data packet, or `None` if it cannot be sent yet.
+    ///
+    /// Mirrors `csp_rdp_send`: refuses unless the connection is open and the send window
+    /// has room (`snd_nxt` no further than `snd_una + window_size - 1`), then stamps
+    /// `seq_nr = snd_nxt`, `ack_nr = rcv_cur`, sets `ACK`, and advances `snd_nxt`.
+    ///
+    /// `None` for a full window is where the C blocks on `tx_wait`. Sans-io has nowhere to
+    /// block, so the caller decides: retry after `work`, or report back-pressure.
+    ///
+    /// The caller must hold the packet until it is acknowledged — see [`TxQueue`] — or the
+    /// connection is not reliable, whatever the header says.
+    pub fn begin_send(&mut self, now_ms: u32) -> Option<Header> {
+        if self.state != State::Open {
+            return None;
+        }
+        // `snd_una + window_size - 1` is the last sequence the window admits.
+        let last = self
+            .snd_una
+            .wrapping_add(self.opts.window_size as u16)
+            .wrapping_sub(1);
+        // `seq_after(snd_nxt, last)`, spelled with the comparator this module has.
+        if seq_before(last, self.snd_nxt) {
+            return None;
+        }
+        let h = Header {
+            flags: ACK,
+            seq_nr: self.snd_nxt,
+            ack_nr: self.rcv_cur,
+        };
+        // Every outgoing frame carries the latest acknowledgement, so the delayed-ack
+        // bookkeeping restarts here exactly as `csp_rdp_send_cmp` restarts it.
+        self.rcv_lsa = self.rcv_cur;
+        self.ack_timestamp = now_ms;
+        self.snd_nxt = self.snd_nxt.wrapping_add(1);
+        Some(h)
     }
 
     /// Accept a packet that was held out of order, now that it is next in sequence.
@@ -1315,6 +1365,31 @@ mod tests {
     /// and `dest_socket` is cleared when the connection is announced to the socket, so the
     /// branch only ever covers a handshake that never finished. Pinned end to end by
     /// `rdp::a_proposed_conn_timeout_is_adopted`.
+    /// `csp_rdp_send` refuses once `snd_nxt` reaches `snd_una + window_size - 1`; the C
+    /// blocks on `tx_wait` there, and a sans-io node reports it. Without the bound a sender
+    /// runs ahead of what the peer can acknowledge and the window means nothing.
+    #[test]
+    fn the_send_window_bounds_what_may_be_claimed() {
+        let mut c = Connection::new(
+            1,
+            SynOptions {
+                window_size: 3,
+                ..SynOptions::default()
+            },
+        );
+        c.state = State::Open;
+        c.snd_una = c.snd_nxt;
+
+        // Three fit.
+        for i in 0..3 {
+            assert!(c.begin_send(0).is_some(), "packet {i} must fit the window");
+        }
+        // The fourth does not, until the peer acknowledges something.
+        assert!(c.begin_send(0).is_none(), "a full window must refuse");
+        c.snd_una = c.snd_una.wrapping_add(1);
+        assert!(c.begin_send(0).is_some(), "an acknowledgement reopens it");
+    }
+
     #[test]
     fn only_an_unestablished_connection_times_out() {
         // Established: stays, however long it is quiet. A telemetry link between passes.
