@@ -831,6 +831,32 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     pub fn shutdown<const B: usize, const SZ: usize>(&mut self, pool: &Pool<B, SZ>) {
         self.qfifo.drain(pool);
         while self.promisc_read(pool).is_some() {}
+
+        // Fan-out destinations reported but not yet collected. This held a buffer per
+        // queued destination, so a node that forwarded onto two links and shut down before
+        // draining lost one.
+        #[cfg(feature = "rtable")]
+        while let Some(Routed::Forwarded { packet, .. }) = self.pop_pending() {
+            drop(pool.from_index(packet));
+            // pop_pending counts a forward it is about to report; nothing is being
+            // reported here, so undo it.
+            self.counters.forwarded -= 1;
+        }
+
+        // Packets sitting on connection receive queues. `shutdown` has always claimed to
+        // release everything the router holds and never released these: a node torn down
+        // with anything unread lost a buffer per packet. Looped because `close_all` stops
+        // when the scratch array is full.
+        loop {
+            let mut drained = [0u16; 32];
+            let (closed, n) = self.conns.close_all(&mut drained);
+            for &slot in &drained[..n] {
+                drop(pool.from_index(slot));
+            }
+            if closed == 0 {
+                break;
+            }
+        }
     }
 }
 
@@ -1179,6 +1205,57 @@ mod tests {
         r.tick(&pool, 1_000_000, 1_000);
         r.shutdown(&pool);
         assert_eq!(pool.available(), 16, "nothing may survive shutdown");
+    }
+
+    /// `shutdown` on its own, with nothing tidied up first.
+    ///
+    /// The test above is named for this and does not test it: it calls `tick` beforehand,
+    /// which expires the connections and drains them, so `shutdown` is handed a node that
+    /// is already clean. Both of the things `shutdown` failed to release were invisible to
+    /// it — a packet still queued on a connection, and a fan-out destination reported but
+    /// not collected. Each cost one pool buffer per occurrence.
+    #[cfg(feature = "rtable")]
+    #[test]
+    fn shutdown_alone_releases_connections_and_pending_forwards() {
+        // A packet delivered to a connection and never read. No tick.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        let before = pool.available();
+        r.receive(pkt(&pool, ME, 20, b"unread"), 0);
+        assert!(matches!(
+            r.work(&pool, &test_ifaces(), 0),
+            Routed::Delivered { .. }
+        ));
+        r.shutdown(&pool);
+        assert_eq!(
+            pool.available(),
+            before,
+            "a packet still queued on a connection must not survive shutdown"
+        );
+
+        // A packet fanning out to two links, with only the first collected.
+        let pool = P::new();
+        let mut r = R::new(9999, Version::V2);
+        let ifaces = {
+            let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
+            l.add("IN", 40, 12, false).unwrap();
+            l.add("A", 8, 12, false).unwrap();
+            l.add("B", 9, 12, false).unwrap();
+            l
+        };
+        let before = pool.available();
+        r.receive(pkt(&pool, 10, 20, b"onward"), 0);
+        match r.work(&pool, &ifaces, 0) {
+            Routed::Forwarded { packet, .. } => drop(pool.from_index(packet)),
+            other => panic!("expected forwarding, got {other:?}"),
+        }
+        r.shutdown(&pool);
+        assert_eq!(
+            pool.available(),
+            before,
+            "an uncollected fan-out destination must not survive shutdown"
+        );
     }
 
     #[test]
