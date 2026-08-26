@@ -78,9 +78,25 @@ struct Entry<const RXQ: usize> {
     last_activity: u32,
     #[cfg(feature = "rdp")]
     rdp: rdp::Connection,
+    /// Packets that arrived ahead of a gap, held by sequence number until it fills.
+    /// The entries are pool slot indices; the connection never owns a packet itself.
+    #[cfg(feature = "rdp")]
+    rx_reorder: rdp::RxQueue<RXQ>,
 }
 
 impl<const RXQ: usize> Entry<RXQ> {
+    /// How many packets the reorder queue is holding.
+    fn held_len(&self) -> usize {
+        #[cfg(feature = "rdp")]
+        {
+            self.rx_reorder.len()
+        }
+        #[cfg(not(feature = "rdp"))]
+        {
+            0
+        }
+    }
+
     fn new() -> Self {
         Entry {
             state: State::Closed,
@@ -96,6 +112,8 @@ impl<const RXQ: usize> Entry<RXQ> {
             last_activity: 0,
             #[cfg(feature = "rdp")]
             rdp: rdp::Connection::new(0, rdp::SynOptions::default()),
+            #[cfg(feature = "rdp")]
+            rx_reorder: rdp::RxQueue::new(),
         }
     }
 
@@ -280,10 +298,17 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// Draining is not optional: the queue holds indices, so anything left behind leaks.
     pub fn close(&mut self, h: Handle, drained: &mut [u16]) -> Result<usize> {
         let c = self.entry_mut(h)?;
-        // Checked before anything is taken out of the queue. A slot removed but not
+        // Checked before anything is taken out of either queue. A slot removed but not
         // reported is a slot nobody releases, and the pool never gets it back.
-        if drained.len() < c.rx_len {
-            return Err(Error::BufferTooSmall { needed: c.rx_len });
+        //
+        // Both queues: the receive queue the application reads from, and the reorder queue
+        // holding packets that arrived ahead of a gap. `RXQ` still bounds the total,
+        // because `hold_rx` refuses once the two together reach it -- so an existing
+        // `[0u16; RXQ]` is still large enough, and a peer cannot pin more than one
+        // connection's worth of pool by never filling a gap.
+        let needed = c.rx_len + c.held_len();
+        if drained.len() < needed {
+            return Err(Error::BufferTooSmall { needed });
         }
         let mut n = 0;
         while c.rx_len > 0 {
@@ -293,6 +318,11 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
             }
             c.rx_head = (c.rx_head + 1) % RXQ;
             c.rx_len -= 1;
+        }
+        #[cfg(feature = "rdp")]
+        while let Some(idx) = c.rx_reorder.take_any() {
+            drained[n] = idx;
+            n += 1;
         }
         c.reset();
         Ok(n)
@@ -438,6 +468,44 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
             }
         }
         None
+    }
+
+    /// Hold a packet that arrived ahead of the gap, under its sequence number.
+    ///
+    /// Fails when the queue is full, which is the caller's cue to drop the packet rather
+    /// than leak the slot.
+    #[cfg(feature = "rdp")]
+    pub fn hold_rx(&mut self, h: Handle, seq_nr: u16, slot: u16) -> Result<()> {
+        let c = self.entry_mut(h)?;
+        // The two queues share the `RXQ` budget. Without this a peer that opens a
+        // connection and then never fills a gap pins a whole reorder queue of pool slots
+        // on top of a full receive queue, and every `drained` array in the crate -- all
+        // sized `RXQ` -- becomes too short to release them.
+        if c.rx_len + c.rx_reorder.len() >= RXQ {
+            return Err(Error::BufferTooSmall { needed: RXQ + 1 });
+        }
+        c.rx_reorder.insert(seq_nr, slot)
+    }
+
+    /// Take the held packet with this sequence number, if it is there.
+    #[cfg(feature = "rdp")]
+    pub fn take_held(&mut self, h: Handle, seq_nr: u16) -> Option<u16> {
+        self.entry_mut(h).ok()?.rx_reorder.take(seq_nr)
+    }
+
+    /// Every held packet, for release when the connection goes away.
+    #[cfg(feature = "rdp")]
+    pub fn drain_held(&mut self, h: Handle, out: &mut [u16]) -> usize {
+        let Ok(e) = self.entry_mut(h) else { return 0 };
+        let mut n = 0;
+        while n < out.len() {
+            let Some(slot) = e.rx_reorder.take_any() else {
+                break;
+            };
+            out[n] = slot;
+            n += 1;
+        }
+        n
     }
 
     /// The RDP state machine for a connection.
@@ -741,6 +809,39 @@ mod tests {
         t.close(h1, &mut drained).unwrap();
         let h2 = t.alloc(id(2), 0, 0).unwrap();
         assert_ne!(h1.index(), h2.index(), "should not reuse the slot at once");
+    }
+
+    /// The receive queue and the reorder queue share the `RXQ` budget, so a peer that
+    /// opens a connection and then never fills a gap cannot pin more pool than one
+    /// connection's worth -- and every `drained` array in the crate, all sized `RXQ`,
+    /// stays large enough to release what `close` finds.
+    ///
+    /// Filling the *receive* queue first is what makes this a test of the shared budget.
+    /// An earlier version only held packets and checked it refused eventually, which
+    /// `RxQueue`'s own capacity guarantees on its own -- it passed with the cap removed,
+    /// and `just mutants` said so.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn the_two_receive_queues_share_one_budget() {
+        const RXQ: usize = 4;
+        let mut t = T::new();
+        let h = t.alloc(id(10), 0, 0).unwrap();
+
+        // Three of the four slots go to packets the application has not read yet.
+        for i in 0..3u16 {
+            assert_eq!(t.enqueue_rx(h, i), Ok(true));
+        }
+
+        // Only one slot of budget is left, however much room the reorder queue itself has.
+        assert!(t.hold_rx(h, 100, 10).is_ok(), "the last slot may be used");
+        assert!(
+            t.hold_rx(h, 101, 11).is_err(),
+            "the budget is shared: the reorder queue must not have four slots of its own"
+        );
+
+        // And everything the connection holds fits in an `RXQ`-sized array.
+        let mut drained = [0u16; RXQ];
+        assert_eq!(t.close(h, &mut drained).unwrap(), 4);
     }
 
     #[cfg(feature = "rdp")]
