@@ -836,6 +836,70 @@ static void deliver_byte(uint16_t seq, uint16_t ack_nr, char byte) {
 	put_header_and_route(packet, RDP_ACK, seq, ack_nr);
 }
 
+/* The send side: what a peer sees when it never acknowledges the data this node sent.
+ *
+ * `csp_rdp_check_timeouts` walks the connection's transmit queue, retransmits every packet
+ * whose `timestamp_tx + packet_timeout` has passed, and counts **one attempt per sweep**
+ * rather than per packet. Past `CSP_RDP_MAX_RETRANSMITS` it closes the connection.
+ *
+ * Nothing measured this, and the measurement is stark: the C puts 29 frames on the wire and
+ * then stops; the port puts one there and never repeats it. `diverges`, with the reason in
+ * SCOPE.md -- the port has no RDP *send* path at all, not merely an unused queue. */
+START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
+{
+	setup_stack();
+	const csp_conn_t * conn = open_conn(0 /* immediate acks */, 2);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+
+	/* One packet out, never acknowledged. */
+	const unsigned int before = test_tx_count;
+	csp_packet_t * out = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(out);
+	memcpy(out->data, "hello", 5);
+	out->length = 5;
+	csp_send(accepted, out);
+	const unsigned int first_send = test_tx_count - before;
+
+	/* The peer stays silent. Sweep well past any plausible give-up point.
+	   Counting frames, not connection-table state: after the C gives up it leaves the
+	   connection for the application to close (`discard_close` wakes user-space rather
+	   than freeing an accepted handle), so "is it still in the table" answers a different
+	   question than "has it stopped transmitting". */
+	for (int i = 0; i < 1000; i++) {
+		ctest_clock_advance(250);
+		csp_conn_check_timeouts();
+	}
+	const unsigned int total = test_tx_count - before;
+
+	/* Another long stretch: anything sent here means it never gave up. */
+	const unsigned int before_tail = test_tx_count;
+	for (int i = 0; i < 1000; i++) {
+		ctest_clock_advance(250);
+		csp_conn_check_timeouts();
+	}
+	const unsigned int tail = test_tx_count - before_tail;
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "unacknowledged_data_is_retransmitted_then_given_up_on",
+						  "diverges");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("packet_timeout", 1000);
+		ctest_trace_int("tick_ms", 250);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("frames_on_first_send", (int64_t)first_send);
+		ctest_trace_int("total_frames", (int64_t)total);
+		ctest_trace_int("frames_after_giving_up", (int64_t)tail);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_a_gap_filled_late_delivers_both_in_order)
 {
 	setup_stack();
@@ -1488,6 +1552,7 @@ Suite * rdp_suite(void)
 
 	TCase * tc_ack = tcase_create("ack");
 	tcase_add_test(tc_ack, test_without_delayed_acks_every_packet_is_acknowledged);
+	tcase_add_test(tc_ack, test_unacknowledged_data_is_retransmitted_then_given_up_on);
 	tcase_add_test(tc_ack, test_a_gap_filled_late_delivers_both_in_order);
 	tcase_add_test(tc_ack, test_an_eak_carries_no_data_to_the_application);
 	tcase_add_test(tc_ack, test_out_of_sequence_data_is_answered_but_not_delivered);
