@@ -609,6 +609,13 @@ impl<'p> csp::delivery::PacketSource<'p, 8, 264> for NoMore {
         None
     }
 }
+// The node-level replays use a 16-buffer pool, so the same "no second packet" source is
+// needed at that size too.
+impl<'p> csp::delivery::PacketSource<'p, 16, 264> for NoMore {
+    fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::pool::Packet<'p, 16, 264>> {
+        None
+    }
+}
 
 /// What the port does with the same packet handed to a stream reader.
 ///
@@ -1000,6 +1007,79 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
         return serde_json::json!({ "frames_after_final_ack": after });
     }
 
+    if case == "a_stream_fragment_survives_being_carried_over_rdp" {
+        // Both protocols append their header, and the send path stacks them:
+        // `[body][sfp trailer][rdp trailer]`. The receiver strips from the outside in.
+        let mut payload = b"stream".to_vec();
+        payload.extend_from_slice(&0u32.to_be_bytes()); // sfp offset
+        payload.extend_from_slice(&6u32.to_be_bytes()); // sfp totalsize
+        let dh = rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: 1001,
+            ack_nr: own_iss,
+        };
+        let mut framed = [0u8; 32];
+        let k = dh.encode(&payload, &mut framed).unwrap();
+
+        let mut d = n.packet().expect("the pool is empty");
+        d.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP | csp_core::flags::FRAG,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        d.set_payload(&framed[..k]).unwrap();
+        n.router.receive(d, 0);
+
+        let mut handed: Option<csp::Packet<'_, 16, 264>> = None;
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Delivered { conn, .. } => {
+                    if let Ok(Some(p)) = n.read(conn) {
+                        handed = Some(p);
+                    }
+                }
+                csp::Routed::Respond { packet, .. } => drop(n.take_forwarded(packet)),
+                csp::Routed::Idle => break,
+                _ => continue,
+            }
+        }
+
+        let Some(pkt) = handed else {
+            return serde_json::json!({
+                "after_rdp_len": 0, "sfp_result": -1,
+                "reassembled_len": 0, "reassembled": "",
+            });
+        };
+        let after_rdp_len = pkt.with_payload(|d| d.len());
+
+        // Hand it to the stream reader, which is what the C's csp_sfp_recv_fp does next.
+        let mut src = NoMore;
+        return match csp::delivery::Delivery::classify(pkt, &mut src) {
+            csp::delivery::Delivery::Stream(mut st) => {
+                let mut buf = [0u8; 64];
+                match st.read_to_slice(1000, &mut buf) {
+                    Ok(got) => serde_json::json!({
+                        "after_rdp_len": after_rdp_len,
+                        "sfp_result": 0,
+                        "reassembled_len": got,
+                        "reassembled": buf[..got].iter().map(|b| format!("{b:02x}")).collect::<String>(),
+                    }),
+                    Err(_) => serde_json::json!({
+                        "after_rdp_len": after_rdp_len, "sfp_result": -103,
+                        "reassembled_len": 0, "reassembled": "",
+                    }),
+                }
+            }
+            csp::delivery::Delivery::Datagram(_) => serde_json::json!({
+                "after_rdp_len": after_rdp_len, "sfp_result": -103,
+                "reassembled_len": 0, "reassembled": "",
+            }),
+        };
+    }
+
     if case == "without_delayed_acks_every_packet_is_acknowledged" {
         // Acknowledgements counted as frames leaving a node, which is the only place they
         // are observable. This record used to be replayed by setting `rcv_cur` by hand and
@@ -1383,6 +1463,37 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         // The C reports a corrupt fragment and a wrong-shape delivery with the same code.
         // The port's answer to the same pair is what this compares — and it is different,
         // which is the whole point of the divergence recorded beside it.
+        // The fragment MTU per option set. Measured from `csp_sfp_opts_max_mtu` rather
+        // than restated: the four values `sfp::max_mtu_matches_the_c` asserts carried a
+        // comment claiming they came from the C, which is a provenance claim and not a
+        // measurement. They did; this is what checks that they still do.
+        "sfp" if rec.case == "the_fragment_mtu_for_each_option_set" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct MtuInput {
+                buffer_size: usize,
+            }
+            let input: MtuInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // The oracle's `CSP_BUFFER_SIZE` is the payload area; this port sizes a buffer
+            // as payload plus `PADDING` scratch, so the comparable figure is BUFSZ - PADDING.
+            assert_eq!(
+                input.buffer_size, 256,
+                "the oracle's buffer size changed; the port's equivalent is BUFSZ - PADDING"
+            );
+            let b = input.buffer_size;
+            use csp_core::security::opts;
+            use csp_core::sfp::max_mtu;
+            Some((
+                serde_json::json!({
+                    "plain": max_mtu(b, 0),
+                    "rdp": max_mtu(b, opts::RDP_REQ),
+                    "crc32": max_mtu(b, opts::CRC32_REQ),
+                    "hmac": max_mtu(b, opts::HMAC_REQ),
+                    "all_three": max_mtu(b, opts::RDP_REQ | opts::CRC32_REQ | opts::HMAC_REQ),
+                }),
+                "sfp::max_mtu".to_string(),
+            ))
+        }
         "sfp" if rec.case == "a_corrupt_fragment_reports_the_same_error_as_a_wrong_shape" => {
             let corrupt = replay_sfp(&SfpInput {
                 frag_flag: true,
@@ -1658,6 +1769,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                     | "the_handshakes_final_ack_is_not_itself_answered"
                     | "data_reaches_the_application_without_the_rdp_trailer"
                     | "without_delayed_acks_every_packet_is_acknowledged"
+                    | "a_stream_fragment_survives_being_carried_over_rdp"
             ) =>
         {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))

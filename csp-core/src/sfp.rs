@@ -269,7 +269,10 @@ mod tests {
 
     #[test]
     fn max_mtu_matches_the_c() {
-        // Values captured from csp_sfp_opts_max_mtu with CSP_BUFFER_SIZE=256.
+        // Values from `csp_sfp_opts_max_mtu` with CSP_BUFFER_SIZE=256. "Captured from"
+        // used to be a claim in a comment and nothing else; the same four numbers, plus
+        // the all-three case, are now recorded by
+        // `sfp::the_fragment_mtu_for_each_option_set` and compared on every corpus run.
         assert_eq!(max_mtu(256, 0), 248);
         assert_eq!(max_mtu(256, opts::RDP_REQ), 243);
         assert_eq!(max_mtu(256, opts::CRC32_REQ), 244);

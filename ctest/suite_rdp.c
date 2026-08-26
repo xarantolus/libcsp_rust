@@ -755,6 +755,95 @@ START_TEST(test_data_reaches_the_application_without_the_rdp_trailer)
 }
 END_TEST
 
+/* --- SFP carried over RDP: the {SFP} x {RDP} cell ---
+ *
+ * Both protocols put their header at the **end** of the payload, and the send path stacks
+ * them: `csp_sfp_send` appends the SFP header, then `csp_rdp_send` appends the RDP header
+ * after it. So the wire carries `[body][sfp trailer][rdp trailer]` and the receiver must
+ * strip them in that order -- RDP first, from the outside in.
+ *
+ * The SFP suite builds its packets by hand and calls `csp_sfp_recv_fp` directly, so the
+ * path from the wire to the stream reader was never exercised at all; the RDP suite reads
+ * plain bytes. This is the one case where both layers' length arithmetic has to agree, and
+ * an off-by-one in either produces a fragment the reader rejects rather than a crash.
+ */
+
+typedef struct __attribute__((packed)) {
+	uint32_t offset;
+	uint32_t totalsize;
+} sfp_trailer_t;
+
+static uint8_t sfp_got[64];
+static uint32_t sfp_got_len;
+
+static int sfp_capture(const uint8_t * buffer, uint32_t size, uint32_t offset,
+					   uint32_t totalsz, void * data) {
+	(void)totalsz;
+	(void)data;
+	if (offset + size <= sizeof(sfp_got)) {
+		memcpy(sfp_got + offset, buffer, size);
+		if (offset + size > sfp_got_len) {
+			sfp_got_len = offset + size;
+		}
+	}
+	return CSP_ERR_NONE;
+}
+
+START_TEST(test_a_stream_fragment_survives_being_carried_over_rdp)
+{
+	setup_stack();
+	memset(sfp_got, 0, sizeof(sfp_got));
+	sfp_got_len = 0;
+
+	const csp_conn_t * conn = open_conn(0, 2);
+	const uint16_t iss = conn->rdp.snd_iss;
+
+	/* [body][sfp trailer][rdp trailer], built in that order. */
+	csp_packet_t * packet = new_rdp_packet();
+	packet->id.flags |= CSP_FFRAG;
+	memcpy(packet->data, "stream", 6);
+	packet->length = 6;
+	sfp_trailer_t * sfp = (sfp_trailer_t *)&packet->data[packet->length];
+	sfp->offset = htobe32(0);
+	sfp->totalsize = htobe32(6);
+	packet->length += sizeof(*sfp);
+	put_header_and_route(packet, RDP_ACK, 1001, iss);
+
+	/* The application takes the connection and reads what arrived. */
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+	csp_packet_t * got = csp_read(accepted, 0);
+	ck_assert_ptr_nonnull(got);
+
+	/* RDP's trailer is gone; SFP's is still there. */
+	ck_assert_uint_eq(got->length, 6 + sizeof(sfp_trailer_t));
+
+	const csp_sfp_recv_t rx = { .write = sfp_capture };
+	const int ret = csp_sfp_recv_fp(accepted, &rx, 0, got);
+
+	ck_assert_int_eq(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(sfp_got_len, 6);
+	ck_assert_mem_eq(sfp_got, "stream", 6);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_stream_fragment_survives_being_carried_over_rdp",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("body_bytes", 6);
+		ctest_trace_int("clock_ms", CTEST_CLOCK_EPOCH_MS);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		/* What the application was handed after RDP, before SFP. */
+		ctest_trace_int("after_rdp_len", (int64_t)(6 + sizeof(sfp_trailer_t)));
+		ctest_trace_int("sfp_result", ret);
+		ctest_trace_int("reassembled_len", (int64_t)sfp_got_len);
+		ctest_trace_hex("reassembled", sfp_got, sfp_got_len);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * rdp_suite(void)
 {
 	Suite * s;
@@ -786,6 +875,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_hs, test_a_syn_is_answered_with_syn_ack);
 	tcase_add_test(tc_hs, test_the_handshakes_final_ack_is_not_itself_answered);
 	tcase_add_test(tc_hs, test_data_reaches_the_application_without_the_rdp_trailer);
+	tcase_add_test(tc_hs, test_a_stream_fragment_survives_being_carried_over_rdp);
 	suite_add_tcase(s, tc_hs);
 
 	TCase * tc_ack = tcase_create("ack");
