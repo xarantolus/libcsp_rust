@@ -386,6 +386,35 @@ application calls `csp_service_handler` from its own receive loop
 `Router` never calls them. Worth stating because the opposite would mean a node answering
 `CSP_REBOOT` that its author never opted into.
 
+### The promiscuous tap in the routing path: checked, and correct
+
+Measured on 2026-08-26. libcsp's own promiscuous tests drive `csp_promisc_add` directly,
+which says nothing about whether the router reaches it — the tap could be entirely
+disconnected and every one of them would still pass. `ctest/suite_promisc.c` now drives it
+through `csp_route_work`.
+
+`csp_route_work` places the tap after deduplication and before the "is this for me" branch,
+and both halves are behaviour:
+
+- **after dedup**, so a suppressed duplicate never reaches the tap — a diagnostic feed
+  showing frames the node discarded would misreport what the node acted on;
+- **before the branch**, so the tap sees traffic passing *through* the node as well as
+  traffic addressed to it. A tap blind to forwarded packets is blind on exactly the node
+  where it is most useful.
+
+| | tapped | delivered | forwarded |
+|---|---|---|---|
+| local delivery | 1 | 1 | 0 |
+| forwarded onward | 1 | 0 | 1 |
+| duplicate suppressed | 1 | 1 | 0 |
+| tap disabled | 0 | 1 | 1 |
+
+**The port matches on all four, and no defect was found.** That is worth recording as a
+result rather than silence: the tap is one of the few things that was right first time. What
+changed is that it is now *known* to be right, and two mutations enforce it — disabling the
+tap is caught by three records, and moving it after the local/forward branch is caught by
+one.
+
 ### The same connection was announced to the application once per packet
 
 Found on 2026-08-25 by `ctest/suite_conn.c`, the first suite covering the connection table.
