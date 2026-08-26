@@ -62,7 +62,7 @@ pub enum Routed {
     ///
     /// This carries the packet index rather than the packet because [`Routed`] has no
     /// lifetime or size parameters. An earlier version reported `{ iface, via }` and
-    /// *destroyed* the packet, pointing at a `Csp::forward` that was never written — so
+    /// *destroyed* the packet, pointing at a `Node::forward` that was never written — so
     /// every forwarded packet was silently discarded and the node forwarded nothing at
     /// all. Found by the node-level differential test against the C, which is the only
     /// thing that could have found it: the codec tests never reach the router, and the

@@ -15,13 +15,13 @@ CSP node can exist per process.
 The target is the opposite:
 
 > A pure-Rust, `no_std`, few-`unsafe` crate with no C and no FFI, where all of libcsp's
-> global state lives inside a `Csp` value the user owns, and two instances can coexist.
+> global state lives inside a `Node` value the user owns, and two instances can coexist.
 
 ## Definition of done — identical for every port branch
 
 1. Builds for `thumbv7em-none-eabihf` with `--no-default-features`. `#![no_std]`, no
    `libc`, no `build.rs` compiling C, no bindgen, no `extern "C"` in the crate.
-2. **No global mutable state.** No `static mut`, no global `Mutex`/`AtomicPtr`. Two `Csp`
+2. **No global mutable state.** No `static mut`, no global `Mutex`/`AtomicPtr`. Two `Node`
    instances coexist in one process, proven by a test.
 3. The conformance suite passes.
 4. Every remaining `unsafe` block carries a `// SAFETY:` justification, and the count is

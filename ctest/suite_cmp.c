@@ -189,6 +189,59 @@ static void record(const char * name) {
 	ctest_trace_end();
 }
 
+/* A CLOCK request carrying an actual time, which is what makes the handler *set* rather
+   than only report. request_of() zeroes the body, and tv_sec == 0 is the C's "report only"
+   sentinel, so it can never reach the set path. */
+static void clock_request(uint32_t tv_sec, uint32_t tv_nsec) {
+	struct csp_cmp_clock_msg msg;
+	memset(&msg, 0, sizeof(msg));
+	msg.type = CSP_CMP_REQUEST;
+	msg.code = CSP_CMP_CLOCK;
+	msg.clock.tv_sec = htobe32(tv_sec);
+	msg.clock.tv_nsec = htobe32(tv_nsec);
+
+	csp_packet_t * packet = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(packet);
+	packet->id.pri = 2;
+	packet->id.src = PEER_ADDR;
+	packet->id.dst = LOCAL_ADDR;
+	packet->id.dport = CSP_CMP;
+	packet->id.sport = 40;
+	packet->id.flags = 0;
+	memcpy(packet->data, &msg, sizeof(msg));
+	packet->length = (uint16_t)sizeof(msg);
+	sent_len = sizeof(msg);
+	memcpy(sent, packet->data, sent_len);
+
+	csp_qfifo_write(packet, &ingress_if, NULL);
+	csp_route_work();
+	serve();
+}
+
+/* Same as record(), plus whether this node's clock accepted the set.
+
+   The two clock-set cases send byte-identical requests and differ only in what the node
+   was willing to do, so a record carrying just the request describes both equally well.
+   The replay would then have to guess, and a guess that happens to match is not a
+   measurement. */
+static void record_clock(const char * name, int accepted) {
+	if (!ctest_tracing()) {
+		return;
+	}
+	ctest_trace_begin("cmp", name, "must_match");
+	ctest_trace_obj_begin("input");
+	ctest_trace_hex("request", sent, sent_len);
+	ctest_trace_int("clock_set_accepted", accepted);
+	ctest_trace_obj_end();
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("replies", (int64_t)reply_count);
+	ctest_trace_int("reply_len", (int64_t)(reply_count ? reply_len : 0));
+	ctest_trace_int("reply_type", reply_count ? reply[0] : -1);
+	ctest_trace_int("reply_code", reply_count ? reply[1] : -1);
+	ctest_trace_obj_end();
+	ctest_trace_end();
+}
+
 /* --- dispatch --- */
 
 /* A reply arriving where a request belongs is not answered: answering would let two nodes
@@ -260,6 +313,25 @@ START_TEST(test_a_full_size_ident_request_is_answered)
 	ck_assert_uint_gt(strlen(msg->time), 0);
 
 	record("a_full_size_ident_request_is_answered");
+
+	if (ctest_tracing()) {
+		/* The identity itself, not just the shape of the reply. Everything up to `date`
+		   is what csp_conf was set to; date and time come from __DATE__/__TIME__ and
+		   would change the corpus on every rebuild, so the trace stops before them.
+
+		   Without this the record carried only reply_len/type/code, and a node that
+		   answered IDENT with three empty strings reproduced it exactly. */
+		ctest_trace_begin("cmp", "an_ident_reply_carries_the_configured_identity",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_hex("request", sent, sent_len);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_hex("identity", reply,
+						offsetof(struct csp_cmp_ident_msg, date));
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 }
 END_TEST
 
@@ -344,6 +416,40 @@ START_TEST(test_a_full_size_clock_request_is_answered)
 	ck_assert_uint_eq(reply[1], CSP_CMP_CLOCK);
 
 	record("a_full_size_clock_request_is_answered");
+}
+END_TEST
+
+/* csp_cmp_clock_handler fills the reply, then returns the result of the *set*. A refused
+   set therefore propagates out of csp_cmp_handler, so csp_service_handler discards the
+   reply it just built and the peer hears nothing.
+
+   That is the useful behaviour: silence means the clock was not set. A node that replied
+   with the timestamp anyway would be telling the peer the set succeeded. */
+START_TEST(test_a_clock_the_node_refuses_to_set_gets_no_reply)
+{
+	setup_stack();
+	ctest_clock_set_accepts(0);
+
+	clock_request(1735689600u, 500u);
+
+	ck_assert_uint_eq(reply_count, 0);
+	record_clock("a_clock_the_node_refuses_to_set_gets_no_reply", 0);
+
+	ctest_clock_set_accepts(1);
+}
+END_TEST
+
+/* The same request, accepted: the reply carries the time that was just set. */
+START_TEST(test_an_accepted_clock_set_is_reported_back)
+{
+	setup_stack();
+	ctest_clock_set_accepts(1);
+
+	clock_request(1735689600u, 500u);
+
+	ck_assert_uint_eq(reply_count, 1);
+	ck_assert_uint_eq(ctest_clock_last_set().tv_sec, 1735689600u);
+	record_clock("an_accepted_clock_set_is_reported_back", 1);
 }
 END_TEST
 
@@ -625,6 +731,26 @@ START_TEST(test_poke_refuses_to_write_bytes_the_request_did_not_carry)
 }
 END_TEST
 
+/* The mirror of peek_outside_the_permitted_window_gets_no_reply, for the write direction.
+   A refused write must not be reported as a successful one: a peer that pokes an address
+   the node will not accept and gets a reply back would record the write as done. */
+START_TEST(test_poke_outside_the_permitted_window_gets_no_reply)
+{
+	setup_stack();
+	fill_region();
+
+	peek_request(CSP_CMP_POKE, 0xDEAD0000, 4, CMP_PEEK_SIZE(4), 0x5A);
+
+	ck_assert_uint_eq(reply_count, 0);
+	/* And the permitted region is untouched. */
+	for (int i = 0; i < CTEST_PEEK_REGION_LEN; i++) {
+		ck_assert_uint_eq(ctest_peek_region()[i], PEEK_PATTERN_AT(i));
+	}
+
+	record("poke_outside_the_permitted_window_gets_no_reply");
+}
+END_TEST
+
 /* --- ROUTE_SET ---
  *
  * The question a test should ask is not "is there a table entry" but "does a packet for
@@ -822,6 +948,8 @@ Suite * cmp_suite(void)
 	tcase_add_test(tc_len, test_if_stats_for_an_unknown_interface_gets_no_reply);
 	tcase_add_test(tc_len, test_a_bare_clock_request_gets_no_reply);
 	tcase_add_test(tc_len, test_a_full_size_clock_request_is_answered);
+	tcase_add_test(tc_len, test_a_clock_the_node_refuses_to_set_gets_no_reply);
+	tcase_add_test(tc_len, test_an_accepted_clock_set_is_reported_back);
 	tcase_add_test(tc_len, test_the_minimum_request_length_is_the_whole_reply);
 	suite_add_tcase(s, tc_len);
 
@@ -841,6 +969,7 @@ Suite * cmp_suite(void)
 	tcase_add_test(tc_mem, test_peek_outside_the_permitted_window_gets_no_reply);
 	tcase_add_test(tc_mem, test_poke_writes_the_bytes_at_the_address);
 	tcase_add_test(tc_mem, test_poke_refuses_to_write_bytes_the_request_did_not_carry);
+	tcase_add_test(tc_mem, test_poke_outside_the_permitted_window_gets_no_reply);
 #if !CSP_BUFFER_ZERO_CLEAR
 	tcase_add_test(tc_mem, test_the_peek_tail_leaks_the_previous_packet_when_the_pool_is_not_cleared);
 #endif

@@ -22,6 +22,12 @@
 //! but it is an out-of-bounds read on the one port whose whole job is recovery, reachable
 //! by anyone who can send a packet. [`Request::decode`] requires the four bytes.
 
+#[cfg(feature = "cmp")]
+use crate::hooks::Hooks;
+#[cfg(feature = "cmp")]
+use csp_core::cmp::{self, Header, Ident, IfStatsMsg, Query, RouteSetV1, RouteSetV2};
+#[cfg(feature = "cmp")]
+use csp_core::Version;
 use csp_core::{ports, Error, Result};
 
 /// Reboot magic word.
@@ -98,13 +104,20 @@ impl Request {
 /// libcsp has **two** `__weak` definitions of `csp_input_hook` in one library, so which
 /// implementation runs is link-order dependent.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct NodeStatus {
+pub struct NodeStatus<'a> {
     /// Free memory in bytes.
     pub mem_free: u32,
     /// Free packet buffers.
     pub buf_free: u32,
     /// Uptime in seconds.
     pub uptime_s: u32,
+    /// Process list, as `csp_ps_hook` would have filled it.
+    ///
+    /// Empty means "cannot answer", which the C treats as a discard rather than as an
+    /// empty reply -- `csp_service_handler` does `if (packet->length == 0) goto discard`.
+    /// A zero-length reply and no reply look the same to a peer only if it never times
+    /// out; to one that does, an empty packet is a node claiming to have no processes.
+    pub ps: &'a [u8],
 }
 
 /// Encode a `u32` reply, as the C's `set_u32_reply` does: four big-endian bytes.
@@ -123,7 +136,7 @@ pub fn encode_u32_reply(value: u32, out: &mut [u8]) -> Result<usize> {
 pub fn respond(
     req: Request,
     request_payload: &[u8],
-    status: &NodeStatus,
+    status: &NodeStatus<'_>,
     out: &mut [u8],
 ) -> Result<Option<usize>> {
     match req {
@@ -141,9 +154,184 @@ pub fn respond(
         Request::MemFree => Ok(Some(encode_u32_reply(status.mem_free, out)?)),
         Request::BufFree => Ok(Some(encode_u32_reply(status.buf_free, out)?)),
         Request::Uptime => Ok(Some(encode_u32_reply(status.uptime_s, out)?)),
-        Request::Ps => Ok(Some(0)),
+        Request::Ps => {
+            if status.ps.is_empty() {
+                return Ok(None);
+            }
+            if out.len() < status.ps.len() {
+                return Err(Error::BufferTooSmall {
+                    needed: status.ps.len(),
+                });
+            }
+            out[..status.ps.len()].copy_from_slice(status.ps);
+            Ok(Some(status.ps.len()))
+        }
         Request::Reboot | Request::Shutdown => Ok(None),
         Request::Cmp => Ok(None),
+    }
+}
+
+#[cfg(feature = "cmp")]
+/// What a node calls itself, for CMP `IDENT`.
+///
+/// The C reads `csp_conf.{hostname,model,revision}` and splices `__DATE__`/`__TIME__` in at
+/// compile time. Both are supplied here instead: a build timestamp baked into the binary is
+/// exactly the kind of thing that makes a build unreproducible, and an application that
+/// wants one can pass it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Identity<'a> {
+    /// Node hostname.
+    pub hostname: &'a str,
+    /// Hardware model.
+    pub model: &'a str,
+    /// Software revision.
+    pub revision: &'a str,
+    /// Build date, or empty.
+    pub date: &'a str,
+    /// Build time, or empty.
+    pub time: &'a str,
+}
+
+#[cfg(feature = "cmp")]
+/// Build the reply to a CMP request, returning its length.
+///
+/// This is `csp_cmp_handler` plus the reply-or-discard decision `csp_service_handler` makes
+/// around it. `Ok(None)` means **send nothing** — the C's `goto discard`, which is how it
+/// answers every refusal: an unknown interface, a route it would not install, a clock it
+/// could not set, a memory window the application does not expose. None of them get an
+/// error reply, so a peer cannot distinguish "refused" from "not listening" without a
+/// timeout, and this port keeps that property rather than volunteering the difference.
+///
+/// `version` decides the netmask for the v1 route form, which the C takes from
+/// `csp_id_get_host_bits()` rather than from the request.
+pub fn respond_cmp<const B: usize, const SZ: usize, H: Hooks<B, SZ>>(
+    query: Query<'_>,
+    identity: &Identity<'_>,
+    version: Version,
+    hooks: &mut H,
+    out: &mut [u8],
+) -> Result<Option<usize>> {
+    match query {
+        Query::Ident => {
+            let msg = Ident {
+                hostname: identity.hostname,
+                model: identity.model,
+                revision: identity.revision,
+                date: identity.date,
+                time: identity.time,
+            };
+            Ok(Some(msg.encode(reply_header(cmp::code::IDENT), out)?))
+        }
+
+        Query::IfStats { interface } => match hooks.if_stats(interface) {
+            Some(stats) => {
+                let msg = IfStatsMsg { interface, stats };
+                Ok(Some(msg.encode(reply_header(cmp::code::IF_STATS), out)?))
+            }
+            None => Ok(None),
+        },
+
+        Query::Clock { set } => {
+            // The C sets only when tv_sec is non-zero, then reads back regardless -- but
+            // returns the *set* result, so a refused set discards the reply it just built.
+            // A peer that asked to set the clock and got silence learns the set failed;
+            // one that got a timestamp back would read it as confirmation.
+            if let Some(t) = set {
+                if !hooks.set_clock(t.into()) {
+                    return Ok(None);
+                }
+            }
+            let now: cmp::Timestamp = hooks.clock().into();
+            Ok(Some(now.encode(reply_header(cmp::code::CLOCK), out)?))
+        }
+
+        Query::RouteSetV1(r) => {
+            let netmask = version.host_bits() as u16;
+            if !hooks.route_set(
+                r.dest_node as u16,
+                netmask,
+                r.interface,
+                r.next_hop_via as u16,
+            ) {
+                return Ok(None);
+            }
+            let msg = RouteSetV1 { ..r };
+            Ok(Some(
+                msg.encode(reply_header(cmp::code::ROUTE_SET_V1), out)?,
+            ))
+        }
+
+        Query::RouteSet(r) => {
+            if !hooks.route_set(r.dest_node, r.netmask, r.interface, r.next_hop_via) {
+                return Ok(None);
+            }
+            let msg = RouteSetV2 { ..r };
+            Ok(Some(
+                msg.encode(reply_header(cmp::code::ROUTE_SET_V2), out)?,
+            ))
+        }
+
+        Query::Peek { addr, len, wide } => {
+            let code = if wide {
+                cmp::code::PEEK_V2
+            } else {
+                cmp::code::PEEK
+            };
+            let mut buf = [0u8; cmp::len::PEEK_MAX];
+            let n = len as usize;
+            if n > buf.len() {
+                return Err(Error::LengthExceedsMaximum {
+                    got: n,
+                    max: buf.len(),
+                });
+            }
+            if hooks.mem_read(addr, &mut buf[..n]).is_err() {
+                return Ok(None);
+            }
+            encode_peek(code, addr, &buf[..n], wide, out).map(Some)
+        }
+
+        Query::Poke { addr, data, wide } => {
+            if hooks.mem_write(addr, data).is_err() {
+                return Ok(None);
+            }
+            let code = if wide {
+                cmp::code::POKE_V2
+            } else {
+                cmp::code::POKE
+            };
+            encode_peek(code, addr, data, wide, out).map(Some)
+        }
+    }
+}
+
+#[cfg(feature = "cmp")]
+/// Every CMP reply carries the request's code with the type flipped to `REPLY`, which is
+/// `csp_cmp_dispatch.c`'s single `cmp->type = CSP_CMP_REPLY` after a successful handler.
+const fn reply_header(code: u8) -> Header {
+    Header {
+        kind: cmp::REPLY,
+        code,
+    }
+}
+
+#[cfg(feature = "cmp")]
+fn encode_peek(code: u8, addr: u64, data: &[u8], wide: bool, out: &mut [u8]) -> Result<usize> {
+    let h = reply_header(code);
+    if wide {
+        cmp::PeekV2 {
+            vaddr: addr,
+            len: data.len() as u8,
+            data,
+        }
+        .encode(h, out)
+    } else {
+        cmp::Peek {
+            addr: addr as u32,
+            len: data.len() as u8,
+            data,
+        }
+        .encode(h, out)
     }
 }
 
@@ -151,8 +339,28 @@ pub fn respond(
 mod tests {
     use super::*;
 
-    fn status() -> NodeStatus {
+    /// `csp_service_handler` discards a PS reply of zero length rather than sending an
+    /// empty packet. The port replied with `Some(0)` -- a zero-length reply -- which a
+    /// peer reads as "this node is running no processes" rather than as "this node cannot
+    /// tell you".
+    #[test]
+    fn a_node_that_cannot_list_its_processes_says_nothing() {
+        let mut out = [0u8; 64];
+        let silent = NodeStatus {
+            ps: b"",
+            ..status()
+        };
+        assert_eq!(respond(Request::Ps, b"", &silent, &mut out).unwrap(), None);
+
+        let n = respond(Request::Ps, b"", &status(), &mut out)
+            .unwrap()
+            .expect("a node with a process list answers");
+        assert_eq!(&out[..n], b"init");
+    }
+
+    fn status() -> NodeStatus<'static> {
         NodeStatus {
+            ps: b"init",
             mem_free: 4096,
             buf_free: 12,
             uptime_s: 3600,
