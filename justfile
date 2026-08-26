@@ -133,5 +133,5 @@ fmt:
     cargo fmt --all
 
 # Every number the docs quote, measured. Run this before changing one of them.
-numbers:
-    @bash ctest/tools/numbers.sh
+numbers mode="":
+    @bash ctest/tools/numbers.sh {{mode}}
