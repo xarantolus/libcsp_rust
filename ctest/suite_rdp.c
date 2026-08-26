@@ -142,6 +142,37 @@ static void ack_handshake(uint16_t iss) {
 	put_header_and_route(new_rdp_packet(), RDP_ACK, 1001, iss);
 }
 
+/* What a peer learns from sending a malformed SYN: how many frames came back, what the
+   first one carried, and whether the node went on to accept traffic on that connection.
+   The connection table is how the C decides; the frames and the delivery are what the peer
+   can see, so they are what is compared. */
+static void malformed_syn_record(const char * name, unsigned int frames, uint8_t flags,
+								 int accepted_after)
+{
+	if (!ctest_tracing()) {
+		return;
+	}
+	ctest_trace_begin("rdp", name, "must_match");
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("frames_out", (int64_t)frames);
+	ctest_trace_int("reply_flags", (int64_t)flags);
+	ctest_trace_int("accepted_after", (int64_t)accepted_after);
+	ctest_trace_obj_end();
+	ctest_trace_end();
+}
+
+/* Did the node hand the application a connection? A rejected SYN must leave nothing to
+   accept, however the rejection was spelled. */
+static int syn_was_accepted(void)
+{
+	csp_conn_t * c = csp_accept(&test_sock, 0);
+	if (c == NULL) {
+		return 0;
+	}
+	csp_close(c);
+	return 1;
+}
+
 START_TEST(test_rdp_syn_without_options_is_rejected)
 {
 	setup_stack();
@@ -152,6 +183,8 @@ START_TEST(test_rdp_syn_without_options_is_rejected)
 	ck_assert_ptr_null(find_rdp_conn());
 	/* The sender is told, rather than left waiting. */
 	ck_assert_uint_ge(test_tx_count, 1);
+	malformed_syn_record("a_syn_without_options_is_rejected", test_tx_count, tx_flags,
+						 syn_was_accepted());
 }
 END_TEST
 
@@ -164,6 +197,47 @@ START_TEST(test_rdp_syn_with_partial_options_is_rejected)
 	send_syn_words(opts, 5);
 
 	ck_assert_ptr_null(find_rdp_conn());
+	malformed_syn_record("a_syn_with_partial_options_is_rejected", test_tx_count, tx_flags,
+						 syn_was_accepted());
+}
+END_TEST
+
+/* The operational consequence of the two cases above: a peer that keeps sending malformed
+   SYNs must not be able to use up the connection table. `csp_rdp.c` frees the connection
+   when it rejects the option block, so the table is exactly as it was and an honest peer
+   still gets in. A node that kept the slot would be closed for business after
+   CSP_CONN_MAX bad packets -- from a peer that never completed a handshake. */
+START_TEST(test_rdp_malformed_syns_do_not_exhaust_the_table)
+{
+	setup_stack();
+
+	/* Comfortably more than the table holds. */
+	for (int i = 0; i < CSP_CONN_MAX * 3; i++) {
+		send_syn(NULL);
+	}
+	ck_assert_ptr_null(find_rdp_conn());
+
+	/* Now an honest peer. */
+	const uint32_t valid[6] = { 3, 20000, 500, 1, 250, 2 };
+	send_syn(valid);
+
+	const csp_conn_t * conn = find_rdp_conn();
+	const int opened = (conn != NULL);
+	const int syn_ack = ((tx_flags & (RDP_SYN | RDP_ACK)) == (RDP_SYN | RDP_ACK));
+	ck_assert_int_eq(opened, 1);
+	ck_assert_int_eq(syn_ack, 1);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "malformed_syns_do_not_exhaust_the_table", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("bad_syns", CSP_CONN_MAX * 3);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("honest_peer_opened", opened);
+		ctest_trace_int("honest_peer_got_syn_ack", syn_ack);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 }
 END_TEST
 
@@ -963,6 +1037,7 @@ Suite * rdp_suite(void)
 	tc_syn = tcase_create("syn");
 	tcase_add_test(tc_syn, test_rdp_syn_without_options_is_rejected);
 	tcase_add_test(tc_syn, test_rdp_syn_with_partial_options_is_rejected);
+	tcase_add_test(tc_syn, test_rdp_malformed_syns_do_not_exhaust_the_table);
 	tcase_add_test(tc_syn, test_rdp_syn_options_are_bounded_above);
 	tcase_add_test(tc_syn, test_rdp_syn_options_are_bounded_below);
 	tcase_add_test(tc_syn, test_rdp_syn_keeps_valid_options);
