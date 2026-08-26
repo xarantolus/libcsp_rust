@@ -345,8 +345,10 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **107 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **130 checks**, replayed against the port.
+- **109 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **132 checks**, replayed against the port. `just mutants`
+  reports how many of them some deliberate breakage can actually move — 78 at the time of
+  writing — and names the rest.
 - **33 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and

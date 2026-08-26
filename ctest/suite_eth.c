@@ -167,6 +167,55 @@ START_TEST(test_a_foreign_ethertype_is_refused_before_the_length_check)
 }
 END_TEST
 
+/* The same frame that `a_whole_packet_in_one_segment_is_delivered` accepts, differing in
+ * one field: the ethertype.
+ *
+ * The older case sends a four-byte frame, so the header-length check refuses it whether or
+ * not the ethertype is examined -- and the record only says "refused", not *why*. Removing
+ * the ethertype test entirely left that record green. Here every other field is valid, so
+ * the ethertype is the only reason to refuse and the outcome flips from refused to
+ * delivered if it stops being checked.
+ */
+START_TEST(test_only_the_ethertype_makes_an_otherwise_valid_frame_refused)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body[CSP_BUFFER_SIZE];
+	const uint16_t frame_length = whole_packet(body, 16, LOCAL_ADDR);
+
+	int ret = deliver(0x0800 /* IPv4 */, 7, PEER_ADDR, frame_length, frame_length,
+					  ETH_HDR + frame_length, body, frame_length);
+
+	ck_assert_int_ne(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(ifdata.iface.frame, 1);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+	record("only_the_ethertype_makes_an_otherwise_valid_frame_refused", ret, before);
+}
+END_TEST
+
+/* A transfer that declares a total of zero.
+ *
+ * It can never complete: no segment can advance reassembly to a length that is already
+ * reached, so accepting it holds a reassembly slot forever. `csp_eth_rx` refuses it on the
+ * first segment. No eth case reached this guard -- the similarly named
+ * `sfp::a_zero_total_transfer_is_refused` is the *other* protocol's version of it.
+ */
+START_TEST(test_a_zero_length_transfer_is_refused)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body[4] = { 0xd5, 0xd5, 0xd5, 0xd5 };
+	/* seg_size 4 so the empty-segment guard does not fire first; packet_length 0. */
+	int ret = deliver(CSP_ETH_TYPE_CSP, 9, PEER_ADDR, 4, 0, ETH_HDR + 4, body, 4);
+
+	ck_assert_int_ne(ret, CSP_ERR_NONE);
+	ck_assert_int_eq(csp_buffer_remaining(), before);
+	record("a_zero_length_transfer_is_refused", ret, before);
+}
+END_TEST
+
 START_TEST(test_a_frame_shorter_than_the_header_is_refused)
 {
 	setup_stack(false);
@@ -497,6 +546,8 @@ Suite * eth_suite(void)
 
 	TCase * tc_guard = tcase_create("guards");
 	tcase_add_test(tc_guard, test_a_foreign_ethertype_is_refused_before_the_length_check);
+	tcase_add_test(tc_guard, test_only_the_ethertype_makes_an_otherwise_valid_frame_refused);
+	tcase_add_test(tc_guard, test_a_zero_length_transfer_is_refused);
 	tcase_add_test(tc_guard, test_a_frame_shorter_than_the_header_is_refused);
 	tcase_add_test(tc_guard, test_a_zero_length_segment_is_refused);
 	tcase_add_test(tc_guard, test_a_segment_larger_than_the_mtu_is_refused);
