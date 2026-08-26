@@ -210,6 +210,10 @@ int shim_iface_registered(const char *name) {
 #include <csp/interfaces/csp_if_kiss.h>
 #include <csp/csp_buffer.h>
 #include "csp_qfifo.h"
+/* The connection struct is opaque in the public header; the reset below needs its
+   `state` field and libcsp's own `csp_conn_get_array` test hook. */
+#include "csp_conn.h"
+#include "csp_rdp_queue.h"
 #include <csp/csp_id.h>
 
 static csp_iface_t shim_kiss_iface;
@@ -531,6 +535,58 @@ int shim_node_recv(uint8_t port, uint16_t *src, uint16_t *dst, uint8_t *dport,
  *
  * Returns 1 if a request was served, 0 if nothing was waiting.
  */
+/*
+ * A connection this port accepted and is holding open, per port. `shim_node_serve` and
+ * `shim_node_recv` both `csp_close` when they are done, which on an RDP connection sends
+ * the peer an RST -- correct, but it makes a multi-step exchange impossible.
+ */
+static csp_conn_t * shim_held[SHIM_PORTS];
+
+/*
+ * Let the C node *originate* data on a connection a peer opened to it.
+ *
+ * Every other node-level exchange has the port sending and the C receiving. This is the
+ * other direction: the C accepts, keeps the connection, and calls `csp_send` on it -- so
+ * for an RDP connection the bytes go out through `csp_rdp_send`, sequenced and held for
+ * retransmission by libcsp itself. What comes back to the port is a real C peer's data,
+ * which it then has to deliver and acknowledge.
+ *
+ * `csp_rdp_send` blocks when the send window is full. It is called here only with an open
+ * window, so it returns; a test that queued more than `window_size` without letting the
+ * port acknowledge would hang, which is the C's threading model and not something the
+ * harness can paper over.
+ *
+ * Returns 1 if it sent, 0 if there was no connection to send on.
+ */
+int shim_node_send_on(uint8_t port, const uint8_t *body, int len) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	if (shim_held[port] == NULL) {
+		shim_held[port] = csp_accept(&shim_sockets[port], 0);
+	}
+	if (shim_held[port] == NULL) { return 0; }
+	/* Drain whatever the peer sent, so the connection is not holding buffers. */
+	csp_packet_t *in;
+	while ((in = csp_read(shim_held[port], 0)) != NULL) { csp_buffer_free(in); }
+
+	csp_packet_t *out = csp_buffer_get(0);
+	if (out == NULL) { return 0; }
+	if (len > (int)sizeof(out->data)) { csp_buffer_free(out); return 0; }
+	memcpy(out->data, body, (size_t)len);
+	out->length = (uint16_t)len;
+	/* `csp_send` returns void: it takes ownership and reports nothing, so "did it go out"
+	   can only be answered by looking at the wire -- which is what the caller does. */
+	csp_send(shim_held[port], out);
+	return 1;
+}
+
+/* Close a connection held by `shim_node_send_on`, which resets the peer. */
+void shim_node_release(uint8_t port) {
+	if (port < SHIM_PORTS && shim_held[port] != NULL) {
+		csp_close(shim_held[port]);
+		shim_held[port] = NULL;
+	}
+}
+
 int shim_node_serve(uint8_t port) {
 	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
 	csp_conn_t *conn = csp_accept(&shim_sockets[port], 0);

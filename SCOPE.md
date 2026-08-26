@@ -2012,3 +2012,40 @@ connection an earlier test had opened, and the buffer-accounting test counted co
 had never made. The RDP tests now live in `difftest/tests/node_rdp.rs`, a third binary, for
 the same reason `node_v2.rs` is separate from `diff.rs`. Each binds its own destination port
 so the two cannot alias each other's connections either.
+
+**2026-08-26: a real C peer originating RDP data.** Every node-level exchange until now had
+the port sending and the C receiving. `shim_node_send_on` is the other direction: the C
+accepts a connection, keeps it, and calls `csp_send` on it, so for an RDP connection the
+bytes are sequenced and held for retransmission by `csp_rdp_send` itself. What reaches the
+port is a real peer's data, which it has to deliver and acknowledge.
+
+**No defect. The port was already right**, which is worth stating plainly given the run of
+findings before it: ten messages from the C over a window of four all arrive intact and with
+the trailer removed. That only works if the port acknowledges as it goes — a port that
+stopped would shut the C's window after four and the rest would never be sent. The mutation
+`rdp: we acknowledge what we receive` holds it there.
+
+**A harness limitation, measured rather than assumed.** RDP leaves state on the C node that
+cannot be cleared in-process. Closing every connection through libcsp's own
+`csp_conn_get_array` hook *and* flushing both global `csp_rdp_queue` queues still left **ten
+of fifteen buffers held** after a ten-packet burst, so the third test in a binary began with
+a third of the pool gone and failed depending on which order the threads ran in. Five of six
+runs passed, which is the worst possible failure rate — it trains you to re-run.
+
+A reset that does not reset is the same trap as a test that cannot fail, so it was removed
+rather than kept as reassurance. Each RDP scenario now gets its own integration-test file
+and therefore its own process: `node_rdp.rs`, `node_rdp_peer.rs`, `node_rdp_reset.rs`. That
+is the only reliable reset available, and the precedent already existed — `node_v2.rs` is a
+separate binary from `diff.rs` for the same reason. Verified over eight consecutive runs.
+
+**A tooling regression, measured and fixed.** Adding `-p difftest` to the mutation sweep two
+cycles ago was correct — it is the only thing covering the port against a *running* C node —
+but I never measured what it cost. It links the C library into seven test binaries for each
+of 127 mutations, and the sweep went past its fifty-minute timeout and was **killed
+mid-mutation**, twice leaving a mutated source file behind. A sweep that slow stops being
+run, and one that dies mid-run corrupts the tree.
+
+It now runs the cheap packages first and pays for `difftest` only when nothing cheap
+noticed. The guarantee is unchanged — no mutation is reported unnoticed without difftest
+having been tried — and the measurement is **259 s against >3000 s**, on the same 127
+mutations, same machine, same day.
