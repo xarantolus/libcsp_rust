@@ -105,6 +105,7 @@ unsafe extern "C" {
     fn shim_node_send_on(port: u8, body: *const u8, len: c_int) -> c_int;
     fn shim_node_release(port: u8);
     fn shim_node_set_dedup(mode: c_int);
+    fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_node_promisc_enable() -> c_int;
     fn shim_node_promisc_read(out: *mut u8, dst: *mut u16) -> c_int;
     fn shim_node_clear_tx();
@@ -268,6 +269,15 @@ pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Accept and close every connection waiting on `port`, draining each; return the count.
+///
+/// What matters when the connection table runs out is not how many slots exist but how many
+/// peers the application can still serve — and whether refusing the rest costs anything.
+pub fn c_node_accept_count(port: u8) -> i32 {
+    // SAFETY: bounds-checked on the C side; frees every packet it reads. Callers hold `LOCK`.
+    unsafe { shim_node_accept_count(port) }
 }
 
 /// Turn the C node's promiscuous tap on.

@@ -627,6 +627,27 @@ int shim_node_promisc_read(uint8_t * out, uint16_t * dst) {
 	return n;
 }
 
+/*
+ * Accept and close every connection waiting on `port`, draining each. Returns how many
+ * connections the application could actually take.
+ *
+ * This is the observable that matters when the table runs out: not how many slots exist,
+ * but how many peers the application can still serve, and whether refusing the rest costs
+ * anything permanent.
+ */
+int shim_node_accept_count(uint8_t port) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	int n = 0;
+	csp_conn_t * conn;
+	while ((conn = csp_accept(&shim_sockets[port], 0)) != NULL) {
+		csp_packet_t * p;
+		while ((p = csp_read(conn, 0)) != NULL) { csp_buffer_free(p); }
+		csp_close(conn);
+		n++;
+	}
+	return n;
+}
+
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 

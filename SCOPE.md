@@ -2134,3 +2134,24 @@ Worth stating: this is a *structural* difference that agrees behaviourally. The 
 clones into the shared buffer pool; the port's is a fixed array inside `Router` with
 `promisc_missed` counting overflow. The two cannot be compared by reading — only by what the
 tap reports.
+
+**2026-08-26: connection-table exhaustion and reuse, node against node.** The last of the
+`ctest/`-only behaviours to reach the differential harness. Twenty peers offered to an
+eight-slot table, three rounds.
+
+**No defect.** Both accept `[8, 8, 8]` and lose no buffers. Eight is `CSP_CONN_MAX`, so the
+*table* was the binding constraint rather than the pool — the case actually filled something,
+which the test asserts rather than assumes (`accepted < PEERS`, or the table never ran out
+and the case proves nothing).
+
+Verified by control: `mem::forget` on the table-full path leaks 7 buffers against the C's 0,
+and dropping `Entry::reset` on close gives `[8, 0, 0]` against `[8, 8, 8]` — a node that
+stops answering new peers after the first round, which looks exactly like a leak and is not.
+
+**The two nodes had to be sized the same first.** The C builds with `CSP_CONN_MAX = 8` and
+`CSP_BUFFER_COUNT = 15`; the port's node in the other difftest files carries 8 connections
+but **24** buffers. Each accepted connection holds its packet until the application reads
+it, so at 24 buffers the port runs out of *connections* where the C runs out of *buffers*,
+and "how many peers were accepted" would have compared two different experiments. This
+file's node is `<8, 15, ...>`. A difference there would have been entirely the harness's, and
+I would have had a plausible-looking port defect to report.
