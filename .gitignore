@@ -12,3 +12,4 @@ compile_commands.json
 /transpiled/polonius_cache
 /transpiled/Cargo.lock
 /stamp
+__pycache__/
