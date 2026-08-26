@@ -20,6 +20,11 @@
 {"suite":"dedup","case":"fwd_suppresses_only_forwarded","verdict":"must_match","input":{"mode":1,"pairs":2},"observed":{"delivered_of_two":2,"forwarded_of_two":1,"ingress_drop":1}}
 {"suite":"dedup","case":"incoming_suppresses_only_local","verdict":"must_match","input":{"mode":2,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":2,"ingress_drop":1}}
 {"suite":"dedup","case":"all_suppresses_both","verdict":"must_match","input":{"mode":3,"pairs":2},"observed":{"delivered_of_two":1,"forwarded_of_two":1,"ingress_drop":2}}
+{"suite":"dedup","case":"window_expires","verdict":"must_match","input":{"mode":3,"gap_ms":101},"observed":{"delivered_of_two":2}}
+{"suite":"dedup","case":"inside_the_window_still_suppresses","verdict":"must_match","input":{"mode":3,"gap_ms":99},"observed":{"delivered_of_two":1}}
+{"suite":"dedup","case":"a_different_packet_is_not_a_duplicate","verdict":"must_match","input":{"mode":3,"gap_ms":0},"observed":{"delivered_of_two":2}}
+{"suite":"dedup","case":"a_duplicate_in_the_last_window_before_the_wrap","verdict":"diverges","input":{"mode":3,"gap_ms":40},"observed":{"delivered_of_two":2}}
+{"suite":"dedup","case":"a_duplicate_across_the_clock_wrap","verdict":"must_match","input":{"mode":3,"gap_ms":60},"observed":{"delivered_of_two":1}}
 {"suite":"security","case":"plain_packet_with_no_policy_is_accepted","verdict":"must_match","input":{"socket_opts":0,"flags":0,"trailer":"none","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
 {"suite":"security","case":"a_valid_checksum_is_accepted","verdict":"must_match","input":{"socket_opts":64,"flags":1,"trailer":"crc32","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
 {"suite":"security","case":"a_valid_mac_is_accepted","verdict":"must_match","input":{"socket_opts":4,"flags":8,"trailer":"hmac","corrupt":false},"observed":{"delivered":1,"delivered_bytes":7,"rx_error":0,"autherr":0}}
