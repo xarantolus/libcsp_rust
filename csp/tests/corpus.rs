@@ -1141,6 +1141,48 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     // what the third leg provokes, which must be nothing.
     let conn = n.accept().expect("the handshake opened a connection");
     let own_iss = n.router.conns.rdp(conn).unwrap().snd_iss;
+
+    // Placed before the final ACK: the C's scenario is a peer that never acknowledges,
+    // so completing the handshake here would leave the connection Open and the
+    // retransmit path -- which only applies while the SYN|ACK is outstanding -- unreached.
+    if case == "an_unacknowledged_syn_ack_is_retransmitted_then_reset" {
+        // The peer never acknowledges. `Router::tick` drives the RDP timers; every frame
+        // it produces has to reach the caller or the peer hears nothing.
+        let mut frames = 0usize;
+        let mut closed = false;
+        let mut t = CLOCK;
+        for _ in 0..1000 {
+            t += 20;
+            if n.tick(t, 1_000_000) > 0 {
+                closed = true;
+            }
+            loop {
+                match n.work(t) {
+                    csp::Routed::Respond { packet, .. } => {
+                        frames += 1;
+                        drop(n.take_forwarded(packet));
+                    }
+                    csp::Routed::Idle => break,
+                    other => {
+                        if let csp::Routed::Delivered { conn, .. } = other {
+                            while let Ok(Some(p)) = n.read(conn) {
+                                drop(p);
+                            }
+                        }
+                    }
+                }
+            }
+            if closed {
+                break;
+            }
+        }
+        return serde_json::json!({
+            "more_than_one_frame": u8::from(frames > 1),
+            "at_least_max_retransmits": u8::from(frames as u32 >= csp_core::rdp::MAX_RETRANSMITS),
+            "connection_gone": u8::from(closed),
+        });
+    }
+
     let mut ack = n.packet().expect("the pool is empty");
     ack.set_id(Id {
         pri: 2,
@@ -2238,6 +2280,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                     | "without_delayed_acks_every_packet_is_acknowledged"
                     | "a_stream_fragment_survives_being_carried_over_rdp"
                     | "a_hostile_syn_cannot_suppress_acknowledgement"
+                    | "an_unacknowledged_syn_ack_is_retransmitted_then_reset"
             ) =>
         {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))
