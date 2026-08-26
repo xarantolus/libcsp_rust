@@ -759,11 +759,20 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 // Release anything the peer had queued for an application that will now
                 // never read it -- a closed connection that kept its buffers would leak
                 // one pool slot per unread packet.
-                let mut drained = [0u16; 8];
-                if let Ok(n) = self.conns.close(handle, &mut drained) {
-                    for slot in drained.iter().take(n) {
-                        drop(pool.from_index(*slot));
+                //
+                // Sized by `RXQ`, not a literal. `Table::close` refuses rather than
+                // partially draining, so a scratch array shorter than the receive queue
+                // makes the close fail *silently* and the connection keeps every buffer
+                // for good. A reset happens once; unlike `tick`'s sweep there is no later
+                // pass to put it right.
+                let mut drained = [0u16; RXQ];
+                match self.conns.close(handle, &mut drained) {
+                    Ok(n) => {
+                        for slot in drained.iter().take(n) {
+                            drop(pool.from_index(*slot));
+                        }
                     }
+                    Err(_) => unreachable!("drained is RXQ long, and rx_len <= RXQ"),
                 }
                 Routed::Dropped(DropReason::RdpConsumed)
             }
@@ -1097,7 +1106,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         now_ms: u32,
         conn_timeout_ms: u32,
     ) -> usize {
-        let mut drained = [0u16; 32];
+        // `RXQ`, not a literal: `expire_idle` skips any connection whose queue will not
+        // fit, so a scratch array shorter than one connection's queue means that
+        // connection never expires at all rather than merely waiting for the next sweep.
+        let mut drained = [0u16; RXQ];
         let (closed, n) = self
             .conns
             .expire_idle(now_ms, conn_timeout_ms, &mut drained);
@@ -1199,7 +1211,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // with anything unread lost a buffer per packet. Looped because `close_all` stops
         // when the scratch array is full.
         loop {
-            let mut drained = [0u16; 32];
+            // `RXQ` guarantees progress: `close_all` needs room for at least one whole
+            // receive queue, so anything smaller makes it return `closed == 0` for a deep
+            // queue and the loop below exits having freed nothing.
+            let mut drained = [0u16; RXQ];
             let (closed, n) = self.conns.close_all(&mut drained);
             for &slot in &drained[..n] {
                 drop(pool.from_index(slot));
@@ -1303,6 +1318,86 @@ mod tests {
         assert_ne!(seq_a, 100_000u32 as u16);
     }
 
+    /// A peer that resets a connection with unread data must get every buffer back.
+    ///
+    /// `Table::close` refuses rather than partially draining -- it returns
+    /// `BufferTooSmall` if the scratch array cannot hold the whole receive queue, because
+    /// a slot removed but not reported is a slot nobody releases. The RST path passed a
+    /// fixed `[0u16; 8]` while `RXQ` is a const generic, so with a queue deeper than eight
+    /// the close was skipped in silence: the connection stayed open and its buffers were
+    /// never returned. `tick` retries its sweep, but a reset happens once.
+    ///
+    /// Counted in buffers the pool has back, which is what the application runs out of.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn a_reset_connection_returns_every_buffer_it_held() {
+        use csp_core::rdp;
+
+        // RXQ of 12, deliberately more than the eight the RST path used to assume.
+        type Deep = Router<4, 12, 48, 8>;
+        let pool = Pool::<24, 264>::new();
+        let mut r = Deep::new(ME, Version::V1);
+        r.bind(7).unwrap();
+        let ifaces = test_ifaces();
+        let before = pool.available();
+
+        let feed = |r: &mut Deep, flags: u8, seq: u16, ack: u16, body: &[u8]| {
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP,
+                src: 2,
+                dst: ME,
+                dport: 7,
+                sport: 40,
+            });
+            let h = rdp::Header {
+                flags,
+                seq_nr: seq,
+                ack_nr: ack,
+            };
+            let mut f = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+            let n = h.encode(body, &mut f).unwrap();
+            p.set_payload(&f[..n]).unwrap();
+            r.receive(p, 0);
+            // Drain, releasing anything the node hands back for transmission.
+            loop {
+                match r.work(&pool, &ifaces, 0) {
+                    Routed::Respond { packet, .. } | Routed::Forwarded { packet, .. } => {
+                        drop(pool.from_index(packet));
+                    }
+                    Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        };
+
+        let mut ob = [0u8; rdp::SYN_OPTIONS_LEN];
+        let ol = rdp::SynOptions::default().encode(&mut ob).unwrap();
+        feed(&mut r, rdp::SYN, 1000, 0, &ob[..ol]);
+        let h = r.accept().expect("the handshake announces the connection");
+        let iss = r.conns.rdp(h).unwrap().snd_iss;
+        feed(&mut r, rdp::ACK, 1001, iss, &[]);
+
+        // Nine packets the application never reads -- one more than the old array held.
+        for i in 1..=9u16 {
+            feed(&mut r, rdp::ACK, 1000 + i, iss, b"x");
+        }
+        assert!(
+            pool.available() < before,
+            "the unread packets must actually be held, or this proves nothing"
+        );
+
+        // The peer resets.
+        feed(&mut r, rdp::RST, 1010, iss, &[]);
+
+        assert_eq!(
+            pool.available(),
+            before,
+            "a reset must return every buffer the connection was holding"
+        );
+    }
+
     type P = Pool<16, 264>;
     type R = Router<4, 4, 48, 8>;
 
@@ -1320,6 +1415,90 @@ mod tests {
         });
         p.set_payload(payload).unwrap();
         p
+    }
+
+    /// A node torn down while an application still holds unread packets returns them all.
+    ///
+    /// `close_all` stops as soon as its scratch array cannot hold another whole receive
+    /// queue, so `shutdown` loops -- but a scratch array shorter than *one* queue makes it
+    /// return `closed == 0` immediately and the loop exits having freed nothing. The
+    /// existing `shutdown_releases_everything` calls `tick` first, so it hands shutdown an
+    /// already-clean node and cannot see this.
+    ///
+    /// Counted in buffers, at a queue depth deeper than any fixed array in the file.
+    #[test]
+    fn shutdown_returns_buffers_from_a_deep_unread_queue() {
+        type Deep = Router<4, 12, 48, 16>;
+        let pool = Pool::<24, 264>::new();
+        let mut r = Deep::new(ME, Version::V1);
+        r.bind(7).unwrap();
+        let ifaces = test_ifaces();
+        let before = pool.available();
+
+        for _ in 0..10 {
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 7,
+                sport: 10,
+            });
+            p.set_payload(b"x").unwrap();
+            r.receive(p, 0);
+            let _ = r.work(&pool, &ifaces, 0);
+        }
+        assert!(
+            pool.available() < before,
+            "the packets must actually be held, or this proves nothing"
+        );
+
+        r.shutdown(&pool);
+        assert_eq!(
+            pool.available(),
+            before,
+            "shutdown must return every buffer sitting on a connection"
+        );
+    }
+
+    /// The same for the idle-expiry sweep, which frees the queue of a connection nobody
+    /// has touched. `expire_idle` skips any connection whose queue will not fit rather
+    /// than partially draining it, so an array shorter than one queue means that
+    /// connection is never expired at all -- not merely deferred to the next sweep.
+    #[test]
+    fn expiring_an_idle_connection_returns_its_whole_queue() {
+        type Deep = Router<4, 12, 48, 16>;
+        let pool = Pool::<24, 264>::new();
+        let mut r = Deep::new(ME, Version::V1);
+        r.bind(7).unwrap();
+        let ifaces = test_ifaces();
+        let before = pool.available();
+
+        for _ in 0..10 {
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: 0,
+                src: 8,
+                dst: ME,
+                dport: 7,
+                sport: 10,
+            });
+            p.set_payload(b"x").unwrap();
+            r.receive(p, 0);
+            let _ = r.work(&pool, &ifaces, 0);
+        }
+        assert!(pool.available() < before);
+
+        // Well past the timeout, in one sweep.
+        let closed = r.tick(&pool, 60_000, 1_000);
+        assert_eq!(closed, 1, "the idle connection must be expired");
+        assert_eq!(
+            pool.available(),
+            before,
+            "expiry must return the whole queue, not part of it"
+        );
     }
 
     #[test]
