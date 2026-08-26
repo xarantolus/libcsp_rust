@@ -755,6 +755,74 @@ START_TEST(test_data_reaches_the_application_without_the_rdp_trailer)
 }
 END_TEST
 
+/* A hostile SYN cannot talk the node out of acknowledging.
+ *
+ * `csp_rdp_new_packet` clamps every option a peer proposes. The three
+ * `rdp_syn_options_are_bounded_*` tests assert that with twenty `ck_assert`s between them
+ * and **record nothing**, so the port's `decode_clamped` had never been compared against
+ * libcsp at all -- it was verified by reading.
+ *
+ * Asserted here as what reaches the wire rather than as the connection's fields. An
+ * unclamped `ack_delay_count` of 0xFFFFFFFF means the node waits four billion packets
+ * before acknowledging, so the peer retransmits forever and the link stalls: the clamp is
+ * only observable as acks appearing at all.
+ */
+START_TEST(test_a_hostile_syn_cannot_suppress_acknowledgement)
+{
+	setup_stack();
+
+	const uint32_t hostile[6] = {
+		0xFFFFFFFF, /* window size     */
+		0xFFFFFFFF, /* conn timeout    */
+		0,          /* packet timeout  */
+		0xFFFFFFFF, /* delayed acks    */
+		0xFFFFFFFF, /* ack timeout     */
+		0xFFFFFFFF, /* ack delay count */
+	};
+	send_syn(hostile);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	const unsigned int before = test_tx_count;
+	/* Comfortably more than any sane window, and far fewer than 0xFFFFFFFF.
+	   Drained as they arrive: `csp_rdp_check_ack` stops acknowledging once the
+	   connection's queue leaves less than a window of room, and that suppression -- a
+	   separate, recorded divergence -- would otherwise dominate this test and hide what it
+	   is about. Reading keeps the queue empty so the *clamp* is what decides. */
+	csp_conn_t * accepted = csp_accept(&test_sock, 0);
+	ck_assert_ptr_nonnull(accepted);
+	for (uint16_t i = 1; i <= 12; i++) {
+		deliver_data((uint16_t)(1000 + i), iss);
+		csp_packet_t * p;
+		while ((p = csp_read(accepted, 0)) != NULL) {
+			csp_buffer_free(p);
+		}
+	}
+	const unsigned int acks = test_tx_count - before;
+
+	ck_assert_uint_gt(acks, 0);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "a_hostile_syn_cannot_suppress_acknowledgement",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("proposed_ack_delay_count", -1);
+		ctest_trace_int("proposed_window", -1);
+		ctest_trace_int("packets", 12);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_int("clamped_window", (int64_t)conn->rdp.window_size);
+		ctest_trace_int("clamped_ack_delay_count", (int64_t)conn->rdp.ack_delay_count);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 /* --- SFP carried over RDP: the {SFP} x {RDP} cell ---
  *
  * Both protocols put their header at the **end** of the payload, and the send path stacks
@@ -876,6 +944,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_hs, test_the_handshakes_final_ack_is_not_itself_answered);
 	tcase_add_test(tc_hs, test_data_reaches_the_application_without_the_rdp_trailer);
 	tcase_add_test(tc_hs, test_a_stream_fragment_survives_being_carried_over_rdp);
+	tcase_add_test(tc_hs, test_a_hostile_syn_cannot_suppress_acknowledgement);
 	suite_add_tcase(s, tc_hs);
 
 	TCase * tc_ack = tcase_create("ack");
