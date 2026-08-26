@@ -773,7 +773,8 @@ impl<
     /// Periodic maintenance: RDP timers and idle connection expiry.
     pub fn tick(&mut self, now_ms: u32, conn_timeout_ms: u32) -> usize {
         let pool = self.storage.pool_ref();
-        self.router.tick(pool, now_ms, conn_timeout_ms)
+        self.router
+            .tick(pool, &self.ifaces, now_ms, conn_timeout_ms)
     }
 
     /// Release everything the node is holding.

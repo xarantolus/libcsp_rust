@@ -338,6 +338,27 @@ START_TEST(test_rdp_retransmits_are_limited)
 	const unsigned int sent = test_tx_count - tx_after_syn;
 	ck_assert_uint_ge(sent, CSP_RDP_MAX_RETRANSMITS);
 	ck_assert_uint_le(sent, CSP_RDP_MAX_RETRANSMITS + 2);
+
+	if (ctest_tracing()) {
+		/* Four assertions here and no record until now, so the port was never compared on
+		   retransmission at all. A `SYN|ACK` that is lost and never repeated leaves the
+		   peer waiting for a connection this node believes it opened; the frames below are
+		   the only thing that tells it otherwise. */
+		ctest_trace_begin("rdp", "an_unacknowledged_syn_ack_is_retransmitted_then_reset",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("max_retransmits", CSP_RDP_MAX_RETRANSMITS);
+		ctest_trace_int("tick_ms", 20);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		/* At least one repeat, so the node did not simply give up. */
+		ctest_trace_int("more_than_one_frame", sent > 1 ? 1 : 0);
+		ctest_trace_int("at_least_max_retransmits", sent >= CSP_RDP_MAX_RETRANSMITS ? 1 : 0);
+		/* And it stops: a node that retransmitted forever would never reach here. */
+		ctest_trace_int("connection_gone", find_rdp_conn() == NULL ? 1 : 0);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
 }
 END_TEST
 
