@@ -25,9 +25,6 @@ use crate::qfifo::Qfifo;
 use csp_core::security::{self, Refusal};
 use csp_core::{Id, Version};
 
-#[cfg(feature = "rtable")]
-use csp_core::rtable;
-
 /// What one step of the bridge did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bridged {
@@ -148,12 +145,6 @@ pub enum DropReason {
 /// with redundant links plausibly has, and exceeding it is counted rather than ignored.
 pub const MAX_FANOUT: usize = 4;
 
-/// No next hop: send straight to the destination address.
-#[cfg(all(feature = "rdp", feature = "rtable"))]
-const NO_VIA_ADDR: u16 = rtable::NO_VIA;
-#[cfg(all(feature = "rdp", not(feature = "rtable")))]
-const NO_VIA_ADDR: u16 = 0xFFFF;
-
 /// Largest RDP window this node will accept from a peer's `SYN`.
 ///
 /// `csp_rdp_new_packet` clamps the peer's proposal to what the receive queue can hold;
@@ -196,8 +187,7 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     /// Which traffic duplicate suppression applies to. Off by default, as in the C.
     pub dedup_mode: crate::dedup::DedupMode,
     /// Routing table.
-    #[cfg(feature = "rtable")]
-    pub routes: rtable::Table<16>,
+    pub routes: crate::route_policy::rtable::Table<16>,
     /// Bound ports.
     bound: [bool; PORTS],
     /// Promiscuous tap: slot indices of cloned packets awaiting collection.
@@ -258,8 +248,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             conns: conn::Table::new(),
             dedup: Dedup::new(),
             dedup_mode: crate::dedup::DedupMode::Off,
-            #[cfg(feature = "rtable")]
-            routes: rtable::Table::new(version),
+            routes: crate::route_policy::rtable::Table::new(version),
             bound: [false; PORTS],
             promisc: [None; 8],
             promisc_len: 0,
@@ -847,10 +836,29 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
 
         // Route it the way any outgoing packet is routed -- the reply has to reach the peer,
         // which is not necessarily the interface it arrived on.
+        // The same policy every other outgoing packet uses. This had its own three-line
+        // version that tried the subnet then the defaults and **never consulted the
+        // routing table** -- while its doc comment said it did -- so an RDP reply to a
+        // peer reachable only by a route was dropped and the handshake stalled.
+        //
+        // `None` for the ingress: a reply this node originated is not a forward, so split
+        // horizon does not apply to it.
         let dst = reply.id().dst;
-        let (iface, via) = match Self::first_destination(ifaces, dst) {
-            Some(d) => d,
-            None => {
+        let mut hops = [crate::route_policy::Hop {
+            iface: 0,
+            via: 0,
+            dst: 0,
+        }; 1];
+        let (iface, via) = match crate::route_policy::destinations(
+            ifaces,
+            &self.routes,
+            self.version,
+            dst,
+            None,
+            &mut hops,
+        ) {
+            crate::route_policy::Outcome::Hops(_) => (hops[0].iface, hops[0].via),
+            _ => {
                 self.counters.no_route += 1;
                 return Err(Routed::Dropped(DropReason::NoRoute));
             }
@@ -870,18 +878,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // Knuth's multiplicative constant, folded to 16 bits.
         let mixed = now_ms.wrapping_mul(2_654_435_761);
         ((mixed >> 16) ^ mixed) as u16
-    }
-
-    /// Where a locally originated packet for `dst` goes: subnet, then table, then default.
-    #[cfg(feature = "rdp")]
-    fn first_destination<const N: usize, const A: usize>(
-        ifaces: &crate::iflist::IfList<N, A>,
-        dst: u16,
-    ) -> Option<(u8, u16)> {
-        if let Some(idx) = ifaces.find_by_subnet(dst) {
-            return Some((idx, NO_VIA_ADDR));
-        }
-        ifaces.find_default().map(|idx| (idx, NO_VIA_ADDR))
     }
 
     /// Decide where a packet that is not for us should go.
@@ -912,94 +908,25 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ifaces: &crate::iflist::IfList<N, A>,
         ingress: u8,
     ) -> Routed {
-        // Every match, not the last one seen. `csp_send_direct` sends to all of them.
-        // The third field is the destination the frame carries, which is not always the one
-        // it arrived with -- see the broadcast rewrite below.
-        let mut dests: [(u8, u16, u16); MAX_FANOUT] = [(0, 0, 0); MAX_FANOUT];
-        let mut n_dests = 0usize;
-        let mut push = |d: (u8, u16, u16), n: &mut usize| {
-            if *n < MAX_FANOUT {
-                dests[*n] = d;
-                *n += 1;
-            }
-        };
-
-        // 1. A local subnet owns the destination.
-        //
-        // `convert_broadcast`: a routed (L3) broadcast becomes the local (L2) one, the
-        // maximum node id, as it reaches the interface. Without it a peer whose subnet is
-        // masked differently does not recognise the address as a broadcast at all.
-        //
-        // The rewrite is **sticky across the fan-out**, which is measured, not inferred:
-        // `csp_send_direct` keeps one `idout_copy` for the whole loop and `convert_broadcast`
-        // only ever writes to it. Two interfaces owning the destination where it is the
-        // broadcast of only the first put the rewritten address on *both* wires.
-        let mut out_dst = id.dst;
-        let mut local_found = false;
-        for idx in ifaces.indices() {
-            if !ifaces.is_within_subnet(id.dst, idx) {
-                continue;
-            }
-            local_found = true;
-            if Self::split_horizon(ifaces, idx, ingress) {
-                continue;
-            }
-            if ifaces.is_broadcast_for(id.dst, idx) {
-                out_dst = self.version.max_node_id();
-            }
-            push((idx, rtable::NO_VIA, out_dst), &mut n_dests);
-        }
-        if local_found {
-            return self.finish_forward(&dests[..n_dests], packet);
-        }
-
-        // 2. The routing table.
-        let mut route_found = false;
-        let placeholder = rtable::Route {
-            address: 0,
-            netmask: 0,
+        let mut hops = [crate::route_policy::Hop {
             iface: 0,
-            via: rtable::NO_VIA,
+            via: 0,
+            dst: 0,
+        }; MAX_FANOUT];
+        let n = match crate::route_policy::destinations(
+            ifaces,
+            &self.routes,
+            self.version,
+            id.dst,
+            Some(ingress),
+            &mut hops,
+        ) {
+            crate::route_policy::Outcome::Hops(n) => n,
+            // A stage matched but split horizon left nothing, or nothing matched at all.
+            // Both drop the packet; `finish_forward` counts it as no route.
+            _ => 0,
         };
-        let mut found = [&placeholder; 4];
-        let n = self.routes.find_all(id.dst, &mut found);
-        for r in found.iter().take(n) {
-            route_found = true;
-            if Self::split_horizon(ifaces, r.iface, ingress) {
-                continue;
-            }
-            push((r.iface, r.via, id.dst), &mut n_dests);
-        }
-        if route_found {
-            return self.finish_forward(&dests[..n_dests], packet);
-        }
-
-        // 3. Default interfaces.
-        for idx in ifaces.indices() {
-            let Some(e) = ifaces.get(idx) else { continue };
-            if !e.is_default || Self::split_horizon(ifaces, idx, ingress) {
-                continue;
-            }
-            push((idx, rtable::NO_VIA, id.dst), &mut n_dests);
-        }
-        self.finish_forward(&dests[..n_dests], packet)
-    }
-
-    /// `is_same_subnet`: the same interface, or one whose address falls inside the
-    /// ingress interface's subnet.
-    #[cfg(feature = "rtable")]
-    fn split_horizon<const N: usize, const A: usize>(
-        ifaces: &crate::iflist::IfList<N, A>,
-        candidate: u8,
-        ingress: u8,
-    ) -> bool {
-        if candidate == ingress {
-            return true;
-        }
-        match ifaces.get(candidate) {
-            Some(e) => ifaces.is_within_subnet(e.addr, ingress),
-            None => false,
-        }
+        self.finish_forward(&hops[..n], packet)
     }
 
     #[cfg_attr(not(feature = "rtable"), allow(dead_code))]
@@ -1054,24 +981,24 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// buffers here costs a destination rather than the node.
     fn finish_forward<'p, const B: usize, const SZ: usize>(
         &mut self,
-        dests: &[(u8, u16, u16)],
+        dests: &[crate::route_policy::Hop],
         mut packet: Packet<'p, B, SZ>,
     ) -> Routed {
         let Some((&last, rest)) = dests.split_last() else {
             self.counters.no_route += 1;
             return Routed::Dropped(DropReason::NoRoute);
         };
-        for &(iface, via, dst) in rest {
+        for h in rest {
             match packet.deep_copy() {
                 Some(mut c) => {
-                    Self::set_dst(&mut c, dst);
-                    self.push_pending(iface, via, c.into_index());
+                    Self::set_dst(&mut c, h.dst);
+                    self.push_pending(h.iface, h.via, c.into_index());
                 }
                 None => self.pending_missed += 1,
             }
         }
-        Self::set_dst(&mut packet, last.2);
-        self.push_pending(last.0, last.1, packet.into_index());
+        Self::set_dst(&mut packet, last.dst);
+        self.push_pending(last.iface, last.via, packet.into_index());
         self.pop_pending().expect("a destination was just queued")
     }
 
@@ -1242,6 +1169,69 @@ mod tests {
     }
 
     use super::*;
+
+    /// An RDP handshake with a peer reachable only through the routing table.
+    ///
+    /// The reply's destination used to be found by a private three-line lookup that tried
+    /// the subnet then the defaults and **never consulted the routing table**, while its
+    /// doc comment said it did. A peer no interface's subnet owns and no default reaches
+    /// got no `SYN|ACK` at all: the handshake stalled and the connection never opened.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn a_peer_reachable_only_by_a_route_still_gets_its_handshake() {
+        use csp_core::rdp;
+
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V2);
+        r.bind(7).unwrap();
+        // One interface, on a subnet that does not contain the peer, and not a default.
+        let ifaces = {
+            let mut l = crate::iflist::IfList::<4, 4>::new(Version::V2);
+            l.add("LINK", 8, 12, false).unwrap();
+            l
+        };
+        // 3000 is in no subnet and there is no default: only the table can reach it.
+        r.routes
+            .set(
+                3000,
+                Version::V2.host_bits() as u16,
+                0,
+                csp_core::rtable::NO_VIA,
+            )
+            .unwrap();
+
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: 3000,
+            dst: ME,
+            dport: 7,
+            sport: 40,
+        });
+        let mut ob = [0u8; rdp::SYN_OPTIONS_LEN];
+        let ol = rdp::SynOptions::default().encode(&mut ob).unwrap();
+        let h = rdp::Header {
+            flags: rdp::SYN,
+            seq_nr: 1000,
+            ack_nr: 0,
+        };
+        let mut f = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+        let n = h.encode(&ob[..ol], &mut f).unwrap();
+        p.set_payload(&f[..n]).unwrap();
+        r.receive(p, 0);
+
+        match r.work(&pool, &ifaces, 0) {
+            Routed::Respond { iface, packet, .. } => {
+                assert_eq!(iface, 0, "out the interface the route names");
+                let reply = pool.from_index(packet).expect("a live slot");
+                let hh = reply.with_payload(|b| rdp::Header::decode(b).unwrap());
+                assert_eq!(hh.flags, rdp::SYN | rdp::ACK);
+                assert_eq!(hh.ack_nr, 1000);
+            }
+            other => panic!("a routed peer must still get its SYN|ACK, got {other:?}"),
+        }
+    }
 
     /// The sequence number a peer actually receives in the `SYN|ACK`, for two handshakes
     /// opened at different times.
@@ -1560,7 +1550,7 @@ mod tests {
     fn a_packet_for_someone_else_with_a_route_is_forwarded() {
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
-        r.routes.set(0, 0, 3, rtable::NO_VIA).unwrap();
+        r.routes.set(0, 0, 3, csp_core::rtable::NO_VIA).unwrap();
         r.receive(pkt(&pool, 25, 20, b"elsewhere"), 0);
         match r.work(&pool, &test_ifaces(), 0) {
             Routed::Forwarded { iface, .. } => assert_eq!(iface, 3),
@@ -1595,7 +1585,7 @@ mod tests {
             let pool = P::new();
             let mut r = R::new(ME, Version::V1);
             r.bind(20).unwrap();
-            r.routes.set(0, 0, 3, rtable::NO_VIA).unwrap();
+            r.routes.set(0, 0, 3, csp_core::rtable::NO_VIA).unwrap();
             r.dedup_mode = mode;
 
             let mut delivered = 0;

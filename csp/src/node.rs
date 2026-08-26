@@ -47,15 +47,6 @@ pub enum Unroutable {
     },
 }
 
-/// No next hop: send straight to the destination address.
-///
-/// The same value either way; named once so the subnet and default paths cannot disagree
-/// about it when the routing table is compiled out.
-#[cfg(feature = "rtable")]
-const NO_VIA_ADDR: u16 = rtable::NO_VIA;
-#[cfg(not(feature = "rtable"))]
-const NO_VIA_ADDR: u16 = 0xFFFF;
-
 /// Every interface a packet should go out on.
 ///
 /// `csp_send_direct` does **not** pick one destination. It collects every routing-table
@@ -678,130 +669,45 @@ impl<
     /// from `dst` for a subnet broadcast — see [`Destination::dst`].
     pub fn resolve(
         &self,
-        #[cfg_attr(not(feature = "rtable"), allow(unused_variables))] dst: u16,
+        dst: u16,
         routed_from: Option<u8>,
     ) -> core::result::Result<Destinations, Unroutable> {
-        let mut out = Destinations {
-            entries: [Destination {
-                iface: 0,
-                via: 0,
-                dst: 0,
-            }; 4],
-            n: 0,
-        };
-        let mut skipped_self = false;
-
-        // A local subnet owns the destination. `csp_send_direct` tries this **first**, and
-        // a match returns before the routing table is consulted at all.
-        //
-        // This step was missing: resolve went straight to the table, so an application
-        // sending to an address on a directly attached link fell through to the default
-        // interfaces -- out the wrong link, or nowhere when no default was configured.
-        // Every test here used a netmask under which each interface owns only its own
-        // address, so none of them could tell.
-        {
-            let mut local_found = false;
-            let mut out_dst = dst;
-            for idx in self.ifaces.indices() {
-                if !self.ifaces.is_within_subnet(dst, idx) {
-                    continue;
-                }
-                local_found = true;
-                if routed_from == Some(idx) {
-                    skipped_self = true;
-                    continue;
-                }
-                if self.ifaces.is_broadcast_for(dst, idx) {
-                    out_dst = self.version.max_node_id();
-                }
-                if out.n < out.entries.len() {
+        let mut hops = [crate::route_policy::Hop {
+            iface: 0,
+            via: 0,
+            dst: 0,
+        }; 4];
+        match crate::route_policy::destinations(
+            &self.ifaces,
+            &self.router.routes,
+            self.version,
+            dst,
+            routed_from,
+            &mut hops,
+        ) {
+            crate::route_policy::Outcome::Hops(n) => {
+                let mut out = Destinations {
+                    entries: [Destination {
+                        iface: 0,
+                        via: 0,
+                        dst: 0,
+                    }; 4],
+                    n: 0,
+                };
+                for h in hops.iter().take(n) {
                     out.entries[out.n] = Destination {
-                        iface: idx,
-                        via: NO_VIA_ADDR,
-                        dst: out_dst,
+                        iface: h.iface,
+                        via: h.via,
+                        dst: h.dst,
                     };
                     out.n += 1;
                 }
+                Ok(out)
             }
-            if local_found {
-                return if out.n > 0 {
-                    Ok(out)
-                } else {
-                    Err(Unroutable::SplitHorizon {
-                        iface: routed_from.unwrap_or(0),
-                    })
-                };
-            }
-        }
-
-        #[cfg(feature = "rtable")]
-        {
-            let placeholder = rtable::Route {
-                address: 0,
-                netmask: 0,
-                iface: 0,
-                via: rtable::NO_VIA,
-            };
-            let mut found = [&placeholder; 4];
-            let n = self.router.routes.find_all(dst, &mut found);
-            for r in found.iter().take(n) {
-                if routed_from == Some(r.iface) {
-                    skipped_self = true;
-                    continue;
-                }
-                if out.n < out.entries.len() {
-                    out.entries[out.n] = Destination {
-                        iface: r.iface,
-                        via: r.via,
-                        dst,
-                    };
-                    out.n += 1;
-                }
-            }
-            if n > 0 {
-                // A routing-table match suppresses the default fallback entirely, even if
-                // split horizon left nothing usable. The C returns as soon as
-                // route_found is set.
-                return if out.n > 0 {
-                    Ok(out)
-                } else {
-                    Err(Unroutable::SplitHorizon {
-                        iface: routed_from.unwrap_or(0),
-                    })
-                };
-            }
-        }
-
-        // No route matched: fall back to every default-marked interface.
-        for idx in self.ifaces.indices() {
-            let Some(e) = self.ifaces.get(idx) else {
-                continue;
-            };
-            if !e.is_default {
-                continue;
-            }
-            if routed_from == Some(idx) {
-                skipped_self = true;
-                continue;
-            }
-            if out.n < out.entries.len() {
-                out.entries[out.n] = Destination {
-                    iface: idx,
-                    via: NO_VIA_ADDR,
-                    dst,
-                };
-                out.n += 1;
-            }
-        }
-
-        if out.n > 0 {
-            Ok(out)
-        } else if skipped_self {
-            Err(Unroutable::SplitHorizon {
+            crate::route_policy::Outcome::SplitHorizon => Err(Unroutable::SplitHorizon {
                 iface: routed_from.unwrap_or(0),
-            })
-        } else {
-            Err(Unroutable::NoRoute)
+            }),
+            crate::route_policy::Outcome::NoRoute => Err(Unroutable::NoRoute),
         }
     }
 
@@ -1627,6 +1533,38 @@ mod tests {
             .expect("the default interface must be used");
         assert_eq!(d.len(), 1);
         assert_eq!(d.as_slice()[0].iface, 0, "only the default-marked one");
+    }
+
+    /// Split horizon is a **subnet** test, not an interface-identity test.
+    ///
+    /// `is_same_subnet` (`csp_io.c:93`) is two clauses: the candidate *is* the interface
+    /// the packet arrived on, **or** the candidate's address falls inside that interface's
+    /// subnet. Two links on the same subnet are two ways onto the same wire, so relaying
+    /// between them is the loop split horizon exists to stop -- and only the second clause
+    /// catches it.
+    ///
+    /// `Router::split_horizon` has both. `resolve` had only the first, so it relayed a
+    /// packet back onto the wire it came from by way of the other link. Measured against
+    /// the C in `route::split_horizon_vetoes_a_second_link_on_the_same_subnet`, where the
+    /// C emits nothing.
+    #[test]
+    fn split_horizon_vetoes_another_link_on_the_same_subnet() {
+        let s = S::new();
+        let mut n = N::new(&s, Config::new(Version::V2).address(9999));
+        // Both own 8..11, and each address is inside the other's subnet.
+        n.ifaces.add("LINK_A", 8, 12, false).unwrap();
+        n.ifaces.add("LINK_B", 9, 12, false).unwrap();
+
+        assert!(
+            matches!(
+                n.resolve(10, Some(0)),
+                Err(Unroutable::SplitHorizon { iface: 0 })
+            ),
+            "a second link on the same subnet is the loop split horizon exists to stop"
+        );
+        // Arriving from somewhere else, both are usable.
+        n.ifaces.add("ELSEWHERE", 40, 12, false).unwrap();
+        assert_eq!(n.resolve(10, Some(2)).unwrap().len(), 2);
     }
 
     /// Split horizon on the subnet path, which the routing-table and default paths each

@@ -165,7 +165,7 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | Promisc | `csp/router.rs` tap | done |
 | Dedup | `csp/dedup.rs` — all four `csp_dedup_types_e` modes, checked against the C | done |
 | Bridge | `csp/router.rs::bridge_work` | done |
-| Routing | `csp-core/rtable.rs`, `csp/node.rs::resolve` (send) and `csp/router.rs::forward` (transit) — local subnet, then table fan-out, then default fallback; split horizon and the broadcast rewrite on all paths | done |
+| Routing | `csp-core/rtable.rs` + `csp/route_policy.rs` — one implementation of `csp_send_direct`'s policy, used by `Node::resolve` (send), `Router::forward` (transit) and the RDP reply path | done |
 | Socket / client API | `csp/node.rs` — connect, bind, unbind, accept, read, send ×4, recvfrom, transaction, close | done |
 | Interface registry | `csp/iflist.rs` — add/remove, lookup by name/addr/subnet/broadcast, `check_default`, aliases | done |
 | Client service calls | `csp/client.rs` — ping, ping_noreply, ps, reboot, shutdown, memfree, buf_free, uptime, CMP requests | done |
@@ -663,6 +663,27 @@ The rest of the parser is faithful, including the parts that surprise:
   error return does not mean the table is unchanged.
 
 Both are pinned by `rtable::` records rather than by reading.
+
+### One routing policy, not three
+
+`csp_send_direct` decides where a packet goes. This port had **three** implementations of
+it: `Node::resolve` for packets the application sends, `Router::forward` for packets passing
+through, and a private lookup inside the RDP reply path. Each was written from the same C
+function, and each drifted:
+
+| Copy | What it got wrong | Found by |
+|---|---|---|
+| `Node::resolve` | no local-subnet stage at all, so a send to a directly attached address fell through to the defaults | `route::a_local_subnet_beats_the_default_interface` |
+| `Node::resolve` | split horizon was only the identity half of `is_same_subnet`, so it relayed a packet back onto the wire it came from by way of a second link on the same subnet | `route::split_horizon_vetoes_a_second_link_on_the_same_subnet` |
+| RDP reply path | never consulted the routing table, while its doc comment said it did, so a peer reachable only by a route got no `SYN\|ACK` | `router::a_peer_reachable_only_by_a_route_still_gets_its_handshake` |
+
+All three were found by the C oracle, weeks apart, and none could have been found by reading
+one copy — each looked right on its own. `csp/route_policy.rs` is now the only copy;
+`resolve` went from 128 lines to 43 and `forward` from 80 to 39.
+
+The mutation sweep shows the difference directly: disabling the local-subnet stage used to
+be two separate mutations catching 2 records between them, and is now one catching **8** —
+the same policy, reached from both paths.
 
 **Broadcast is judged against the interface it arrived on.** `csp_route.c:235` is
 `csp_id_is_broadcast(packet->id.dst, input.iface)` — the *ingress* interface, not every
