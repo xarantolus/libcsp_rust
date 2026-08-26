@@ -165,7 +165,7 @@ Where each area lives, and whether it is reached from the node. Two rows are not
 | Promisc | `csp/router.rs` tap | done |
 | Dedup | `csp/dedup.rs` — all four `csp_dedup_types_e` modes, checked against the C | done |
 | Bridge | `csp/router.rs::bridge_work` | done |
-| Routing | `csp-core/rtable.rs` + `csp/node.rs::resolve` (fan-out, split horizon, default fallback) | done |
+| Routing | `csp-core/rtable.rs`, `csp/node.rs::resolve` (send) and `csp/router.rs::forward` (transit) — local subnet, then table fan-out, then default fallback; split horizon and the broadcast rewrite on all paths | done |
 | Socket / client API | `csp/node.rs` — connect, bind, unbind, accept, read, send ×4, recvfrom, transaction, close | done |
 | Interface registry | `csp/iflist.rs` — add/remove, lookup by name/addr/subnet/broadcast, `check_default`, aliases | done |
 | Client service calls | `csp/client.rs` — ping, ping_noreply, ps, reboot, shutdown, memfree, buf_free, uptime, CMP requests | done |

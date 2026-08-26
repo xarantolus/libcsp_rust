@@ -591,9 +591,11 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ingress: u8,
     ) -> Routed {
         // Every match, not the last one seen. `csp_send_direct` sends to all of them.
-        let mut dests: [(u8, u16); MAX_FANOUT] = [(0, 0); MAX_FANOUT];
+        // The third field is the destination the frame carries, which is not always the one
+        // it arrived with -- see the broadcast rewrite below.
+        let mut dests: [(u8, u16, u16); MAX_FANOUT] = [(0, 0, 0); MAX_FANOUT];
         let mut n_dests = 0usize;
-        let mut push = |d: (u8, u16), n: &mut usize| {
+        let mut push = |d: (u8, u16, u16), n: &mut usize| {
             if *n < MAX_FANOUT {
                 dests[*n] = d;
                 *n += 1;
@@ -601,6 +603,16 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         };
 
         // 1. A local subnet owns the destination.
+        //
+        // `convert_broadcast`: a routed (L3) broadcast becomes the local (L2) one, the
+        // maximum node id, as it reaches the interface. Without it a peer whose subnet is
+        // masked differently does not recognise the address as a broadcast at all.
+        //
+        // The rewrite is **sticky across the fan-out**, which is measured, not inferred:
+        // `csp_send_direct` keeps one `idout_copy` for the whole loop and `convert_broadcast`
+        // only ever writes to it. Two interfaces owning the destination where it is the
+        // broadcast of only the first put the rewritten address on *both* wires.
+        let mut out_dst = id.dst;
         let mut local_found = false;
         for idx in ifaces.indices() {
             if !ifaces.is_within_subnet(id.dst, idx) {
@@ -610,7 +622,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if Self::split_horizon(ifaces, idx, ingress) {
                 continue;
             }
-            push((idx, rtable::NO_VIA), &mut n_dests);
+            if ifaces.is_broadcast_for(id.dst, idx) {
+                out_dst = self.version.max_node_id();
+            }
+            push((idx, rtable::NO_VIA, out_dst), &mut n_dests);
         }
         if local_found {
             return self.finish_forward(&dests[..n_dests], packet);
@@ -631,7 +646,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if Self::split_horizon(ifaces, r.iface, ingress) {
                 continue;
             }
-            push((r.iface, r.via), &mut n_dests);
+            push((r.iface, r.via, id.dst), &mut n_dests);
         }
         if route_found {
             return self.finish_forward(&dests[..n_dests], packet);
@@ -643,7 +658,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             if !e.is_default || Self::split_horizon(ifaces, idx, ingress) {
                 continue;
             }
-            push((idx, rtable::NO_VIA), &mut n_dests);
+            push((idx, rtable::NO_VIA, id.dst), &mut n_dests);
         }
         self.finish_forward(&dests[..n_dests], packet)
     }
@@ -706,21 +721,33 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// buffers here costs a destination rather than the node.
     fn finish_forward<'p, const B: usize, const SZ: usize>(
         &mut self,
-        dests: &[(u8, u16)],
-        packet: Packet<'p, B, SZ>,
+        dests: &[(u8, u16, u16)],
+        mut packet: Packet<'p, B, SZ>,
     ) -> Routed {
         let Some((&last, rest)) = dests.split_last() else {
             self.counters.no_route += 1;
             return Routed::Dropped(DropReason::NoRoute);
         };
-        for &(iface, via) in rest {
+        for &(iface, via, dst) in rest {
             match packet.deep_copy() {
-                Some(c) => self.push_pending(iface, via, c.into_index()),
+                Some(mut c) => {
+                    Self::set_dst(&mut c, dst);
+                    self.push_pending(iface, via, c.into_index());
+                }
                 None => self.pending_missed += 1,
             }
         }
+        Self::set_dst(&mut packet, last.2);
         self.push_pending(last.0, last.1, packet.into_index());
         self.pop_pending().expect("a destination was just queued")
+    }
+
+    fn set_dst<const B: usize, const SZ: usize>(packet: &mut Packet<'_, B, SZ>, dst: u16) {
+        let mut id = packet.id();
+        if id.dst != dst {
+            id.dst = dst;
+            packet.set_id(id);
+        }
     }
 
     #[cfg(not(feature = "rtable"))]
