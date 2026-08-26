@@ -237,6 +237,14 @@ struct DedupInput {
     pairs: u32,
 }
 
+/// The window cases: one pair of identical packets with a chosen gap between them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DedupWindowInput {
+    mode: u8,
+    gap_ms: u32,
+}
+
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct DedupObserved {
@@ -246,6 +254,70 @@ struct DedupObserved {
     /// that counts a suppressed duplicate from one that silently discards it -- and the
     /// driver never sees the drop, because the packet has already left it.
     ingress_drop: u32,
+}
+
+/// Two identical packets `gap_ms` apart, counting what the application collected.
+///
+/// `start_ms` is where the clock is put first. The wrap cases set it just below 2^32:
+/// `csp_dedup.c` ages entries with `time > stamp + CSP_DEDUP_WINDOW_MS` on a free-running
+/// `uint32_t`, so the last 100 ms before the wrap has every entry looking expired. The port
+/// ages by wrapping subtraction and does not.
+fn replay_dedup_window_cased(
+    input: &DedupWindowInput,
+    start_ms: u32,
+    differ: bool,
+) -> serde_json::Value {
+    use csp::dedup::DedupMode;
+    type P = Pool<16, 264>;
+    type R = Router<4, 4, 48, 8>;
+
+    let pool = P::new();
+    let mut r = R::new(LOCAL_ADDR, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    r.dedup_mode = match input.mode {
+        3 => DedupMode::All,
+        other => panic!("the window cases all run with dedup on, got {other}"),
+    };
+
+    let mut ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL_ADDR, 12, true).unwrap();
+        l
+    };
+
+    // Identical bytes are what make the second packet a duplicate; the "different packet"
+    // case is the control that stops the others passing on a node that drops every second
+    // packet regardless of content.
+    let second: &[u8] = if differ { b"different" } else { b"identical" };
+    let mut delivered = 0u32;
+    for (i, body) in [b"identical".as_slice(), second].iter().enumerate() {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: PEER_ADDR,
+            dst: LOCAL_ADDR,
+            dport: TEST_PORT,
+            sport: 40,
+        });
+        p.set_payload(body).unwrap();
+        r.receive(p, 0);
+        let now = start_ms.wrapping_add(if i == 0 { 0 } else { input.gap_ms });
+        if let Routed::Delivered { conn, .. } = r.work(&pool, &mut ifaces, now) {
+            while let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
+                drop(pool.from_index(slot));
+                delivered += 1;
+            }
+            let mut drained = [0u16; 8];
+            if let Ok(n) = r.conns.close(conn, &mut drained) {
+                for &slot in &drained[..n] {
+                    drop(pool.from_index(slot));
+                }
+            }
+        }
+    }
+
+    serde_json::json!({ "delivered_of_two": delivered })
 }
 
 fn replay_dedup(input: &DedupInput) -> DedupObserved {
@@ -2419,6 +2491,19 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 serde_json::to_value(SecurityJson::from(got)).unwrap(),
                 format!("{input:?}"),
             ))
+        }
+        "dedup" if rec.input.get("gap_ms").is_some() => {
+            let input: DedupWindowInput = serde_json::from_value(rec.input.clone()).unwrap();
+            // `a_different_packet_is_not_a_duplicate` is the one case whose two packets
+            // differ; the others send the same bytes twice.
+            let differ = rec.case == "a_different_packet_is_not_a_duplicate";
+            let start = if rec.case.contains("wrap") {
+                u32::MAX - 50
+            } else {
+                100_000
+            };
+            let got = replay_dedup_window_cased(&input, start, differ);
+            Some((got, format!("{input:?} from {start}")))
         }
         "dedup" => {
             let input: DedupInput = serde_json::from_value(rec.input.clone()).unwrap();

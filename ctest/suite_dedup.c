@@ -197,6 +197,24 @@ END_TEST
 
 /* Past the window the second copy is new again, so deduplication is a window and not a
    memory. 100 ms is CSP_DEDUP_WINDOW_MS; the clock makes this exact rather than racy. */
+/* The window cases. Same shape as `measure`, one pair of identical packets to us with a
+   chosen gap between them, so what is compared is what the application collected. */
+static void window_record(const char * name, const char * verdict, uint32_t gap_ms,
+						  unsigned int delivered) {
+	if (!ctest_tracing()) {
+		return;
+	}
+	ctest_trace_begin("dedup", name, verdict);
+	ctest_trace_obj_begin("input");
+	ctest_trace_int("mode", CSP_DEDUP_ALL);
+	ctest_trace_int("gap_ms", (int64_t)gap_ms);
+	ctest_trace_obj_end();
+	ctest_trace_obj_begin("observed");
+	ctest_trace_int("delivered_of_two", (int64_t)delivered);
+	ctest_trace_obj_end();
+	ctest_trace_end();
+}
+
 START_TEST(test_dedup_window_expires)
 {
 	setup_stack(CSP_DEDUP_ALL);
@@ -205,7 +223,9 @@ START_TEST(test_dedup_window_expires)
 	ctest_clock_advance(101);
 	route_packet(LOCAL_ADDR);
 
-	ck_assert_uint_eq(drain_socket(), 2);
+	const unsigned int delivered = drain_socket();
+	ck_assert_uint_eq(delivered, 2);
+	window_record("window_expires", "must_match", 101, delivered);
 }
 END_TEST
 
@@ -219,13 +239,63 @@ START_TEST(test_dedup_inside_the_window_still_suppresses)
 	ctest_clock_advance(99);
 	route_packet(LOCAL_ADDR);
 
-	ck_assert_uint_eq(drain_socket(), 1);
+	const unsigned int delivered = drain_socket();
+	ck_assert_uint_eq(delivered, 1);
+	window_record("inside_the_window_still_suppresses", "must_match", 99, delivered);
 }
 END_TEST
 
 /* A different payload is a different frame, however close together they arrive. Without
    this the tests above would also pass on an implementation that dropped every second
    packet. */
+/* The 49.7-day wrap, measured rather than read -- and it does not break where SCOPE.md
+ * said it did.
+ *
+ * `csp_dedup.c:32` is `if (time > csp_dedup_timestamp[i] + CSP_DEDUP_WINDOW_MS) break;`
+ * on a free-running uint32_t. Two things happen near the wrap: `stamp + 100` can overflow,
+ * and `time` can wrap. Where both happen they cancel, so the naive comparison is *correct*
+ * across the wrap itself. Where only the addition overflows -- the last 100 ms before the
+ * counter wraps -- every entry looks expired and dedup stops suppressing.
+ *
+ * Two cases, one on each side of that boundary. Both were only ever reasoned about. */
+
+/* Both sightings before the wrap, 40 ms apart, well inside the 100 ms window. `stamp + 100`
+   overflows to a small number, `time` has not wrapped and is huge, so the C calls the entry
+   expired and delivers the duplicate. The port ages by wrapping subtraction and suppresses
+   it -- SCOPE.md 10. */
+START_TEST(test_dedup_fails_in_the_window_before_the_wrap)
+{
+	setup_stack(CSP_DEDUP_ALL);
+	ctest_clock_set(UINT32_MAX - 50u);
+
+	route_packet(LOCAL_ADDR);
+	ctest_clock_advance(40);
+	route_packet(LOCAL_ADDR);
+
+	const unsigned int delivered = drain_socket();
+	window_record("a_duplicate_in_the_last_window_before_the_wrap", "diverges", 40, delivered);
+}
+END_TEST
+
+/* The wrap itself: 60 ms apart with the counter passing through zero between them. The
+   overflow in `stamp + 100` and the wrap in `time` cancel, so the C suppresses this one --
+   which is what makes the case above a bounded window rather than "dedup dies at 49 days",
+   the claim this pair replaced. */
+START_TEST(test_dedup_survives_the_wrap_itself)
+{
+	setup_stack(CSP_DEDUP_ALL);
+	ctest_clock_set(UINT32_MAX - 50u);
+
+	route_packet(LOCAL_ADDR);
+	ctest_clock_advance(60);
+	route_packet(LOCAL_ADDR);
+
+	const unsigned int delivered = drain_socket();
+	ck_assert_uint_eq(delivered, 1);
+	window_record("a_duplicate_across_the_clock_wrap", "must_match", 60, delivered);
+}
+END_TEST
+
 START_TEST(test_dedup_does_not_suppress_a_different_packet)
 {
 	setup_stack(CSP_DEDUP_ALL);
@@ -245,7 +315,9 @@ START_TEST(test_dedup_does_not_suppress_a_different_packet)
 	csp_qfifo_write(packet, &ingress_if, NULL);
 	csp_route_work();
 
-	ck_assert_uint_eq(drain_socket(), 2);
+	const unsigned int delivered = drain_socket();
+	ck_assert_uint_eq(delivered, 2);
+	window_record("a_different_packet_is_not_a_duplicate", "must_match", 0, delivered);
 }
 END_TEST
 
@@ -264,6 +336,8 @@ Suite * dedup_suite(void)
 	tcase_add_test(tc_window, test_dedup_window_expires);
 	tcase_add_test(tc_window, test_dedup_inside_the_window_still_suppresses);
 	tcase_add_test(tc_window, test_dedup_does_not_suppress_a_different_packet);
+	tcase_add_test(tc_window, test_dedup_fails_in_the_window_before_the_wrap);
+	tcase_add_test(tc_window, test_dedup_survives_the_wrap_itself);
 	suite_add_tcase(s, tc_window);
 
 	return s;
