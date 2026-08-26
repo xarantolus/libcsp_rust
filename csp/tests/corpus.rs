@@ -765,6 +765,99 @@ fn replay_conn_pressure(input: &ConnInput) -> (u32, i64) {
     (accepted_total, before as i64 - pool.available() as i64)
 }
 
+// --- promisc --------------------------------------------------------------------------
+
+/// The promiscuous tap as the router drives it.
+///
+/// Counted as frames: how many the tap copied, how many the application received, how many
+/// left by a wire. The placement is the behaviour — after deduplication so a suppressed
+/// duplicate is not reported, and before the local/forward branch so traffic passing
+/// *through* the node is tapped too.
+fn replay_promisc(case: &str) -> serde_json::Value {
+    use csp::dedup::DedupMode;
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+
+    const EGRESS: u16 = 20;
+    const ELSEWHERE: u16 = 25;
+
+    let (tap_on, dedup, dsts): (bool, DedupMode, &[u16]) = match case {
+        "the_tap_sees_a_locally_delivered_packet" => (true, DedupMode::Off, &[LOCAL_ADDR]),
+        "the_tap_sees_a_forwarded_packet" => (true, DedupMode::Off, &[ELSEWHERE]),
+        "the_tap_does_not_see_a_suppressed_duplicate" => {
+            (true, DedupMode::All, &[LOCAL_ADDR, LOCAL_ADDR])
+        }
+        "delivery_is_the_same_with_the_tap_off" => {
+            (false, DedupMode::Off, &[LOCAL_ADDR, ELSEWHERE])
+        }
+        other => panic!("no promisc replay for {other}"),
+    };
+
+    let pool = P::new();
+    let mut r = R::new(LOCAL_ADDR, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    r.dedup_mode = dedup;
+    r.set_promisc(tap_on);
+
+    let ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
+        l.add("EGRESS", EGRESS, 12, true).unwrap();
+        l
+    };
+
+    let before = pool.available();
+    let mut delivered = 0;
+    let mut forwarded = 0;
+
+    for &dst in dsts {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: PEER_ADDR,
+            dst,
+            dport: TEST_PORT,
+            sport: 40,
+        });
+        p.set_payload(b"watched").unwrap();
+        r.receive(p, 0);
+        match r.work(&pool, &ifaces, 0) {
+            Routed::Delivered { conn, .. } => {
+                delivered += 1;
+                // Read it the way an application does, so the buffer comes back.
+                while let Ok(Some(slot)) = r.conns.dequeue_rx(conn) {
+                    drop(pool.from_index(slot));
+                }
+                let mut drained = [0u16; 32];
+                if let Ok(n) = r.conns.close(conn, &mut drained) {
+                    for &slot in &drained[..n] {
+                        drop(pool.from_index(slot));
+                    }
+                }
+            }
+            Routed::Forwarded { packet, .. } => {
+                forwarded += 1;
+                // The caller owns a forwarded packet; a driver would transmit and release.
+                drop(pool.from_index(packet));
+            }
+            _ => {}
+        }
+    }
+
+    let mut tapped = 0;
+    while r.promisc_read(&pool).is_some() {
+        tapped += 1;
+    }
+
+    serde_json::json!({
+        "tapped": tapped,
+        "delivered": delivered,
+        "forwarded": forwarded,
+        "buffers_lost": before as i64 - pool.available() as i64,
+    })
+}
+
 // --- the run --------------------------------------------------------------------------
 
 /// Replay one record. `None` means the suite is `c_only` and there is nothing to run.
@@ -1024,6 +1117,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                 ))
             }
         }
+        "promisc" => Some((replay_promisc(&rec.case), rec.case.clone())),
         "security" => {
             let input: SecurityInput = serde_json::from_value(rec.input.clone()).unwrap();
             let got = replay_security(&input);

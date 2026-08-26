@@ -52,6 +52,10 @@ MUTANTS = [
   ("conn: announced only once", "csp/src/router.rs",
    "                if is_new {\n                    self.queue_accept(handle);\n                }",
    "                self.queue_accept(handle);"),
+  ("promisc: tap runs at all", "csp/src/router.rs",
+   "        if self.promisc_enabled {", "        if false {"),
+  ("promisc: tap sees forwarded", "csp/src/router.rs",
+   "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
   ("security: whole policy", "csp-core/src/security.rs",
    "    let mut body = payload;", "    let mut body = payload;\n    if true { return Ok(body); }"),
 ]
