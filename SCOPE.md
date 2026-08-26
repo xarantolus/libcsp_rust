@@ -2114,3 +2114,23 @@ And the first attempt at the second control silently did nothing: a `\&` escape 
 non-raw Python string meant the replacement never matched, so the test "passed" against
 unmutated code. A control that does not mutate proves exactly as much as a test that cannot
 fail. It now asserts the anchor was found and that the text changed.
+
+**2026-08-26: the promiscuous tap, node against node.** `csp_promisc_add` sits at
+`csp_route.c:252` — after the deduplication check and before the `is_to_me` branch. Two
+orderings follow, and a port can get either wrong while every individual piece works: a
+packet being *forwarded* is tapped, and a packet deduplication already suppressed is *not*.
+
+**No defect.** The C taps `[NODE_ADDR, 21]` — one delivered, one forwarded — and so does the
+port; with dedup on, both tap a repeated frame exactly once. Enabling the tap changes
+neither what the application receives nor what leaves on the wire, which is what makes it a
+diagnostic rather than a second delivery path.
+
+Verified by control on both orderings, since a tap test that only sends one packet to this
+node would pass with either placement. Gating the tap on `for_us` gives `[9]` against the
+C's `[9, 21]`. Adding a tap above the dedup early-return gives 2 tapped copies against the
+C's 1.
+
+Worth stating: this is a *structural* difference that agrees behaviourally. The C's tap
+clones into the shared buffer pool; the port's is a fixed array inside `Router` with
+`promisc_missed` counting overflow. The two cannot be compared by reading — only by what the
+tap reports.

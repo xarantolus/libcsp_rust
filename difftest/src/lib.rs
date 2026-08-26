@@ -105,6 +105,8 @@ unsafe extern "C" {
     fn shim_node_send_on(port: u8, body: *const u8, len: c_int) -> c_int;
     fn shim_node_release(port: u8);
     fn shim_node_set_dedup(mode: c_int);
+    fn shim_node_promisc_enable() -> c_int;
+    fn shim_node_promisc_read(out: *mut u8, dst: *mut u16) -> c_int;
     fn shim_node_clear_tx();
     fn shim_node_tx_count() -> c_int;
     fn shim_node_tx_get(i: c_int, out: *mut u8) -> c_int;
@@ -266,6 +268,32 @@ pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Turn the C node's promiscuous tap on.
+pub fn c_node_promisc_enable() -> i32 {
+    // SAFETY: allocates libcsp's tap queue once. Callers hold `LOCK`.
+    unsafe { shim_node_promisc_enable() }
+}
+
+/// Drain the C node's promiscuous tap: `(destination, payload)` per tapped packet.
+pub fn c_node_promisc_drain() -> Vec<(u16, Vec<u8>)> {
+    let mut out = Vec::new();
+    // SAFETY: the buffer is larger than any frame the C can emit; the shim frees each
+    // packet it hands back. Callers hold `LOCK`.
+    unsafe {
+        loop {
+            let mut buf = vec![0u8; 512];
+            let mut dst: u16 = 0;
+            let n = shim_node_promisc_read(buf.as_mut_ptr(), &mut dst);
+            if n < 0 {
+                break;
+            }
+            buf.truncate(n as usize);
+            out.push((dst, buf));
+        }
+    }
+    out
 }
 
 /// Set the C node's deduplication mode (`csp_conf.dedup`).
