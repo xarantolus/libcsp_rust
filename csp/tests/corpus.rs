@@ -940,13 +940,27 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
         dport: PORT,
         sport: 40,
     });
-    let opts = rdp::SynOptions {
-        window_size: 4,
-        conn_timeout: 20_000,
-        packet_timeout: 1_000,
-        delayed_acks: false,
-        ack_timeout: 250,
-        ack_delay_count: 2,
+    // The hostile case proposes the largest value every field can hold; everything else
+    // uses the oracle's ordinary block.
+    let hostile = case == "a_hostile_syn_cannot_suppress_acknowledgement";
+    let opts = if hostile {
+        rdp::SynOptions {
+            window_size: u32::MAX,
+            conn_timeout: u32::MAX,
+            packet_timeout: 0,
+            delayed_acks: true,
+            ack_timeout: u32::MAX,
+            ack_delay_count: u32::MAX,
+        }
+    } else {
+        rdp::SynOptions {
+            window_size: 4,
+            conn_timeout: 20_000,
+            packet_timeout: 1_000,
+            delayed_acks: false,
+            ack_timeout: 250,
+            ack_delay_count: 2,
+        }
     };
     let mut body = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
     let olen = opts.encode(&mut body).unwrap();
@@ -995,8 +1009,8 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
 
     // the_handshakes_final_ack_is_not_itself_answered: complete the handshake and count
     // what the third leg provokes, which must be nothing.
-    let h = n.accept().expect("the handshake opened a connection");
-    let own_iss = n.router.conns.rdp(h).unwrap().snd_iss;
+    let conn = n.accept().expect("the handshake opened a connection");
+    let own_iss = n.router.conns.rdp(conn).unwrap().snd_iss;
     let mut ack = n.packet().expect("the pool is empty");
     ack.set_id(Id {
         pri: 2,
@@ -1102,6 +1116,54 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
                 "reassembled_len": 0, "reassembled": "",
             }),
         };
+    }
+
+    if hostile {
+        // Twelve data packets. With the proposal unclamped the node would wait four
+        // billion before acknowledging, so the peer retransmits forever -- the clamp is
+        // only visible as acks reaching the wire at all.
+        let mut acks = 0usize;
+        for i in 1..=12u16 {
+            let mut d = n.packet().expect("the pool is empty");
+            d.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP,
+                src: PEER,
+                dst: NODE,
+                dport: PORT,
+                sport: 40,
+            });
+            let dh = rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: 1000 + i,
+                ack_nr: own_iss,
+            };
+            let mut framed = [0u8; 1 + rdp::HEADER_LEN];
+            let k = dh.encode(b"x", &mut framed).unwrap();
+            d.set_payload(&framed[..k]).unwrap();
+            n.router.receive(d, 0);
+            loop {
+                match n.work(CLOCK) {
+                    csp::Routed::Respond { packet, .. } => {
+                        acks += 1;
+                        drop(n.take_forwarded(packet));
+                    }
+                    csp::Routed::Delivered { conn, .. } => {
+                        while let Ok(Some(p)) = n.read(conn) {
+                            drop(p);
+                        }
+                    }
+                    csp::Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        }
+        let c = n.router.conns.rdp(conn).unwrap();
+        return serde_json::json!({
+            "acks": acks,
+            "clamped_window": c.opts.window_size,
+            "clamped_ack_delay_count": c.opts.ack_delay_count,
+        });
     }
 
     if case == "without_delayed_acks_every_packet_is_acknowledged" {
@@ -2039,6 +2101,7 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
                     | "data_reaches_the_application_without_the_rdp_trailer"
                     | "without_delayed_acks_every_packet_is_acknowledged"
                     | "a_stream_fragment_survives_being_carried_over_rdp"
+                    | "a_hostile_syn_cannot_suppress_acknowledgement"
             ) =>
         {
             Some((replay_rdp_handshake(&rec.case), rec.case.clone()))
