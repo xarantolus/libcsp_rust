@@ -136,8 +136,8 @@ MUTANTS = [
    "        if id.has_flag(csp_core::flags::RDP) {",
    "        if false && id.has_flag(csp_core::flags::RDP) {"),
   ("rdp: a control frame reaches the wire", "csp/src/router.rs",
-   "            rdp::Action::SendControl(h) => {\n                drop(packet);\n                self.emit_rdp(pool, id, ifaces, h, &[], is_new, handle)\n            }",
-   "            rdp::Action::SendControl(_h) => {\n                drop(packet);\n                Routed::Dropped(DropReason::RdpConsumed)\n            }"),
+   "                let out = self.emit_rdp(pool, id, ifaces, h, &[], is_new && !refused, handle);",
+   "                let _ = h;\n                let out = Routed::Dropped(DropReason::RdpConsumed);"),
   ("rdp: the isn moves with the clock", "csp/src/router.rs",
    "            let iss = Self::initial_seq(now_ms);", "            let iss = 0u16;"),
   ("rdp: the reply carries our isn, not the peer's", "csp/src/router.rs",
@@ -304,6 +304,9 @@ MUTANTS = [
   ("dedup: entries age by wrapping subtraction", "csp/src/dedup.rs",
    "            if now_ms.wrapping_sub(self.stamps[i]) > DEDUP_WINDOW_MS {",
    "            if now_ms > self.stamps[i].wrapping_add(DEDUP_WINDOW_MS) {"),
+  ("rdp: a refused SYN is not announced and not kept", "csp/src/router.rs",
+   "                let refused = is_new && (h.flags & csp_core::rdp::RST) != 0;",
+   "                let refused = false && is_new && (h.flags & csp_core::rdp::RST) != 0;"),
   # The connection table's reuse paths. Both records existed and both were in the
   # "no mutation could move" list -- not because they measure nothing, but because nothing
   # here had ever broken connection lookup or release. They fail as soon as something does.
