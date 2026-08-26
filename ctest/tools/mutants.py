@@ -276,9 +276,14 @@ MUTANTS = [
   # The Ethernet receive path's refusals. Twelve `eth::` records existed that no mutation
   # could move -- not because they measure nothing, but because nothing was breaking the
   # guards they cover. A malformed frame is the one input a peer fully controls.
+  # Both lines together. Dropping only the guard leaves the slice below out of range, so
+  # the mutation crashed rather than misbehaving -- it modelled a panic, not a defect. What
+  # a receiver would actually do wrong is take the bytes that did arrive and treat the
+  # segment as complete, which is what `csp_eth_rx` refuses via `ETH_HDR + seg_size >
+  # received_len`.
   ("eth: a frame shorter than its segment is refused", "csp-core/src/eth.rs",
-   "        if payload.len() < h.seg_size as usize {",
-   "        if false && payload.len() < h.seg_size as usize {"),
+   "        if payload.len() < h.seg_size as usize {\n            return Err(Error::InconsistentTotal {\n                expected: h.seg_size as u32,\n                got: payload.len() as u32,\n            });\n        }\n        let payload = &payload[..h.seg_size as usize];",
+   "        let payload = &payload[..core::cmp::min(h.seg_size as usize, payload.len())];"),
   ("eth: a zero-length transfer is refused", "csp-core/src/eth.rs",
    "                if h.packet_length == 0 {\n                    return Err(Error::ZeroTotal);\n                }",
    "                if false {\n                    return Err(Error::ZeroTotal);\n                }"),
@@ -351,8 +356,20 @@ for name, path, old, new in MUTANTS:
     records = len(named)
     # Any failing test, corpus or unit, opens a "---- <name> stdout ----" block. If the
     # corpus noticed, its block is one of them; otherwise every block is a unit test.
-    blocks = len(re.findall(r"^---- (\S+) stdout ----", out, re.M))
+    names = re.findall(r"^---- (\S+) stdout ----", out, re.M)
+    blocks = len(names)
     unit_only = blocks if records == 0 else 0
+
+    # A replay that panics is not a replay that measured something. The run is red either
+    # way, but the failure names no record and this counter sees nothing -- so the mutation
+    # scores as "some unit test noticed", and the records that actually cover the code sit
+    # in the never-moved list looking vacuous. That masked every promiscuous-tap mutation,
+    # and then every RDP control-frame mutation. Call it out by name instead of counting it.
+    HARNESS = {"the_port_reproduces_what_the_c_did", "every_record_has_a_replay"}
+    panicked = [n for n in names if n in HARNESS] if records == 0 else []
+    if panicked:
+        print(f"{name:34s} REPLAY PANICKED -- {panicked[0]} reported no record")
+        continue
 
     if records:
         where = f"{records:3d} record(s)"

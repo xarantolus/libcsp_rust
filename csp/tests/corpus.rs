@@ -1172,13 +1172,17 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
     }
 
     if case == "a_syn_is_answered_with_syn_ack" {
-        let h = n.accept().expect("the handshake opened a connection");
-        let own_iss = n.router.conns.rdp(h).unwrap().snd_iss;
+        // Reported, not asserted. A port that answers no SYN has no connection to accept,
+        // and `expect` here turned that into a panic naming no record -- so every mutation
+        // that stopped a control frame reaching the wire was scored as noticed by nothing.
+        let own_iss = n
+            .accept()
+            .and_then(|h| n.router.conns.rdp(h).ok().map(|r| r.snd_iss));
         let first = replies.first().copied().unwrap_or((0, 0, 0, 0));
         return serde_json::json!({
             "frames": replies.len(),
             "flags": first.0,
-            "seq_is_own_iss": u8::from(first.1 == own_iss),
+            "seq_is_own_iss": u8::from(own_iss.is_some_and(|iss| first.1 == iss)),
             "ack": first.2,
             "payload_len": first.3,
         });
@@ -1186,8 +1190,15 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
 
     // the_handshakes_final_ack_is_not_itself_answered: complete the handshake and count
     // what the third leg provokes, which must be nothing.
-    let conn = n.accept().expect("the handshake opened a connection");
-    let own_iss = n.router.conns.rdp(conn).unwrap().snd_iss;
+    // Same reason. The remaining cases all need the connection the handshake should have
+    // opened; if it did not, say so as an observation. The key set differs from the C's,
+    // which a `must_match` record reports as a divergence naming itself -- a panic did not.
+    let Some(conn) = n.accept() else {
+        return serde_json::json!({ "handshake_opened": 0 });
+    };
+    let Ok(own_iss) = n.router.conns.rdp(conn).map(|r| r.snd_iss) else {
+        return serde_json::json!({ "handshake_opened": 0 });
+    };
 
     // Placed before the final ACK: the C's scenario is a peer that never acknowledges,
     // so completing the handshake here would leave the connection Open and the
@@ -2289,9 +2300,16 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             };
 
             deliver(&mut r);
-            let h = r
-                .accept()
-                .expect("the first packet announces the connection");
+            // Reported rather than asserted, for the reason the RDP replay carries: a port
+            // that announces nothing has nothing to accept, and a panic here would name no
+            // record. `extra_offers` counts what came *after* the first announcement, so a
+            // first announcement that never happened has to be visible in the answer.
+            let Some(h) = r.accept() else {
+                return Some((
+                    serde_json::json!({ "extra_offers": -1 }),
+                    "the first packet announced no connection".to_string(),
+                ));
+            };
             if let Ok(Some(slot)) = r.conns.dequeue_rx(h) {
                 drop(pool.from_index(slot));
             }
