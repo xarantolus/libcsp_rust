@@ -65,6 +65,12 @@ MUTANTS = [
   ("conn: a connection is an endpoint too", "csp/src/router.rs",
    "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
    "        if !self.is_bound(id.dport) {"),
+  # If the port stops acknowledging, a C peer's send window shuts after `window_size` and
+  # never reopens -- so its later messages simply never arrive. Only a peer that originates
+  # more than one window of data can see it.
+  ("rdp: we acknowledge what we receive", "csp-core/src/rdp.rs",
+   "        if self.state != State::Open || !self.should_ack(now_ms) {\n            return None;\n        }",
+   "        if true {\n            return None;\n        }"),
   # A reset connection and a full window are different refusals: one is permanent and the
   # other clears. Conflating them made an application retry for ever against a dead peer.
   ("rdp: a reset is not back-pressure", "csp/src/node.rs",
@@ -448,14 +454,27 @@ for name, path, old, new in MUTANTS:
     # tests that cover them live in that crate. Running only `csp` made the unit-test leg
     # blind there, so four Ethernet guards with unit tests asserting the exact error they
     # raise were reported as holes nothing noticed.
-    # `-p difftest` too: the node-level differential tests are the only thing covering the
-    # port against a *running* C node, and a mutation guarded only there scored as a hole
-    # nothing noticed. The RDP handshake's third leg was exactly that case.
-    r = subprocess.run(["cargo","test","-p","csp","-p","csp-core","-p","difftest",
-                        "--all-features","--no-fail-fast"],
-                       capture_output=True, text=True)
-    p.write_text(orig)
+    # `difftest` is the only thing covering the port against a *running* C node, so a
+    # mutation guarded only there would otherwise score as a hole nothing noticed -- the RDP
+    # handshake's third leg was exactly that case. But it links the C library into seven test
+    # binaries, and running it for all 127 mutations took the sweep past fifty minutes, which
+    # is long enough that it stops being run at all.
+    #
+    # So: cheap packages first, and pay for `difftest` only when nothing cheap noticed. The
+    # guarantee is unchanged -- no mutation is ever reported unnoticed without difftest
+    # having been tried -- and the expensive leg runs for a handful of mutations instead of
+    # every one.
+    def run(pkgs):
+        return subprocess.run(["cargo","test",*[a for pk in pkgs for a in ("-p",pk)],
+                               "--all-features","--no-fail-fast"],
+                              capture_output=True, text=True)
+
+    r = run(["csp","csp-core"])
     out = r.stdout + r.stderr
+    if "error[" not in out and "could not compile" not in out and "FAILED" not in out:
+        r = run(["csp","csp-core","difftest"])
+        out = r.stdout + r.stderr
+    p.write_text(orig)
     if "error[" in out or "could not compile" in out:
         print(f"{name:34s} did not compile")
         continue
