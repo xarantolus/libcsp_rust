@@ -38,6 +38,22 @@ pub enum Bridged {
         /// Interface to send on.
         iface: u8,
     },
+    /// A control frame this node produced and the caller must send.
+    ///
+    /// The same obligation as [`Routed::Forwarded`] -- take the pool slot and hand it to
+    /// the interface -- but it originates here rather than passing through, so an
+    /// application can count and log the two apart. RDP's handshake and acknowledgements
+    /// arrive this way; without it the router had no outcome that could put a frame on the
+    /// wire on its own behalf, so a `SYN` reached a node and nothing came back.
+    #[cfg(feature = "rdp")]
+    Respond {
+        /// Interface index.
+        iface: u8,
+        /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
+        via: u16,
+        /// Pool slot holding the packet. The caller owns it.
+        packet: u16,
+    },
     /// The packet went no further.
     Dropped(DropReason),
 }
@@ -75,6 +91,22 @@ pub enum Routed {
         /// Pool slot holding the packet. The caller owns it.
         packet: u16,
     },
+    /// A control frame this node produced and the caller must send.
+    ///
+    /// The same obligation as [`Routed::Forwarded`] -- take the pool slot and hand it to
+    /// the interface -- but it originates here rather than passing through, so an
+    /// application can count and log the two apart. RDP's handshake and acknowledgements
+    /// arrive this way; without it the router had no outcome that could put a frame on the
+    /// wire on its own behalf, so a `SYN` reached a node and nothing came back.
+    #[cfg(feature = "rdp")]
+    Respond {
+        /// Interface index.
+        iface: u8,
+        /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
+        via: u16,
+        /// Pool slot holding the packet. The caller owns it.
+        packet: u16,
+    },
     /// The packet went no further.
     Dropped(DropReason),
 }
@@ -98,6 +130,11 @@ pub enum DropReason {
     ReceiveQueueFull,
     /// The frame did not decode.
     Malformed,
+    /// An RDP control frame the state machine consumed: a handshake step or an
+    /// acknowledgement. Not an error -- the packet was for the protocol, not the
+    /// application, so there is nothing to deliver and nothing went wrong.
+    #[cfg(feature = "rdp")]
+    RdpConsumed,
     /// The endpoint's security policy refused it.
     ///
     /// Distinct from every other reason: this one means the packet arrived intact and was
@@ -110,6 +147,19 @@ pub enum DropReason {
 /// `csp_send_direct` has no limit — it walks the whole interface list. Four is what a node
 /// with redundant links plausibly has, and exceeding it is counted rather than ignored.
 pub const MAX_FANOUT: usize = 4;
+
+/// No next hop: send straight to the destination address.
+#[cfg(all(feature = "rdp", feature = "rtable"))]
+const NO_VIA_ADDR: u16 = rtable::NO_VIA;
+#[cfg(all(feature = "rdp", not(feature = "rtable")))]
+const NO_VIA_ADDR: u16 = 0xFFFF;
+
+/// Largest RDP window this node will accept from a peer's `SYN`.
+///
+/// `csp_rdp_new_packet` clamps the peer's proposal to what the receive queue can hold;
+/// proposing more than that would have the peer send data this node cannot buffer.
+#[cfg(feature = "rdp")]
+pub const RDP_MAX_WINDOW: u32 = 5;
 
 /// Counters the router keeps.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -127,6 +177,9 @@ pub struct Counters {
     pub auth_error: u32,
     /// Other receive errors from the security policy.
     pub rx_error: u32,
+    /// Control frames this node produced: RDP handshake and acknowledgements.
+    #[cfg(feature = "rdp")]
+    pub responded: u32,
 }
 
 /// The mutable half of a node: everything the router touches.
@@ -158,7 +211,7 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     /// the packet for each, so two links owning a destination carry two frames. `Routed`
     /// has nowhere to put a set, so the extras wait here and [`Router::work`] hands them
     /// out one per call — a step at a time, like everything else it does.
-    pending_tx: [Option<(u8, u16, u16)>; MAX_FANOUT],
+    pending_tx: [Option<(u8, u16, u16, bool)>; MAX_FANOUT],
     pending_len: usize,
     /// Fan-out destinations dropped because the pool had no buffer to clone into.
     pending_missed: u32,
@@ -462,15 +515,20 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
 
         if for_us {
-            return self.deliver_local(packet, id, now_ms);
+            return self.deliver_local(pool, packet, id, ifaces, now_ms);
         }
         self.forward(pool, packet, id, ifaces, ingress)
     }
 
-    fn deliver_local<'p, const B: usize, const SZ: usize>(
+    fn deliver_local<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
         &mut self,
+        #[cfg_attr(not(feature = "rdp"), allow(unused_variables))] pool: &'p Pool<B, SZ>,
         mut packet: Packet<'p, B, SZ>,
         id: Id,
+        #[cfg_attr(not(feature = "rdp"), allow(unused_variables))] ifaces: &crate::iflist::IfList<
+            N,
+            A,
+        >,
         now_ms: u32,
     ) -> Routed {
         if !self.is_bound(id.dport) {
@@ -538,6 +596,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         };
 
         let _ = self.conns.touch(handle, now_ms);
+
+        #[cfg(feature = "rdp")]
+        if id.has_flag(csp_core::flags::RDP) {
+            return self.deliver_rdp(pool, packet, id, ifaces, handle, is_new, now_ms);
+        }
+
         match self.conns.enqueue_rx(handle, packet.into_index()) {
             Ok(true) => {
                 self.counters.delivered += 1;
@@ -560,6 +624,212 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 Routed::Dropped(DropReason::ReceiveQueueFull)
             }
         }
+    }
+
+    /// Hand an RDP packet to the connection's state machine and act on what it says.
+    ///
+    /// The C does this at `csp_route_deliver_connection`, gated on `packet->id.flags &
+    /// CSP_FRDP` and *returning* rather than enqueueing -- an RDP packet is never queued
+    /// for the application as it arrives; the state machine decides what, if anything,
+    /// the application gets.
+    ///
+    /// Before this, the router never constructed an `rdp::Event` at all. The state machine
+    /// and its retransmit queue were fully implemented and driven only by `tick`, so a
+    /// `SYN` arriving at a bound port was enqueued as though its trailer were payload and
+    /// no reply was ever produced: no peer could open a connection with this node.
+    #[cfg(feature = "rdp")]
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_rdp<'p, const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &'p Pool<B, SZ>,
+        packet: Packet<'p, B, SZ>,
+        id: Id,
+        ifaces: &crate::iflist::IfList<N, A>,
+        handle: Handle,
+        is_new: bool,
+        now_ms: u32,
+    ) -> Routed {
+        use csp_core::rdp;
+
+        let Ok(header) = packet.with_payload(rdp::Header::decode) else {
+            self.counters.malformed += 1;
+            return Routed::Dropped(DropReason::Malformed);
+        };
+
+        if is_new {
+            // Seed this connection's initial send sequence number. `csp_rdp.c:548` does
+            // `seed = csp_get_ms(); snd_iss = rand_r(&seed)`, re-seeded per SYN -- so the
+            // C's ISN is a function of the clock alone and guessable by anyone who can
+            // estimate the peer's uptime. This keeps "a function of the clock", because a
+            // sans-io core has no entropy source, but does not reproduce `rand_r`: it is
+            // not a random number and is not treated as one.
+            //
+            // The connection struct hardcoded `0`, so every connection this node opened
+            // began at sequence 0 -- constant across reboots and across peers, which is
+            // strictly worse than the C.
+            let iss = Self::initial_seq(now_ms);
+            if let Ok(conn) = self.conns.rdp_mut(handle) {
+                *conn = csp_core::rdp::Connection::new(iss, csp_core::rdp::SynOptions::default());
+            }
+        }
+
+        let action = {
+            let Ok(conn) = self.conns.rdp_mut(handle) else {
+                self.counters.rx_queue_full += 1;
+                return Routed::Dropped(DropReason::ReceiveQueueFull);
+            };
+            // The payload with the trailer removed: what the application would see.
+            let body_len = packet.with_payload(|b| rdp::Header::strip(b).map(|x| x.len()));
+            let Ok(body_len) = body_len else {
+                self.counters.malformed += 1;
+                return Routed::Dropped(DropReason::Malformed);
+            };
+            packet.with_payload(|b| {
+                conn.step(
+                    rdp::Event::Packet(header, &b[..body_len]),
+                    now_ms,
+                    RDP_MAX_WINDOW,
+                )
+            })
+        };
+
+        match action {
+            rdp::Action::Deliver => {
+                // Strip the trailer so the application sees only its own bytes.
+                let mut packet = packet;
+                let kept = packet
+                    .with_payload(|b| rdp::Header::strip(b).map(|x| x.len()))
+                    .unwrap_or(0);
+                packet.with_payload_mut(|_| (kept, ()));
+                match self.conns.enqueue_rx(handle, packet.into_index()) {
+                    Ok(true) => {
+                        self.counters.delivered += 1;
+                        // No `queue_accept` here, unlike the plain path: an RDP connection
+                        // can only reach `Deliver` once it is open, and it was announced
+                        // when the handshake created it.
+                        Routed::Delivered {
+                            port: id.dport,
+                            conn: handle,
+                        }
+                    }
+                    _ => {
+                        self.counters.rx_queue_full += 1;
+                        Routed::Dropped(DropReason::ReceiveQueueFull)
+                    }
+                }
+            }
+            rdp::Action::SendControl(h) => {
+                drop(packet);
+                self.emit_rdp(pool, id, ifaces, h, &[], is_new, handle)
+            }
+            rdp::Action::SendSyn(h, opts) => {
+                drop(packet);
+                let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+                let Ok(n) = opts.encode(&mut body) else {
+                    self.counters.malformed += 1;
+                    return Routed::Dropped(DropReason::Malformed);
+                };
+                self.emit_rdp(pool, id, ifaces, h, &body[..n], is_new, handle)
+            }
+            rdp::Action::Opened | rdp::Action::Nothing => {
+                drop(packet);
+                Routed::Dropped(DropReason::RdpConsumed)
+            }
+            rdp::Action::Closed(_) => {
+                drop(packet);
+                // Release anything the peer had queued for an application that will now
+                // never read it -- a closed connection that kept its buffers would leak
+                // one pool slot per unread packet.
+                let mut drained = [0u16; 8];
+                if let Ok(n) = self.conns.close(handle, &mut drained) {
+                    for slot in drained.iter().take(n) {
+                        drop(pool.from_index(*slot));
+                    }
+                }
+                Routed::Dropped(DropReason::RdpConsumed)
+            }
+        }
+    }
+
+    /// Build an RDP control frame back to the peer and queue it for the caller to send.
+    #[cfg(feature = "rdp")]
+    #[allow(clippy::too_many_arguments)]
+    fn emit_rdp<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        id: Id,
+        ifaces: &crate::iflist::IfList<N, A>,
+        header: csp_core::rdp::Header,
+        body: &[u8],
+        is_new: bool,
+        handle: Handle,
+    ) -> Routed {
+        if is_new {
+            // The application is told about the connection as soon as the handshake starts,
+            // the same as for a plain first packet -- otherwise a peer that only ever sends
+            // RDP control frames would hold a connection the application never sees.
+            self.queue_accept(handle);
+        }
+
+        let Some(mut reply) = pool.acquire(0) else {
+            self.counters.rx_queue_full += 1;
+            return Routed::Dropped(DropReason::ReceiveQueueFull);
+        };
+        reply.set_id(Id {
+            pri: id.pri,
+            flags: id.flags,
+            src: id.dst,
+            dst: id.src,
+            dport: id.sport,
+            sport: id.dport,
+        });
+        let mut buf = [0u8; 64];
+        let Ok(n) = header.encode(body, &mut buf) else {
+            self.counters.malformed += 1;
+            return Routed::Dropped(DropReason::Malformed);
+        };
+        if reply.set_payload(&buf[..n]).is_err() {
+            self.counters.malformed += 1;
+            return Routed::Dropped(DropReason::Malformed);
+        }
+
+        // Route it the way any outgoing packet is routed -- the reply has to reach the peer,
+        // which is not necessarily the interface it arrived on.
+        let dst = reply.id().dst;
+        let (iface, via) = match Self::first_destination(ifaces, dst) {
+            Some(d) => d,
+            None => {
+                self.counters.no_route += 1;
+                return Routed::Dropped(DropReason::NoRoute);
+            }
+        };
+        let slot = reply.into_index();
+        self.push_pending_tagged(iface, via, slot, true);
+        self.pop_pending().expect("a response was just queued")
+    }
+
+    /// The initial send sequence number for a connection opening at `now_ms`.
+    ///
+    /// A cheap mix rather than a counter, so two connections opened milliseconds apart do
+    /// not start at adjacent sequence numbers. Deterministic on purpose: the differential
+    /// tests pin the clock, and an ISN that could not be reproduced could not be compared.
+    #[cfg(feature = "rdp")]
+    const fn initial_seq(now_ms: u32) -> u16 {
+        // Knuth's multiplicative constant, folded to 16 bits.
+        let mixed = now_ms.wrapping_mul(2_654_435_761);
+        ((mixed >> 16) ^ mixed) as u16
+    }
+
+    /// Where a locally originated packet for `dst` goes: subnet, then table, then default.
+    #[cfg(feature = "rdp")]
+    fn first_destination<const N: usize, const A: usize>(
+        ifaces: &crate::iflist::IfList<N, A>,
+        dst: u16,
+    ) -> Option<(u8, u16)> {
+        if let Some(idx) = ifaces.find_by_subnet(dst) {
+            return Some((idx, NO_VIA_ADDR));
+        }
+        ifaces.find_default().map(|idx| (idx, NO_VIA_ADDR))
     }
 
     /// Decide where a packet that is not for us should go.
@@ -680,10 +950,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
     }
 
-    #[cfg(feature = "rtable")]
+    #[cfg_attr(not(feature = "rtable"), allow(dead_code))]
     fn push_pending(&mut self, iface: u8, via: u16, slot: u16) {
+        self.push_pending_tagged(iface, via, slot, false);
+    }
+
+    fn push_pending_tagged(&mut self, iface: u8, via: u16, slot: u16, ours: bool) {
         if self.pending_len < MAX_FANOUT {
-            self.pending_tx[self.pending_len] = Some((iface, via, slot));
+            self.pending_tx[self.pending_len] = Some((iface, via, slot, ours));
             self.pending_len += 1;
         } else {
             self.pending_missed += 1;
@@ -695,10 +969,17 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         if self.pending_len == 0 {
             return None;
         }
-        let (iface, via, packet) = self.pending_tx[0]?;
+        let (iface, via, packet, ours) = self.pending_tx[0]?;
         self.pending_tx.copy_within(1..self.pending_len, 0);
         self.pending_tx[self.pending_len - 1] = None;
         self.pending_len -= 1;
+        if ours {
+            #[cfg(feature = "rdp")]
+            {
+                self.counters.responded += 1;
+                return Some(Routed::Respond { iface, via, packet });
+            }
+        }
         self.counters.forwarded += 1;
         Some(Routed::Forwarded { iface, via, packet })
     }
@@ -782,7 +1063,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
 
         #[cfg(feature = "rdp")]
-        let closed = closed + self.conns.tick_rdp(now_ms, 5);
+        let closed = closed + self.conns.tick_rdp(now_ms, RDP_MAX_WINDOW);
 
         if closed > 0 {
             self.purge_dead_accepts();
@@ -903,6 +1184,81 @@ mod tests {
     }
 
     use super::*;
+
+    /// The sequence number a peer actually receives in the `SYN|ACK`, for two handshakes
+    /// opened at different times.
+    ///
+    /// Driven through the router, not by calling the ISN helper: the first version of this
+    /// test called `Router::initial_seq` directly, so replacing the *call site* with a
+    /// constant left it green. The helper was never the thing at risk.
+    ///
+    /// `csp_rdp.c:548` re-seeds `rand_r` from `csp_get_ms()` for every `SYN`, so the C's
+    /// ISN moves with the clock. This node hardcoded `0`. A constant ISN means a delayed
+    /// segment from a previous connection falls inside the window of the next one between
+    /// the same pair of ports -- and the handshake record cannot see it, because it checks
+    /// that the reply carries this node's *own* ISN and zero equals zero.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn the_sequence_a_peer_receives_moves_with_the_clock() {
+        use csp_core::rdp;
+
+        fn syn_ack_seq(now_ms: u32, sport: u8) -> (u16, u16) {
+            let pool = P::new();
+            let mut r = R::new(ME, Version::V1);
+            r.bind(7).unwrap();
+            let ifaces = test_ifaces();
+
+            let mut p = pool.acquire(0).unwrap();
+            p.set_id(Id {
+                pri: 2,
+                flags: csp_core::flags::RDP,
+                src: 2,
+                dst: ME,
+                dport: 7,
+                sport,
+            });
+            let mut opts_buf = [0u8; rdp::SYN_OPTIONS_LEN];
+            let olen = rdp::SynOptions::default().encode(&mut opts_buf).unwrap();
+            let h = rdp::Header {
+                flags: rdp::SYN,
+                seq_nr: 1000,
+                ack_nr: 0,
+            };
+            let mut framed = [0u8; rdp::SYN_OPTIONS_LEN + rdp::HEADER_LEN];
+            let n = h.encode(&opts_buf[..olen], &mut framed).unwrap();
+            p.set_payload(&framed[..n]).unwrap();
+            r.receive(p, 0);
+
+            match r.work(&pool, &ifaces, now_ms) {
+                Routed::Respond { packet, .. } => {
+                    let reply = pool.from_index(packet).expect("a live slot");
+                    let hh = reply.with_payload(|b| rdp::Header::decode(b).unwrap());
+                    (hh.seq_nr, hh.ack_nr)
+                }
+                other => panic!("a SYN must be answered, got {other:?}"),
+            }
+        }
+
+        let (seq_a, ack_a) = syn_ack_seq(100_000, 40);
+        let (seq_b, _) = syn_ack_seq(100_001, 41);
+        let (seq_c, _) = syn_ack_seq(7_000_000, 42);
+
+        // It acknowledges the peer's SYN...
+        assert_eq!(ack_a, 1000);
+        // ...and does not echo the peer's sequence number back as its own.
+        assert_ne!(
+            seq_a, 1000,
+            "the reply must carry this node's ISN, not the peer's"
+        );
+        // One millisecond apart must not collide.
+        assert_ne!(seq_a, seq_b);
+        assert_ne!(seq_a, seq_c);
+        assert_ne!(seq_b, seq_c);
+        // Reproducible for a given clock, which is what lets the differential tests pin it.
+        assert_eq!(seq_a, syn_ack_seq(100_000, 40).0);
+        // And not simply the clock truncated, which would be as guessable as a counter.
+        assert_ne!(seq_a, 100_000u32 as u16);
+    }
 
     type P = Pool<16, 264>;
     type R = Router<4, 4, 48, 8>;

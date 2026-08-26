@@ -795,6 +795,12 @@ fn rust_node_exchange_routed(
         match node.work(0) {
             Routed::Idle => break,
             Routed::Delivered { .. } => {}
+            // A control frame the node produced on its own behalf (RDP). The C node under
+            // test here speaks no RDP, so nothing should reach this arm; releasing the
+            // buffer keeps a stray one from looking like a leak instead of a surprise.
+            Routed::Respond { packet, .. } => {
+                drop(node.take_forwarded(packet));
+            }
             Routed::Forwarded { iface, via, packet } => {
                 if let Some(mut p) = node.take_forwarded(packet) {
                     if p.prepend_header(version).is_ok() {
