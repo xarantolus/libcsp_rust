@@ -216,10 +216,14 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     SecurityObserved {
         delivered,
         delivered_bytes,
-        // The C charges its interface, the port charges its router. Same event, and the
-        // split between the two counters is the thing being compared.
-        rx_error: r.counters.rx_error,
-        autherr: r.counters.auth_error,
+        // The **ingress interface's** counters, which is what the C records
+        // (`csp_route_security_check` takes the iface and charges it directly). This used
+        // to read the router's node-wide totals and say the two were the same event. They
+        // are not the same quantity: with one interface in the scenario they coincide, so
+        // the record passed while comparing something else, and the per-interface fields
+        // an operator reads over CMP `IF_STATS` were never written at all.
+        rx_error: ifaces.get(0).map_or(0, |e| e.stats.rx_error),
+        autherr: ifaces.get(0).map_or(0, |e| e.stats.autherr),
     }
 }
 
