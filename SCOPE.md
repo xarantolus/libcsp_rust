@@ -634,6 +634,15 @@ least a function of the clock (`csp_rdp.c:548`, `rand_r` seeded from `csp_get_ms
 treated as one: a sans-io core has no entropy source, and the C's own ISN is guessable by
 anyone who can estimate the peer's uptime to the millisecond.
 
+**Scratch arrays must be sized by `RXQ`.** `Table::close`, `close_all` and `expire_idle`
+all refuse rather than partially draining a connection's receive queue — a slot removed but
+not reported is a slot nobody releases. Three call sites passed fixed literals (`[0u16; 8]`
+on the RST path, `[0u16; 32]` in `tick` and `shutdown`) while `RXQ` is a const generic, so a
+queue deeper than the literal made the drain fail *in silence*: measured at nine buffers
+lost for good when a peer reset a connection holding nine unread packets. `tick`'s sweep
+would retry, but a reset happens once and `shutdown` runs once. All three now size by `RXQ`,
+which is the bound on a single queue and therefore guarantees progress.
+
 `rdp::Action` names **one** action per step, and for in-order data that action is `Deliver`
 — so the acknowledgement can only come from the separate `poll_ack`. Nothing called it, so
 the first version of this wiring delivered RDP data to the application and acknowledged none

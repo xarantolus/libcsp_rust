@@ -167,6 +167,18 @@ MUTANTS = [
   ("rdp: the ack number advances", "csp-core/src/rdp.rs",
    "        Some(Header {\n            flags: ACK,\n            seq_nr: self.snd_nxt,\n            ack_nr: self.rcv_cur,",
    "        Some(Header {\n            flags: ACK,\n            seq_nr: self.snd_nxt,\n            ack_nr: self.rcv_irs,"),
+  # Scratch arrays for draining a connection's receive queue. Every one of these APIs
+  # refuses rather than partially draining -- a slot removed but not reported is a slot
+  # nobody releases -- so an array shorter than one queue silently frees nothing.
+  ("drain: the rst path sizes by RXQ", "csp/src/router.rs",
+   "                let mut drained = [0u16; RXQ];\n                match self.conns.close(handle, &mut drained) {",
+   "                let mut drained = [0u16; 8];\n                match self.conns.close(handle, &mut drained) {"),
+  ("drain: the idle sweep sizes by RXQ", "csp/src/router.rs",
+   "        let mut drained = [0u16; RXQ];\n        let (closed, n) = self\n",
+   "        let mut drained = [0u16; 1];\n        let (closed, n) = self\n"),
+  ("drain: shutdown sizes by RXQ", "csp/src/router.rs",
+   "            let mut drained = [0u16; RXQ];\n            let (closed, n) = self.conns.close_all(&mut drained);",
+   "            let mut drained = [0u16; 1];\n            let (closed, n) = self.conns.close_all(&mut drained);"),
   ("service: an empty process list is not a reply", "csp/src/service.rs",
    "            if status.ps.is_empty() {\n                return Ok(None);\n            }",
    "            if false {\n                return Ok(None);\n            }"),
