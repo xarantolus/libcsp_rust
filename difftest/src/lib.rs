@@ -128,6 +128,9 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_client_read(out: *mut u8, out_len: *mut c_int) -> c_int;
     fn shim_node_client_close();
+    fn shim_iflist_check_dfl();
+    fn shim_iflist_clear_dfl();
+    fn shim_iface_is_default(name: *const u8) -> c_int;
     fn shim_arp_set(csp_addr: u16, mac: *const u8);
     fn shim_arp_get(csp_addr: u16, mac_out: *mut u8);
     fn shim_mem_base() -> u64;
@@ -306,6 +309,32 @@ pub fn c_node_bind(port: u8) -> i32 {
 pub fn c_node_bind_any() -> i32 {
     // SAFETY: no arguments; idempotent behind a flag on the C side. Callers hold `LOCK`.
     unsafe { shim_node_bind_any() }
+}
+
+/// Run `csp_iflist_check_dfl` on the C node's interfaces.
+pub fn c_iflist_check_dfl() {
+    // SAFETY: no arguments; walks libcsp's own interface list. Callers hold `LOCK`.
+    unsafe { shim_iflist_check_dfl() }
+}
+
+/// Clear `is_default` on every interface the harness registered, including loopback.
+///
+/// Not a libcsp operation — it writes the same public struct field an application sets — and
+/// it exists so the "nothing is default yet" branch of `csp_iflist_check_dfl` is reachable
+/// at all: the harness registers EGRESS as a default.
+pub fn c_iflist_clear_dfl() {
+    // SAFETY: writes a public field of the shim's own static interfaces. Callers hold `LOCK`.
+    unsafe { shim_iflist_clear_dfl() }
+}
+
+/// Whether the named C interface is a default-route target. `None` if there is no such one.
+pub fn c_iface_is_default(name: &str) -> Option<bool> {
+    let c = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `c` is NUL-terminated and outlives the call. Callers hold `LOCK`.
+    match unsafe { shim_iface_is_default(c.as_ptr() as *const u8) } {
+        n if n < 0 => None,
+        n => Some(n != 0),
+    }
 }
 
 /// Teach libcsp's Ethernet ARP table that `csp_addr` lives at `mac`.
