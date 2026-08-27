@@ -434,10 +434,27 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         (closed, n)
     }
 
-    /// Close every connection idle for longer than `timeout_ms`, returning how many.
+    /// Close every **server** connection idle for longer than `timeout_ms`, returning how
+    /// many.
     ///
     /// Connection slots are the scarcest resource on the node; without this a peer that
-    /// opens connections and walks away exhausts the table permanently.
+    /// sends one packet to a bound port and walks away exhausts the table permanently,
+    /// because a server connection is created by the router and nothing else will close it
+    /// if the application never accepts it.
+    ///
+    /// **Client connections are never swept**, and that is not an omission. libcsp expires
+    /// no connection at all on idleness — `csp_conn_check_timeouts` enters its body only for
+    /// `CSP_FRDP` connections (`csp_conn.c:32`) — and a client connection is one this
+    /// node's own application opened and holds the handle to. Reaping it takes the
+    /// connection out from under code that is merely quiet between passes, and the reply it
+    /// is waiting for is then refused as `PortNotBound`. Measured against a real node: 1000
+    /// sweeps later the C still delivered the reply, and one tick here had already dropped
+    /// it (`difftest/tests/node_idle.rs`).
+    ///
+    /// This is the same defect that was found and fixed once in the RDP path — "a
+    /// connection that is merely quiet was dropped while the C kept answering on it" — and
+    /// it survived here for plain connections. An RDP connect that never completes is still
+    /// reclaimed, by RDP's own timer on an unestablished state, not by this sweep.
     pub fn expire_idle(
         &mut self,
         now_ms: u32,
@@ -447,7 +464,7 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         let mut closed = 0;
         let mut n = 0;
         for c in self.conns.iter_mut() {
-            if c.state != State::Open {
+            if c.state != State::Open || c.kind != Kind::Server {
                 continue;
             }
             if now_ms.wrapping_sub(c.last_activity) <= timeout_ms {
