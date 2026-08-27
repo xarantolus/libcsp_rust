@@ -2988,3 +2988,48 @@ luck rather than correctness. Merged into one test: the before/after pair is one
 and belongs in one. The lesson is narrower than "avoid shared state" — it is that **a global
 with no remove turns test independence into an ordering assumption**, and the C is full of
 them.
+
+### `csp_sfp_send` had never executed
+
+2026-08-27. Two things settled first, both by measurement rather than by another pass over
+the code:
+
+**Deviation 2 in the done-check prompt is closed, and closed properly.** Earlier cycles
+confirmed only that `Router::forward` *calls* `route_policy::destinations` — the call, not
+the semantics. `ctest/suite_route.c`'s `route_to` helper is `csp_qfifo_write(packet,
+&ingress_if, NULL)` followed by `csp_route_work()`, so those cases are the **forward** path,
+not an application send; `two_owning_links_send_two_frames` and
+`two_default_interfaces_send_two_frames` both record `frames: 2, left_by: [link_a, link_b]`;
+and the port's replay does `receive` → `work` → `Routed::Forwarded`, taking the packet. So
+fan-out *and* default fallback on the forward path are compared against a real C node.
+
+**And the remaining "C functions no harness calls" list is down to 20**, of which most are
+trivial accessors or hooks the port deliberately refuses. One was not.
+
+**`csp_sfp_send` appears in this tree exactly once — in a comment in `suite_rdp.c` — and had
+never executed.** Every SFP comparison ran one of two ways: the port fragments and
+`csp_sfp_recv_fp` reassembles (`node_sfp.rs`), or hand-built `make_packet` fragments go into
+the port's reassembler (the `sfp::` records). The decision a real libcsp sender makes about
+*how to cut a message up* had never produced a byte, so the port's reassembler had never seen
+a real sender's output.
+
+`node_can.rs` covers CAN in both directions. `node_sfp.rs` claimed the cell and covered one,
+and the omission was invisible because the direction present was the harder-looking one.
+
+**Measured: the port reassembles what the C sends**, at 5, 10, 100 and 200 bytes and at MTUs
+of 40 and 8 — the latter being thirteen frames for a hundred bytes. Driven through the whole
+receive path: router, bound port, `Delivery::classify`, `Stream::read_to_slice` over a
+`PacketSource`.
+
+**The first version of that harness was not a receive loop, and the C found it.** Pushing all
+thirteen frames in before reading any overruns the connection's receive queue, which holds
+eight; reassembly failed with `Truncated` for want of the five that were dropped. Enlarging
+the queue would have made it pass and hidden that the test was not modelling anything a real
+application does. The `PacketSource` now takes delivery of the next frame when the connection
+has nothing waiting — sans-io's version of blocking in the driver — which is both the fix and
+the more faithful test.
+
+Two controls bite it: reading the SFP trailer from the front instead of the end, and
+classifying a fragment as a datagram. A third — disabling the offset check — does not, and
+correctly so: these fragments are well-formed and in order, and the existing
+`sfp: fragment order` mutation is noticed by `a_fragment_at_the_wrong_offset_is_refused`.
