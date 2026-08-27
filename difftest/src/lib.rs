@@ -125,6 +125,7 @@ unsafe extern "C" {
     fn shim_bridge_set(a: c_int, b: c_int);
     fn shim_bridge_work();
     fn shim_node_inject_on(iface: c_int, frame: *const u8, len: u32) -> c_int;
+    fn shim_client_reboot(dst: u16, shutdown_instead: c_int) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
@@ -479,6 +480,30 @@ pub fn c_bridge_step(iface: i32, frame: &[u8]) -> Vec<(String, Vec<u8>)> {
         }
     }
     out
+}
+
+/// What libcsp's own `csp_reboot` / `csp_shutdown` put on the wire, framed.
+///
+/// These two are the only members of `csp_services.c` that do not block: with no reply
+/// expected, `csp_transaction_persistent` returns straight after the send.
+pub fn c_client_reboot(dst: u16, shutdown_instead: bool) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: the shim owns the capture array and bounds-checks its indices. The reboot
+    // hook in this build records rather than rebooting (see `build.rs`). Callers hold `LOCK`.
+    unsafe {
+        if shim_client_reboot(dst, i32::from(shutdown_instead)) <= 0 {
+            return frames;
+        }
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
 }
 
 /// Bring up a real `csp_if_can` interface on the C node, with a capturing driver.
