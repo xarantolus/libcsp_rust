@@ -1,10 +1,17 @@
 # Three ways to turn libcsp into Rust, measured
 
 What actually happened when each approach was run end-to-end against libcsp
-(`xarantolus/libcsp` @ `13a8c841`, 50 translation units, 8 527 lines of C).
+(`xarantolus/libcsp` @ `13a8c841`, **68 translation units, 11 692 lines of C**).
 
-Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
+Nothing here is estimated, and every size figure below is produced by
+`ctest/tools/loc.py`, which states the definition it counts by. `just numbers` checks this
+file against it. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 (`port/c2rust-safer`), and the `csp-core` source on `port/llm`.
+
+**What each column is measured on.** The two c2rust columns describe *the transpiler's
+output* — the `transpiled/` tree on those branches — not the branch as a whole. Those
+branches also carry the hand port, so a branch-wide count would report the hand port's
+numbers three times. The `hand port` column is `csp-core/src` + `csp/src` on `port/llm`.
 
 ## Scoreboard
 
@@ -17,20 +24,24 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | `static mut` | **90** | 90 | **0** |
 | `extern "C"` | 486 | 486 | 0 |
 | raw pointers | **2 709** | 2 709 | 0 |
-| Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **8 353 (0.89×)** |
-| Rust LOC (tests) | 0 | 0 | 7 568 |
+| Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 095 (0.95×)** |
+| Rust LOC (tests) | 0 | 0 | 14 951 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
 | Tests passing | 0 | 0 | **553** |
 | Differential tests vs the C | 0 | 0 | **82** |
 | Two nodes in one process | no | no | **yes** |
 
-The implementation figure grew from 5 451 to 8 353 during the audit phase, and that is the
-most useful number in the table. The 0.64× version was **missing functionality** — the
-default-interface routing fan-out, the CMP memory hooks, `csp_socket_close`,
-`csp_ping_noreply`, several interface counters — and it looked finished because every
-module in the goal list had a file with its name on it. Counting public C functions rather
-than module names is what exposed it. All 186 are now accounted for: covered, replaced by
-a different mechanism, or deferred by an explicit decision recorded in `SCOPE.md`.
+The implementation figure has roughly doubled since the first "the port is complete", and
+that growth is the most useful number in the table. The early version was **missing
+functionality** — the default-interface routing fan-out, the CMP memory hooks,
+`csp_socket_close`, `csp_ping_noreply`, several interface counters — and it looked finished
+because every module in the goal list had a file with its name on it. Counting public C
+functions rather than module names is what exposed it. All **199** `csp_*` functions
+declared in `libcsp/include/csp/**.h` are now accounted for — 147 ported, 47 out of scope,
+5 deferred by an explicit decision — and `just api` fails if that stops being true.
+
+*(This paragraph said 186 for months, after `SCOPE.md` had already recorded that 186 "is
+not reproducible by either method". The figure the tool measures is 199.)*
 
 ## corrode — ruled out without running
 
@@ -181,7 +192,8 @@ was absent — meaning a node with two redundant routes to a subnet would have u
 and reported nothing. The suite did not catch it because the suite tested what the port
 implemented.
 
-What caught it was enumerating the C's 186 public functions and checking each one off, then
+What caught it was enumerating the C's public functions — 199 of them, by the count
+`just api` now makes — and checking each one off, then
 auditing each module against its original function by function. That found:
 
 - entire behaviours missing (the fan-out, the CMP memory hooks, `csp_socket_close`);
