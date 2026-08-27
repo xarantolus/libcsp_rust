@@ -25,7 +25,7 @@ numbers three times. The `hand port` column is `csp-core/src` + `csp/src` on `po
 | `extern "C"` | 486 | 486 | 0 |
 | raw pointers | **2 709** | 2 709 | 0 |
 | Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 227 (0.96×)** |
-| Rust LOC (tests) | 0 | 0 | 15 075 |
+| Rust LOC (tests) | 0 | 0 | 15 173 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
 | Tests passing | 0 | 0 | **566** |
 | Differential tests vs the C | 0 | 0 | **95** |
