@@ -191,6 +191,8 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     pub routes: crate::route_policy::rtable::Table<16>,
     /// Bound ports.
     bound: [bool; PORTS],
+    /// The catch-all, libcsp's `csp_bind(socket, CSP_ANY)`.
+    any_bound: bool,
     /// Promiscuous tap: slot indices of cloned packets awaiting collection.
     promisc: [Option<u16>; 8],
     promisc_len: usize,
@@ -252,6 +254,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             last_now_ms: 0,
             routes: crate::route_policy::rtable::Table::new(version),
             bound: [false; PORTS],
+            any_bound: false,
             promisc: [None; 8],
             promisc_len: 0,
             promisc_enabled: false,
@@ -283,6 +286,42 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
         self.bound[i] = true;
         Ok(())
+    }
+
+    /// Bind the catch-all — libcsp's `csp_bind(socket, CSP_ANY)`.
+    ///
+    /// Every port in range with no bind of its own is then delivered rather than dropped.
+    /// `csp_port_get_socket` (`csp_port.c:54`) does this by keeping the catch-all in a slot
+    /// past the port array and reaching it only when the packet's own port has no socket,
+    /// so an explicit bind still wins.
+    ///
+    /// The C's ceiling is `CSP_PORT_MAX_BIND`: a packet for a port above it is dropped even
+    /// with the catch-all bound, and never forwarded either. `PORTS` is that ceiling here.
+    ///
+    /// Idempotent, like the delivery decision it controls — unlike [`bind`](Self::bind),
+    /// which reports a second bind of the same port as `TableFull` because the C does.
+    pub fn bind_any(&mut self) {
+        self.any_bound = true;
+    }
+
+    /// Release the catch-all, closing every connection it alone was serving.
+    ///
+    /// Returns how many connections were closed and the slot indices to release, with the
+    /// same call-again contract as [`unbind`](Self::unbind): it stops when `drained` cannot
+    /// hold another whole receive queue.
+    pub fn unbind_any(&mut self, drained: &mut [u16]) -> (usize, usize) {
+        self.any_bound = false;
+        let (mut closed, mut n) = (0usize, 0usize);
+        for port in 0..PORTS.min(u8::MAX as usize + 1) {
+            if self.bound[port] || drained.len() - n < RXQ {
+                continue;
+            }
+            let (c, k) = self.conns.close_port(port as u8, &mut drained[n..]);
+            closed += c;
+            n += k;
+        }
+        self.purge_dead_accepts();
+        (closed, n)
     }
 
     /// Release a port.
@@ -326,9 +365,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
     }
 
-    /// True if `port` is bound.
+    /// True if a packet for `port` has somewhere to go — an explicit bind, or the catch-all.
+    ///
+    /// This is `csp_port_get_socket(port) != NULL`: the C answers with the catch-all socket
+    /// for a port nothing bound specifically, and with `NULL` for any port above
+    /// `CSP_PORT_MAX_BIND` whether or not the catch-all is bound.
     pub fn is_bound(&self, port: u8) -> bool {
-        (port as usize) < PORTS && self.bound[port as usize]
+        (port as usize) < PORTS && (self.bound[port as usize] || self.any_bound)
     }
 
     /// Turn the promiscuous tap on or off.

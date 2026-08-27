@@ -1848,6 +1848,28 @@ whoever maintains the fork can see what was found and decide for themselves.
     `sfp::a_transfer_that_stops_early_still_reports_its_last_write` — the two agree on
     `writes` and on the bytes delivered and disagree only on `ret`, which is the point:
     the same data, one stack calling it a success.
+31. **`csp_socket_close` frees connections as if they were packets, and so frees nothing.**
+    It dequeues `socket->rx_queue` into a `csp_packet_t *` and calls `csp_buffer_free` on
+    each (`csp_port.c:150`). For a connection-oriented socket that queue holds
+    `csp_conn_t *` — `csp_route.c:194` enqueues the connection, `csp_accept` dequeues one.
+    So the pointer handed to `csp_buffer_free` is a connection; its `CONTAINER_OF` steps
+    backwards off the front of the connection object, the `skbf_addr` check fails, and it
+    returns having done nothing.
+
+    Measured on 2026-08-27, not read: closing a catch-all socket that holds one unaccepted
+    connection with one unread packet leaves the free-buffer count unchanged and sets
+    `csp_dbg_errno` to `CSP_DBG_ERR_CORRUPT_BUFFER` (1). The connection stays open and its
+    packet stays held, for a port nothing serves any more, with nothing left to release it.
+    It is also a read of the word before a connection — which would corrupt the pool rather
+    than trip the guard if that word ever held the connection's own address.
+
+    Deviation 25 above says that queue "has just been drained". That was a reading of the
+    loop and it is wrong: the loop runs and frees nothing.
+
+    `Node::unbind` and `Node::unbind_any` close the connections and hand their buffers back,
+    a deliberate divergence in the port's favour and the direction `unbind` already had to
+    be fixed in once. `difftest/tests/node_bind_any.rs` asserts the **divergence** rather
+    than equality, so a change back toward the C fails.
 
 ---
 
@@ -3221,3 +3243,78 @@ The control is `mem::forget` on the unbound-port drop. It fails at *"the pool wa
 231 exchanges"* rather than at the final comparison — a leak large enough becomes fatal before
 the count is checked, which is the more informative failure of the two. The final assertion
 still earns its place for a leak too slow to exhaust twenty-four buffers.
+
+### `csp_bind(socket, CSP_ANY)` — mapped as ported, and absent
+
+2026-08-27. The prompt's list of untested node behaviour is now stale: the corpus covers the
+`{plain,SFP}×{no RDP,RDP}` matrix, both shape mismatches, broadcast, dedup, the promiscuous
+tap, RDP against a real peer, CMP served by a real node, and connection-table exhaustion and
+reuse. `Router::forward` no longer uses single-destination `routes.find` either — it goes
+through `route_policy::destinations`, and `route::two_owning_links_send_two_frames` /
+`two_default_interfaces_send_two_frames` / `a_local_subnet_beats_the_default_interface` pin
+the fan-out and the fallback against the C. Both named targets are closed.
+
+Checking the other standing question — which libcsp `.c` file is in neither harness's build,
+the shape that produced the bridge, CAN and i2c findings — turned up nothing either: the four
+left out are `csp_yaml.c`, `csp_if_tun.c`, `csp_if_udp.c` and `csp_if_zmqhub.c`, all
+deliberately out of scope. So the search moved to the C's *port table*, which nothing in
+either harness had ever mentioned.
+
+**`csp_bind(socket, CSP_ANY)` had no counterpart in the port.** `Router::bind` set a flag in
+`[bool; PORTS]` and that was the whole of it; `Node` had no catch-all in any form; and
+`ctest/tools/api_map.tsv` recorded `csp_bind` as plain `ported`. Two comments in
+`csp/src/router.rs` — justifying the single `endpoint_opts` policy and the single accept queue
+— argue from *"every consumer of the C binds `CSP_ANY`"*, and `SCOPE.md` defers
+`csp_bind_callback` on the same grounds. The idiom the design is built around was the one the
+API could not express. A firmware written the way those comments describe would have come up
+with a node that delivered nothing.
+
+Measured against a real node before writing any of it, then re-measured after:
+
+- The catch-all takes every port that has no bind of its own, and does not also forward it.
+- An explicit bind still wins, and the packet arrives **once**, not twice.
+- `CSP_PORT_MAX_BIND` bounds the catch-all too: `csp_port_get_socket` returns NULL for a port
+  above it before it ever looks at the catch-all slot, so port 17 is dropped — and not
+  forwarded — however the node is bound. Port 16 is delivered. `PORTS` is exactly
+  `CSP_PORT_MAX_BIND + 1`, and the test node is built with 17 so the two stacks are being
+  asked the same question.
+
+`Router::bind_any` / `unbind_any` and `Node::bind_any` / `unbind_any` now exist,
+`is_bound` is `csp_port_get_socket(port) != NULL`, and four mutations cover the rules.
+
+**Two things I got wrong.** The first version of the release stage passed with `unbind_any`
+deleted entirely: it asked for the "released" outcome by building a node that had never bound
+the catch-all, which exercises no release path at all. A single `bool` could not tell the two
+experiments apart; the `Catch::{Never,Bound,Released}` enum is there because of that, not for
+tidiness. And the stage asserted that `csp_socket_close` gives the buffer back — read off the
+`while (csp_queue_dequeue(...)) csp_buffer_free(packet)` loop, never measured. It does not:
+that queue holds connections, not packets. See deviation 31.
+
+### A mutation that matches twice tests whichever site comes first
+
+Same cycle, found by the first of the two mistakes above. Adding `unbind_any` next to
+`unbind` gave `csp/src/node.rs` two drain loops opening with the same three lines, and
+`mutants.py` applies its patterns with `str.replace(old, new, 1)`. So *"drain: unbind loops
+and sizes by RXQ"* silently moved to `unbind_any` — where the pool is too small to tell the
+loop apart from one fixed-size pass — and reported **NOTHING NOTICED**. Which reads exactly
+like a hole in the tests, and was not one.
+
+The tool now refuses a pattern that matches more than once (`MUTATION IS AMBIGUOUS`), and
+that refusal immediately named **four more, all pre-existing**:
+
+| mutation | matched | had been mutating |
+|---|---|---|
+| `rdp: the initiator answers SYN\|ACK` | 2 | the right site, by luck of file order |
+| `sfp: the trailer goes after the payload` | 2 | the right site — the SFP closure is 8-space indented, the RDP one 12, and the shallower pattern is a substring of the deeper line |
+| `rdp: the trailer is stripped before delivery` | 2 | **the held path**, not the delivered one |
+| `rdp: the node acknowledges data it delivers` | 2 | the right site, by luck of file order |
+
+Three of the four happened to land where their name says. One did not: the strip mutation
+has been reporting on `Action::Hold` while claiming `Action::Deliver`. Every one of them was
+reported green every run, which is the point — an ambiguous pattern gives an answer about a
+site nobody chose, and green tells you nothing about which.
+
+Each is now anchored on the line after it, and the site each was shadowing became a mutation
+of its own: `rdp: an out-of-window packet is re-acknowledged`, `rdp: the trailer goes after
+the payload`, `rdp: a held packet is stripped too`, `rdp: the ack timer fires from tick`.
+177 mutations, all applying to exactly one site, all noticed.
