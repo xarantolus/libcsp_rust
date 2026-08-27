@@ -706,11 +706,11 @@ function-level answer: every `csp_*` declared in `libcsp/include/csp/**.h` — *
 fails on any function missing from the map, any row naming a function that no longer exists,
 and any `ported` row naming a Rust item that does not.
 
-**199 = 152 ported + 42 out-of-scope + 5 deferred.**
+**199 = 148 ported + 46 out-of-scope + 5 deferred.**
 
 The five not ported, all by prior decision: `csp_yaml_init` (`yaml`, off, no C oracle),
 `csp_if_tun_init` with `csp_crypto_encrypt`/`csp_crypto_decrypt` (`if-tun` and its two
-hooks), and `csp_bind_callback`. The 42 are arch shims, `src/drivers`, the ZeroMQ hub, and
+hooks), and `csp_bind_callback`. The 46 are arch shims, `src/drivers`, the ZeroMQ hub, and
 the printf-style diagnostics SCOPE.md's own "deliberately not ported" section names.
 
 Writing the map found one wrong entry of mine immediately: I had `csp_hex_dump` as ported to
@@ -725,6 +725,44 @@ matters least — a tool that cries wolf gets ignored, and then the one real row
 behaves like the C; a grep proves spelling. Equivalence is what the 126 corpus records, the
 510 golden vector lines and the 33 differential tests are for. The map answers "is anything
 unaccounted for", which is a different and previously unanswered question.
+
+#### The map was at module granularity again, one level down
+
+2026-08-27. The third check above — "every `ported` row names a Rust item that exists" — was
+worth much less than it reads. Measured across the 152 rows it then had: **28 distinct Rust
+names, 148 rows sharing a target with at least one other row.** A row was allowed to name the
+*type* that holds the method, so `csp_iflist_get_by_broadcast` → `csp::iflist::IfList` passed
+for as long as the struct existed, whatever became of `get_by_broadcast`. Eighteen rows
+resolved to a bare module name. That is the module-granularity failure this map was written
+to stop, re-formed inside the map itself, one level down — and the docstring asserting "only
+an inventory at function granularity can catch that" sat directly above a check that was not
+enforcing function granularity.
+
+The fix is a fourth check: a `ported` row must name something the tool sees defined as `fn`.
+Retargeting 139 rows took it to **115 distinct targets**. The rest still share one, and
+correctly — the port folds several C entry points into a single function (`csp_buffer_get`
+with `csp_buffer_get_isr`; the three `csp_transaction` variants) — but every target is now a
+function that can be noticed going missing.
+
+Measuring the result found the same flaw once more, one level further down: check 4 looks the
+name up *workspace-wide*, and **57 of the 148 rows name a function that is defined in more
+than one module** — `new` in nineteen of them. So a row could keep passing after its own
+target was deleted, carried by an unrelated `fn` of the same name. Check 5 resolves the path
+to the module it names and requires the function to be defined there, which makes a row a
+pointer rather than a spelling. All 148 already satisfied it, so it changed no verdict today —
+its value is that the next deletion cannot hide behind a namesake. Two controls confirm it
+bites: repointing `csp_accept` at `csp::conn::Table::accept` (a real `accept`, wrong module)
+and renaming `IfList::find_by_broadcast` in place each fail the run.
+
+Four rows turned out not to be `ported` at all once a *function* had to be named, and moved to
+`out-of-scope` (42 → 46): `csp_id_clear` and `csp_id_copy` (zeroing and struct assignment —
+`Id` is `Copy`, so the second is the `=` operator), `csp_panic` (an abort hook; the port
+returns errors), and `csp_bytesize` (printf-style formatting).
+
+The transferable part, now true twice: **a completeness check is only as strong as the
+granularity of the thing it names, and that granularity is a measurement, not a property of
+the checker's docstring.** What matters is not how many rows pass but how many distinct things
+they pin — 152 and 28 were the same run.
 
 ### A malformed SYN got an RST *and* an accepted connection
 
