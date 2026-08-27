@@ -2191,3 +2191,55 @@ it, so at 24 buffers the port runs out of *connections* where the C runs out of 
 and "how many peers were accepted" would have compared two different experiments. This
 file's node is `<8, 15, ...>`. A difference there would have been entirely the harness's, and
 I would have had a plausible-looking port defect to report.
+
+### The port acknowledged packets it then dropped
+
+2026-08-27. `csp_rdp_check_ack` opens with a gate the acknowledgement conditions never see:
+`abs(CSP_CONN_RXQUEUE_LEN - queue_size) < window_size` — while a connection has less than a
+window of spare room the C sends **no** acknowledgement, whatever the delay count or the ack
+timeout say. The C's own comment gives the reason: *"Only ACK the message if there is room
+for a full window in the RX buffer."*
+
+`acks_stop_when_the_application_is_not_reading` recorded that this never fires, which was
+true only of its numbers: with `window_size` 4 the gate needs 13 packets queued and 15
+buffers cap an unread connection at 12. Proposing a window of 5 moves the threshold to 12,
+which the pool can reach. Measured: **13 delivered, 11 acknowledged, the 12th onward silent.**
+
+The port had no such gate, and worse, acknowledged **before** attempting the enqueue.
+Measured against a real C peer: it sent 12, the application could read 8, and **4 packets
+were acknowledged to a peer that will never see them** — and which had already released its
+only copy. That is not weaker flow control, it is a broken promise: RDP's contract is that
+an acknowledged packet was received.
+
+Three parts to the fix, and each needs the others:
+
+1. The acknowledgement follows a successful enqueue, so nothing dropped is ever promised.
+2. The gate, so the peer stalls before the queue can overflow.
+3. `Node::read` acknowledges once space frees, or the stall is permanent and the connection
+   is wedged — `csp_io.c:67` does the same inside `csp_read`.
+
+The gate applies only when `RXQ` is deeper than the peer's window. The C never meets that
+condition (`CSP_CONN_RXQUEUE_LEN` 16 against a maximum window of 5); `RXQ` here is a const
+generic and may be smaller. Gating unconditionally made `spare < window` true from the first
+packet, and such a node acknowledged nothing at all — caught by
+`a_delay_count_beyond_the_window_is_bound_by_it`, whose node is `RXQ` 4 against a clamped
+window of 5. A second existing record caught `Node::read` passing a literal `0` for the
+clock, which wrapped `should_ack`'s timeout comparison and fired on every packet. Both were
+bugs in the fix, both caught by records already in the corpus.
+
+Covered by `rdp::the_receive_queue_gate_stops_acknowledgements` and two node tests: the
+stall-and-resume cycle, and the `RXQ <= window` configuration where the gate stands aside and
+the queue genuinely overflows — the only one in which part 1 is reachable at all, since with
+the gate on the peer is stalled before the queue can fill.
+
+**Two process failures worth recording.**
+
+The probe that found this drove the C's sender, and once the port stopped acknowledging
+`csp_rdp_send` blocked on its semaphore and the harness hung. The block *is* the
+back-pressure working, but it means a probe shaped that way cannot survive its own success;
+the durable test drives the port directly.
+
+And reverting a control mutation with `git checkout csp/src/router.rs` **discarded the entire
+fix**, which was uncommitted in that same file. Rebuilt from the conversation. A whole-file
+checkout is not an undo for a one-line experiment when the file holds work in progress —
+this is the second time, and the first is already written down elsewhere in this file.

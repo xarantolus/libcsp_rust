@@ -30,6 +30,7 @@
 {"suite":"rdp","case":"the_delay_count_fires_one_packet_after_it","verdict":"must_match","input":{"delayed_acks":1,"ack_delay_count":2},"observed":{"acks_after_n_packets":[0,0,1,1,1]}}
 {"suite":"rdp","case":"an_ack_is_sent_even_with_nothing_to_acknowledge","verdict":"diverges","input":{"delayed_acks":0,"packets_since_last_ack":0},"observed":{"acks":1}}
 {"suite":"rdp","case":"acks_stop_when_the_application_is_not_reading","verdict":"must_match","input":{"delivered":12,"rxqueue_len":16,"buffer_count":15,"window_size":4},"observed":{"acks":12,"last_acked_packet":12}}
+{"suite":"rdp","case":"the_receive_queue_gate_stops_acknowledgements","verdict":"must_match","input":{"window_size":5,"rxqueue_len":16,"buffer_count":15,"delivered":13},"observed":{"acks":11,"first_unacked":12}}
 {"suite":"promisc","case":"read_transfers_ownership","verdict":"must_match","input":{"packets_tapped":1},"observed":{"tap_consumed_a_buffer":1,"tapped_is_a_distinct_packet":1,"tapped_payload_matches":1,"buffers_back_after_free":1,"second_read_empty":1}}
 {"suite":"promisc","case":"two_tapped_packets_come_back_once_each","verdict":"must_match","input":{"packets_tapped":2},"observed":{"first_tag":161,"second_tag":178,"tags_differ":1,"third_read_empty":1,"buffers_lost":0}}
 {"suite":"promisc","case":"the_tap_sees_a_locally_delivered_packet","verdict":"must_match","observed":{"tapped":1,"delivered":1,"forwarded":0,"buffers_lost":0}}

@@ -280,6 +280,15 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
 
     /// Queue a received packet index onto a connection.
     ///
+    /// Spare room in the receive queue, in packets.
+    ///
+    /// The C gates acknowledgement on this: `csp_rdp_check_ack` sends nothing while
+    /// `CSP_CONN_RXQUEUE_LEN - queue_size` is below a window, so a peer stalls rather than
+    /// overflowing a connection whose application has stopped reading.
+    pub fn rx_spare(&self, h: Handle) -> Result<usize> {
+        Ok(RXQ - self.entry(h)?.rx_len)
+    }
+
     /// Returns `false` if the receive queue is full, in which case the caller must release
     /// the packet. Reports rather than silently overwriting.
     pub fn enqueue_rx(&mut self, h: Handle, packet_idx: u16) -> Result<bool> {
