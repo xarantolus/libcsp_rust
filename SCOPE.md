@@ -3033,3 +3033,34 @@ Two controls bite it: reading the SFP trailer from the front instead of the end,
 classifying a fragment as a datagram. A third — disabling the offset check — does not, and
 correctly so: these fragments are well-formed and in order, and the existing
 `sfp: fragment order` mutation is noticed by `a_fragment_at_the_wrong_offset_is_refused`.
+
+### The promiscuous tap was compared on its count and its destination, never its bytes
+
+2026-08-27. The previous cycle's finding came from noticing `node_can.rs` covers CAN in both
+directions where `node_sfp.rs` covered one. Generalising that: **for each differential file,
+what does it actually compare?** Measured across all twenty-one — `node_promisc.rs` and
+`node_dedup.rs` never inspect a payload at all.
+
+For dedup that is defensible: the count *is* the behaviour, delivered once versus twice. For
+the promiscuous tap it is not. The tap exists so an application gets a **copy of the frame**,
+and a copy that was truncated, taken from the wrong packet, or handed back with the header
+still on the front reports the same count and the same destination. The file compared exactly
+those two.
+
+**Measured: the port taps the same bytes as the C** — `["mine", "onward"]`, payload with the
+header already stripped, for a packet addressed to this node and one being forwarded. No
+defect; what was missing was the assertion. A control that shortens the tapped copy fails it.
+
+Three things worth writing down from getting there:
+
+- **I asserted a payload literal I had not measured.** The first version expected `"for-me"`
+  where the test sends `"mine"`, and the C said so. Reading the frame the test builds took ten
+  seconds and I did not do it — the same shape as asserting the C reclaims a stalled pbuf two
+  cycles ago.
+- **A control that changes nothing the assertion reads is not a control.** Making the tap
+  `prepend_header` into its copy looked like it would produce framed bytes; `with_payload`
+  returns the payload independently of where `frame_begin` points, so the test passed and
+  proved nothing. The control that works shortens the payload itself.
+- `with_payload_mut`'s slice is the **buffer's capacity**, not the current payload — the
+  shortening control produced `"mine"` followed by a screen of zeroes rather than `"min"`.
+  That is why `send_fragment` reads `with_payload(<[u8]>::len)` before writing.
