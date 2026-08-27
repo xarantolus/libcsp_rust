@@ -919,6 +919,11 @@ fn rust_node_exchange_routed(
         match node.work(0) {
             Routed::Idle => break,
             Routed::Delivered { .. } => {}
+            // Nothing here binds a port connection-less, so this arm is unreachable; it
+            // exists so adding one would be a failing test rather than a silent skip.
+            Routed::DeliveredConnLess { port } => {
+                panic!("no port here is connection-less, yet {port} delivered as one")
+            }
             // A control frame the node produced on its own behalf (RDP). Nothing in *this*
             // file sends the port an RDP packet, so nothing should reach this arm;
             // releasing the buffer keeps a stray one from looking like a leak instead of a

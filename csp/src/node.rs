@@ -279,6 +279,19 @@ impl<
         self.router.bind(port)
     }
 
+    /// Bind a port **connection-less** — `csp_bind` on a socket carrying
+    /// `CSP_SO_CONN_LESS`.
+    ///
+    /// Packets for it are read with [`recvfrom`](Self::recvfrom) and never become a
+    /// connection, so a server on such a port costs nothing from the connection table
+    /// however many peers write to it. That is the C's own answer to a sink with more
+    /// senders than connections, and the port had no equivalent: `recvfrom` drained the
+    /// connection table and stopped at `CONNS` where a real node kept going until its
+    /// buffer pool ran out.
+    pub fn bind_conn_less(&mut self, port: u8) -> Result<()> {
+        self.router.bind_conn_less(port)
+    }
+
     /// Bind the catch-all, so every port with no bind of its own is delivered too.
     ///
     /// This is `csp_bind(socket, CSP_ANY)`, which is how both surveyed firmware consumers
@@ -797,21 +810,20 @@ impl<
         Ok(self.route(packet, id))
     }
 
-    /// Receive on a bound port without a connection.
+    /// Take the next packet from a [`bind_conn_less`](Self::bind_conn_less) port.
     ///
-    /// Drains the next connection that has data and hands back the packet with the header
-    /// it arrived with, closing the connection. This is `csp_recvfrom`: the
-    /// connection-less server pattern.
+    /// This is `csp_recvfrom`, and like it, it answers only for a connection-less port:
+    /// `csp_recvfrom` returns NULL for a socket without `CSP_SO_CONN_LESS`
+    /// (`csp_io.c:379`), and an ordinary bound port is read with
+    /// [`accept`](Self::accept) + [`read`](Self::read).
+    ///
+    /// The packet carries the header it arrived with, so the sender is `id().src` /
+    /// `id().sport` — there is no connection to ask.
     pub fn recvfrom(&mut self) -> Result<Option<Packet<'a, BUFS, BUFSZ>>> {
-        let Some(conn) = self.accept() else {
-            return Ok(None);
-        };
-        let packet = match self.router.conns.dequeue_rx(conn)? {
-            Some(idx) => self.pool().from_index(idx),
-            None => None,
-        };
-        self.close(conn)?;
-        Ok(packet)
+        Ok(self
+            .router
+            .take_conn_less()
+            .and_then(|idx| self.pool().from_index(idx)))
     }
 
     /// Wait for a reply on a connection, driving the router meanwhile.
@@ -2108,11 +2120,13 @@ mod tests {
         );
     }
 
+    /// A packet arriving on a connection-less port keeps the sender in its own header —
+    /// there is no connection to ask who sent it.
     #[test]
-    fn recvfrom_returns_a_packet_and_releases_the_connection() {
+    fn recvfrom_hands_back_the_packet_with_the_senders_header() {
         let s = S::new();
         let mut n = node(&s);
-        n.bind(20).unwrap();
+        n.bind_conn_less(20).unwrap();
         let mut p = n.packet().unwrap();
         p.set_id(Id {
             pri: 2,
@@ -2128,17 +2142,43 @@ mod tests {
 
         let got = n.recvfrom().unwrap().expect("a packet should be waiting");
         got.with_payload(|d| assert_eq!(d, b"connectionless"));
-        assert_eq!(
-            n.router.conns.open_count(),
-            0,
-            "the connection must be released"
-        );
+        assert_eq!((got.id().src, got.id().sport), (8, 10), "who sent it");
+        assert_eq!(got.id().dport, 20, "and which port it was for");
+    }
+
+    /// `csp_recvfrom` answers only for a `CSP_SO_CONN_LESS` socket (`csp_io.c:379`).
+    ///
+    /// The packet must still be delivered — to `accept` + `read`, the ordinary way — so
+    /// this is about which door it comes out of, not whether it arrives.
+    #[test]
+    fn recvfrom_says_nothing_about_an_ordinary_bound_port() {
+        let s = S::new();
+        let mut n = node(&s);
+        n.bind(20).unwrap();
+        let mut p = n.packet().unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(b"connection-oriented").unwrap();
+        n.router.receive(p, 0);
+        n.work(0);
+
+        assert!(n.recvfrom().unwrap().is_none(), "not a conn-less port");
+        let conn = n.accept().expect("but the ordinary path has it");
+        let got = n.read(conn).unwrap().expect("a packet");
+        got.with_payload(|d| assert_eq!(d, b"connection-oriented"));
     }
 
     #[test]
     fn recvfrom_on_an_idle_node_is_not_an_error() {
         let s = S::new();
         let mut n = node(&s);
+        n.bind_conn_less(20).unwrap();
         assert!(n.recvfrom().unwrap().is_none());
     }
 
