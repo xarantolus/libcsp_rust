@@ -256,6 +256,15 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         Ok(self.entry(h)?.idin)
     }
 
+    /// Set the outgoing header.
+    ///
+    /// `connect` uses this to stamp the slot-derived source port, which it cannot know
+    /// before the slot is allocated.
+    pub fn set_id_out(&mut self, h: Handle, id: Id) -> Result<()> {
+        self.entry_mut(h)?.idout = id;
+        Ok(())
+    }
+
     /// Set the incoming header, as the router does when a connection is accepted.
     pub fn set_id_in(&mut self, h: Handle, id: Id) -> Result<()> {
         self.entry_mut(h)?.idin = id;
