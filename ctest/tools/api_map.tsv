@@ -196,5 +196,5 @@ csp_eth_pack_header	ported	csp_core::eth::encode
 csp_eth_unpack_header	ported	csp_core::eth::decode
 csp_eth_arp_get_addr	ported	csp_core::eth::lookup
 csp_eth_arp_set_addr	ported	csp_core::eth::learn
-csp_if_udp_init	ported	csp::iface::Interface::new
+csp_if_udp_init	out-of-scope	POSIX sockets and a pthread; its only CSP lines are the prepend/strip every interface does
 csp_hex_dump	out-of-scope	deliberately not ported (SCOPE.md): a no_std crate has no business owning a variadic formatter
