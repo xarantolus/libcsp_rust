@@ -1131,6 +1131,20 @@ fn a_packet_for_another_node_is_forwarded_onto_the_wire() {
 /// Delivery, forwarding and dropping all take a buffer out of the pool; each must put it
 /// back. The C's own robustness suite exists to catch this, and a leak here would starve
 /// the node in orbit long after the packet that caused it was forgotten.
+/// The same spread of destinations for both halves of the leak test: delivered, forwarded,
+/// no route, and a bound node with an unbound port. Shared so the two cannot drift apart and
+/// quietly stop covering the same outcomes.
+fn pick(rng: &mut Rng) -> (u16, u8) {
+    let dst = match rng.next() % 4 {
+        0 => NODE_ADDR, // to us, bound port
+        1 => 18,        // forwardable, egress subnet
+        2 => 2,         // no route, no interface subnet
+        _ => NODE_ADDR, // to us, unbound port below
+    };
+    let dport = if rng.next() % 4 == 3 { 11 } else { 10 };
+    (dst, dport)
+}
+
 #[test]
 fn no_path_through_the_node_leaks_a_buffer() {
     let _g = lock();
@@ -1145,13 +1159,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
     for _ in 0..400 {
         // A spread across every outcome: delivered, forwarded, dropped for no route,
         // dropped for an unbound port.
-        let dst = match rng.next() % 4 {
-            0 => NODE_ADDR, // to us, bound port
-            1 => 18,        // forwardable, egress subnet
-            2 => 2,         // no route, no interface subnet
-            _ => NODE_ADDR, // to us, unbound port below
-        };
-        let dport = if rng.next() % 4 == 3 { 11 } else { 10 };
+        let (dst, dport) = pick(&mut rng);
         let id = Id {
             pri: 2,
             flags: 0,
@@ -1173,6 +1181,84 @@ fn no_path_through_the_node_leaks_a_buffer() {
         "the C node leaked {} buffers over 400 exchanges",
         before - c_node_buf_free()
     );
+
+    // --- and the port, over the same spread of outcomes ---
+    //
+    // The half above asserts a property of **libcsp**. It is named for "the node" and
+    // reads as though it covers both, which is how it sat here as the whole of
+    // "buffer accounting at node level" while never constructing a port node.
+    //
+    // A node that leaks one buffer per dropped packet dies after a few hundred of them,
+    // and dropped packets are the ordinary case for a router. Taking ownership on
+    // `Forwarded` is the application's job, so the loop does it: not taking it would be
+    // a leak in the test, not the port.
+    let storage = NodeStorage::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(version).address(NODE_ADDR));
+    node.ifaces.add("INGRESS", NODE_ADDR, 2, false).unwrap();
+    node.ifaces.add("EGRESS", EGRESS_ADDR, 2, true).unwrap();
+    node.bind(10).unwrap();
+
+    let free_before = node.buffers_free();
+    let mut rng = Rng(0x0DE_0002);
+    let mut outcomes = [0u32; 4];
+
+    for _ in 0..400 {
+        let (dst, dport) = pick(&mut rng);
+        let len = (rng.next() % 20) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let frame = framed(
+            version,
+            Id {
+                pri: 2,
+                flags: 0,
+                src: 3,
+                dst,
+                dport,
+                sport: 4,
+            },
+            &payload,
+        );
+
+        let Some(mut p) = node.packet() else {
+            panic!(
+                "the pool was empty after {} exchanges",
+                outcomes.iter().sum::<u32>()
+            );
+        };
+        p.set_frame(version, &frame).unwrap();
+        node.router.receive(p, 0);
+
+        loop {
+            match node.work(0) {
+                Routed::Delivered { conn, .. } => {
+                    outcomes[0] += 1;
+                    while let Ok(Some(pkt)) = node.read(conn) {
+                        drop(pkt);
+                    }
+                    let _ = node.close(conn);
+                }
+                Routed::Forwarded { packet, .. } => {
+                    outcomes[1] += 1;
+                    drop(node.take_forwarded(packet));
+                }
+                Routed::Dropped(_) => outcomes[2] += 1,
+                Routed::Idle => break,
+                _ => outcomes[3] += 1,
+            }
+        }
+    }
+
+    assert_eq!(
+        node.buffers_free(),
+        free_before,
+        "the port leaked {} buffers over 400 exchanges",
+        free_before - node.buffers_free()
+    );
+    // Every outcome must actually have happened, or "no leak" is a claim about a path
+    // the loop never took.
+    assert!(outcomes[0] > 0, "nothing was delivered");
+    assert!(outcomes[1] > 0, "nothing was forwarded");
+    assert!(outcomes[2] > 0, "nothing was dropped");
 }
 
 /// An interface whose subnet contains the destination wins over the routing table.
