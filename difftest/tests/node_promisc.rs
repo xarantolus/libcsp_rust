@@ -132,6 +132,22 @@ fn the_promiscuous_tap_matches_the_c() {
          everything being forwarded, which is most of what a router sees"
     );
 
+    // And the bytes, not only the destination and the count. `csp_promisc_add` clones the
+    // packet where the router stands at that moment, so what the tap yields is a statement
+    // about *when* it is taken as much as what it copies: a tap on the far side of
+    // `csp_id_prepend` would hand back framed bytes with a header on the front.
+    let c_bodies: Vec<Vec<u8>> = c_tapped.iter().map(|(_, b)| b.clone()).collect();
+    assert_eq!(
+        c_bodies,
+        vec![b"mine".to_vec(), b"onward".to_vec()],
+        "the C taps the payload, header already stripped"
+    );
+    assert_eq!(
+        r.bodies, c_bodies,
+        "and the port must tap the same bytes -- the count and the destination are equal \
+         for a tap that copied the wrong packet or truncated it"
+    );
+
     // --- a deduplicated frame is not tapped ---
     c_node_set_dedup(2);
     let dup = framed(
@@ -170,6 +186,8 @@ struct PromiscOutcome {
     delivered: usize,
     forwarded: usize,
     tapped: Vec<u16>,
+    /// The payload of each tapped packet, in order.
+    bodies: Vec<Vec<u8>>,
 }
 
 /// Feed frames to a fresh port node with the tap on, and report what each side saw.
@@ -211,6 +229,10 @@ fn rust_promisc_exchange(frames: &[&Vec<u8>], mode: DedupMode) -> PromiscOutcome
         }
         while let Some(tapped) = node.router.promisc_read(node.pool()) {
             out.tapped.push(tapped.id().dst);
+            // The payload as well as the destination. A tap that copied the wrong packet,
+            // truncated it, or handed back the framed bytes instead of the payload would
+            // report the right destination and the right count either way.
+            out.bodies.push(tapped.with_payload(<[u8]>::to_vec));
             drop(tapped);
         }
     }

@@ -133,6 +133,12 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # The tap's payload, not its count or its destination. node_promisc.rs compared only
+  # those two until the bytes were added, and a tap that copied the wrong packet or
+  # truncated it reports the same count and the same destination.
+  ("promisc: the tap copies the whole payload", "csp/src/router.rs",
+   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {\n                if let Some(copy) = packet.deep_copy() {",
+   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {\n                if let Some(mut copy) = packet.deep_copy() {\n                    copy.with_payload_mut(|b| (b.len().saturating_sub(1), true));"),
   # Aliases decide whether a command for the node's second address is delivered or
   # forwarded back out. Nothing named one until node_alias.rs.
   ("iflist: an alias is one of our addresses", "csp/src/iflist.rs",
