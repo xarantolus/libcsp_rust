@@ -61,6 +61,16 @@ pub enum Routed {
         /// Which connection it went to.
         conn: Handle,
     },
+    /// The packet went to the connection-less queue, for [`Node::recvfrom`].
+    ///
+    /// No connection was created and none was consulted — that is the whole difference
+    /// between a `CSP_SO_CONN_LESS` port and an ordinary one, and it is why a
+    /// connection-less server can take packets from more peers than the node has
+    /// connections.
+    DeliveredConnLess {
+        /// Destination port.
+        port: u8,
+    },
     /// The packet was addressed elsewhere and must go out on an interface.
     ///
     /// **The caller must send it.** `packet` is a pool slot index; turn it back into a
@@ -193,6 +203,16 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     bound: [bool; PORTS],
     /// The catch-all, libcsp's `csp_bind(socket, CSP_ANY)`.
     any_bound: bool,
+    /// Ports bound `CSP_SO_CONN_LESS`. Their packets go to [`Self::cl_rx`], not to a
+    /// connection.
+    conn_less: [bool; PORTS],
+    /// The connection-less receive queue: slot indices waiting for `recvfrom`.
+    ///
+    /// One queue for the node, not one per port, because the C's is one per *socket* and
+    /// both surveyed consumers bind at most one. `RXQ` is its length for the same reason
+    /// it is a connection's: the C sizes both with `CSP_CONN_RXQUEUE_LEN`.
+    cl_rx: [Option<u16>; RXQ],
+    cl_len: usize,
     /// Promiscuous tap: slot indices of cloned packets awaiting collection.
     promisc: [Option<u16>; 8],
     promisc_len: usize,
@@ -255,6 +275,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             routes: crate::route_policy::rtable::Table::new(version),
             bound: [false; PORTS],
             any_bound: false,
+            conn_less: [false; PORTS],
+            cl_rx: [None; RXQ],
+            cl_len: 0,
             promisc: [None; 8],
             promisc_len: 0,
             promisc_enabled: false,
@@ -286,6 +309,45 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         }
         self.bound[i] = true;
         Ok(())
+    }
+
+    /// Bind `port` connection-less — libcsp's `csp_bind` on a socket carrying
+    /// `CSP_SO_CONN_LESS`.
+    ///
+    /// Packets for it go straight to the node's connection-less queue, drained by
+    /// [`take_conn_less`](Self::take_conn_less). No connection is created, which is the
+    /// point: `csp_route_deliver_conn_less` (`csp_route.c:132`) enqueues the packet and
+    /// touches the connection pool not at all, so however many peers write to a
+    /// connection-less port, none of them costs a connection.
+    ///
+    /// Measured before this existed: the port stopped after `CONNS` senders where a real
+    /// node kept taking packets until its buffer pool ran out
+    /// (`difftest/tests/node_conn_less.rs`).
+    ///
+    /// The C decides connection-less by *socket*, so it wins even over a connection that
+    /// already matches the packet (`csp_route.c:296`) — checked before the connection
+    /// table, not after.
+    pub fn bind_conn_less(&mut self, port: u8) -> csp_core::Result<()> {
+        self.bind(port)?;
+        self.conn_less[port as usize] = true;
+        Ok(())
+    }
+
+    /// True if `port` was bound connection-less.
+    pub fn is_conn_less(&self, port: u8) -> bool {
+        (port as usize) < PORTS && self.conn_less[port as usize]
+    }
+
+    /// Take the next packet waiting on the connection-less queue, as a pool slot index.
+    pub fn take_conn_less(&mut self) -> Option<u16> {
+        if self.cl_len == 0 {
+            return None;
+        }
+        let slot = self.cl_rx[0]?;
+        self.cl_rx.copy_within(1..self.cl_len, 0);
+        self.cl_rx[self.cl_len - 1] = None;
+        self.cl_len -= 1;
+        Some(slot)
     }
 
     /// Bind the catch-all — libcsp's `csp_bind(socket, CSP_ANY)`.
@@ -642,6 +704,20 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 }
                 return Routed::Dropped(DropReason::Refused(refusal));
             }
+        }
+
+        // Connection-less delivery. The C decides this by *socket*, and checks it before
+        // it looks at the connection it already found (`csp_route.c:296`), so a
+        // connection-less port wins even when a connection matches the packet.
+        if self.is_conn_less(id.dport) {
+            if self.cl_len == self.cl_rx.len() {
+                self.counters.rx_queue_full += 1;
+                return Routed::Dropped(DropReason::ReceiveQueueFull);
+            }
+            self.cl_rx[self.cl_len] = Some(packet.into_index());
+            self.cl_len += 1;
+            self.counters.delivered += 1;
+            return Routed::DeliveredConnLess { port: id.dport };
         }
 
         // `is_new` decides whether the application is told about this connection. The C
