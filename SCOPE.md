@@ -3701,3 +3701,30 @@ later "fix" toward the C would fail rather than quietly make a moved peer unreac
 
 `csp_if_eth.c` and `csp_if_eth_pbuf.c` are now in `difftest`'s build too, which is what made
 any of this measurable.
+
+### Three rows mapped to a codec that byte-reverses the header
+
+2026-08-27, same shortlist again, and this one is a mapping error rather than a behaviour
+gap — the shape that produced the very first false "the port is complete".
+
+`csp_id_prepend_fixup_cspv1`, `csp_id_extract_fixup_cspv1` and `csp_id_strip_fixup_cspv1`
+were all recorded `ported` to `Id::encode` / `Id::decode`. They are not that codec:
+`csp_id1_prepend(packet, true)` swaps `htobe32` for `htole32` (`csp_id.c:57`), so at v1 the
+four header bytes come out in the **host's** byte order instead of network order. Measured,
+not read — the same `Id` through both paths at v1 gives one word written each way round, and
+the port's encoder matches the plain path and not the fixup. At v2 the fixup is
+`csp_id2_prepend` unchanged, and all three agree.
+
+The only caller anywhere in libcsp is `csp_if_zmqhub.c`. The ZeroMQ hub is out of scope by
+the agreed feature table, and rows 30 and 31 of the same map already said so for the hub's
+own halves of this feature. The three rows now say it too: **199 = 144 ported + 50
+out-of-scope + 5 deferred.** `difftest/tests/id_zmq_fixup.rs` keeps the measurement, so
+anyone who later wonders whether the port should speak the zmq fixup can see what it would
+have to produce.
+
+**And the breakdown itself is now checked.** COMPARISON.md stated `147 ported, 47 out of
+scope, 5 deferred` in the present tense, next to a total that `just numbers` did guard —
+so the total could not drift but its three parts could, and this cycle moved three of them
+in one edit. Four new checks compare the sentence against `just api`, each verified to fail
+on a one-off edit. That paragraph is the same one that spent months saying "All 186 are now
+accounted for"; the whole of it is now measured rather than asserted.

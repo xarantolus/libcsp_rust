@@ -27,8 +27,8 @@ numbers three times. The `hand port` column is `csp-core/src` + `csp/src` on `po
 | Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 220 (0.96×)** |
 | Rust LOC (tests) | 0 | 0 | 14 976 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **564** |
-| Differential tests vs the C | 0 | 0 | **93** |
+| Tests passing | 0 | 0 | **565** |
+| Differential tests vs the C | 0 | 0 | **94** |
 | Two nodes in one process | no | no | **yes** |
 
 The implementation figure has roughly doubled since the first "the port is complete", and
@@ -37,8 +37,9 @@ functionality** — the default-interface routing fan-out, the CMP memory hooks,
 `csp_socket_close`, `csp_ping_noreply`, several interface counters — and it looked finished
 because every module in the goal list had a file with its name on it. Counting public C
 functions rather than module names is what exposed it. All **199** `csp_*` functions
-declared in `libcsp/include/csp/**.h` are now accounted for — 147 ported, 47 out of scope,
-5 deferred by an explicit decision — and `just api` fails if that stops being true.
+declared in `libcsp/include/csp/**.h` are now accounted for — 144 ported, 50 out of scope,
+5 deferred by an explicit decision — and `just api` fails if that stops being true, as does
+`just numbers` if this sentence stops matching it.
 
 *(This paragraph said 186 for months, after `SCOPE.md` had already recorded that 186 "is
 not reproducible by either method". The figure the tool measures is 199.)*
