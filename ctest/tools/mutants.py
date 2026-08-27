@@ -152,6 +152,14 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # `check_default` has two branches and nothing had ever driven either: an early return
+  # when something is already default, and a sweep that marks everything else. What it
+  # decides is whether an unroutable packet is dropped or put on every link.
+  ("check_default: an existing default is left alone", "csp/src/iflist.rs",
+   "        if self.find_default().is_some() {\n            return 0;\n        }", "        {}"),
+  ("check_default: the sweep really marks", "csp/src/iflist.rs",
+   "            if let Some(e) = self.get_mut(i) {\n                e.is_default = true;\n                n += 1;\n            }",
+   "            if self.get_mut(i).is_some() {\n                n += 1;\n            }"),
   # The ARP table decides the destination MAC of every outgoing Ethernet frame. Neither
   # `csp_eth_arp_set_addr` nor `csp_eth_arp_get_addr` had ever been called by a harness, and
   # `ArpTable` had no caller anywhere.

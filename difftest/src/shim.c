@@ -16,6 +16,7 @@
 #include <csp/csp_sfp.h>
 #include <csp/csp_cmp.h>
 #include <csp/csp_hooks.h>
+#include <csp/interfaces/csp_if_lo.h>
 #include <csp/interfaces/csp_if_i2c.h>
 
 /* csp_id_* dispatch on the global csp_conf.version. */
@@ -519,6 +520,39 @@ int shim_node_pump(void) {
 	csp_qfifo_wake_up();
 	while (csp_route_work() == CSP_ERR_NONE) { n++; }
 	return n;
+}
+
+/* --- the default-interface convenience ----------------------------------- */
+
+/*
+ * `csp_iflist_check_dfl`: if no interface is marked default, mark every one except the
+ * loopback (`csp_iflist.c:148`).
+ *
+ * Nothing in libcsp calls it. It is declared in `csp_iflist.h`, documented in the RST, and
+ * grepping the whole tree finds the definition and no caller -- `csp_init` registers
+ * loopback and touches `is_default` on nothing. So a stock C node has **no** default
+ * interface unless its application says so, either by setting the field or by calling this.
+ *
+ * These two entry points make both of its branches reachable: the early return when
+ * something is already default, and the sweep when nothing is. Clearing is not a libcsp
+ * operation -- it writes the same public struct field an application sets -- and it exists
+ * because the harness's own EGRESS is registered as a default.
+ */
+void shim_iflist_check_dfl(void) {
+	csp_iflist_check_dfl();
+}
+
+void shim_iflist_clear_dfl(void) {
+	shim_node_iface.is_default = 0;
+	shim_node_iface_b.is_default = 0;
+	shim_node_iface_c.is_default = 0;
+	csp_if_lo.is_default = 0;
+}
+
+/* Whether the named interface is currently a default-route target. -1 if unknown. */
+int shim_iface_is_default(const char *name) {
+	csp_iface_t *i = csp_iflist_get_by_name(name);
+	return i ? (int)i->is_default : -1;
 }
 
 /* --- the Ethernet ARP table ---------------------------------------------- */
