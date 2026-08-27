@@ -137,6 +137,15 @@ MUTANTS = [
    "    let mut body = payload;", "    let mut body = payload;\n    if true { return Ok(body); }"),
   # The CMP server. Every refusal below is a `goto discard` in the C: it answers nothing,
   # so a port that replies anyway tells a peer the request succeeded.
+  # The reply path, not the encoder. Nothing put a CMP reply on a wire until
+  # node_cmp_server.rs: the served-by-a-real-node record stops after `respond_cmp` and
+  # compares the bytes in memory, so a reply addressed to the wrong port matched it.
+  ("cmp: the reply goes back to the asking port", "csp/src/node.rs",
+   "            dport: req.sport,\n            sport: req.dport,",
+   "            dport: req.dport,\n            sport: req.sport,"),
+  ("cmp: the ident reply is the size the c struct expects", "csp-core/src/cmp.rs",
+   "    pub const LEN: usize =\n        Header::LEN + len::HOSTNAME + len::MODEL + len::REVISION + len::DATE + len::TIME;",
+   "    pub const LEN: usize =\n        Header::LEN + len::HOSTNAME + len::MODEL + len::REVISION + len::DATE + len::TIME - 1;"),
   ("cmp: reply type is flipped", "csp/src/service.rs",
    "kind: cmp::REPLY,", "kind: cmp::REQUEST,"),
   ("cmp: ident carries the hostname", "csp/src/service.rs",
