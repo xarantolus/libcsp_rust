@@ -133,6 +133,14 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # The two magic words, against the C's own client. A round trip inside the port cannot
+  # catch these: client and server both read service::REBOOT_MAGIC.
+  ("client: the reboot word is the C's", "csp/src/service.rs",
+   "pub const REBOOT_MAGIC: u32 = 0x8007_8007;",
+   "pub const REBOOT_MAGIC: u32 = 0x8007_8008;"),
+  ("client: the shutdown word is the C's", "csp/src/service.rs",
+   "pub const SHUTDOWN_MAGIC: u32 = 0xD1E5_529A;",
+   "pub const SHUTDOWN_MAGIC: u32 = 0xD1E5_529B;"),
   ("security: whole policy", "csp-core/src/security.rs",
    "    let mut body = payload;", "    let mut body = payload;\n    if true { return Ok(body); }"),
   # The CMP server. Every refusal below is a `goto discard` in the C: it answers nothing,

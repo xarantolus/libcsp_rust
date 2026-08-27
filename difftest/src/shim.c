@@ -1011,3 +1011,31 @@ int shim_can_send(uint16_t dst, uint8_t dport, uint8_t sport, const uint8_t *bod
 int shim_can_rx(uint32_t id, const uint8_t *data, uint8_t dlc) {
 	return csp_can_rx(&shim_can_iface, id, data, dlc, 0, NULL);
 }
+
+/* --- the C's service *client*: what csp_reboot actually puts on the wire ---- */
+
+/*
+ * `csp_services.c` holds the twelve client-side entry points an application calls --
+ * `csp_ping`, `csp_reboot`, `csp_memfree` and the rest. Nothing else in libcsp calls them
+ * and, until now, neither did this harness: they were the largest cluster of built-but-never-
+ * invoked C in the tree. So the port's `csp::client` was compared against the C's *server*
+ * and against its own round trip, never against the C's client.
+ *
+ * Most of them block in `csp_transaction_w_opts` waiting for a reply. `csp_reboot` and
+ * `csp_shutdown` do not: `csp_transaction_persistent` returns straight after `csp_send` when
+ * `inlen == 0` (`csp_io.c`). They are also the two that matter most -- a magic word the port
+ * got wrong would mean "reboot the satellite" silently does nothing, and a round trip inside
+ * the port would pass because both halves share the constant.
+ *
+ * Returns the number of frames captured.
+ */
+int shim_client_reboot(uint16_t dst, int shutdown_instead) {
+	shim_node_clear_tx();
+	if (shutdown_instead) {
+		csp_shutdown(dst);
+	} else {
+		csp_reboot(dst);
+	}
+	shim_node_pump();
+	return shim_tx_n;
+}
