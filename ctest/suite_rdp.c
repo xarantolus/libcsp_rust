@@ -1449,6 +1449,70 @@ END_TEST
  * Measured as the packet number at which acknowledgements stop, with the application never
  * reading. Nothing here inspects the queue; it counts frames.
  */
+/* The receive-queue gate, made reachable.
+ *
+ * `csp_rdp_check_ack` opens with a check the acknowledgement conditions never see:
+ *
+ *     abs(CSP_CONN_RXQUEUE_LEN - csp_queue_size(conn->rx_queue)) < conn->rdp.window_size
+ *
+ * -- when the connection's receive queue has less spare room than a window, the C sends *no*
+ * acknowledgement at all, whatever the delay count or the ack timeout say. That is deliberate
+ * back-pressure: an application that has stopped reading makes the sender stop sending.
+ *
+ * `acks_stop_when_the_application_is_not_reading` records that it never fires, because it
+ * cannot at those numbers: with `window_size` 4 the gate needs 13 packets queued, and 15
+ * buffers cap an unread connection at 12. Proposing a window of 5 moves the threshold to 12,
+ * which the pool can reach. This is the same test with the one number changed that makes the
+ * branch reachable -- the port has no equivalent gate at all, so what this measures is
+ * whether that matters at a size a node can actually hit.
+ */
+START_TEST(test_the_receive_queue_gate_stops_acknowledgements)
+{
+	setup_stack();
+	/* Window 5 = CSP_RDP_MAX_WINDOW, so the C adopts it unclamped. */
+	const uint32_t opts[6] = { 5, 20000, 1000, 0 /* immediate acks */, 250, 2 };
+	send_syn(opts);
+	const csp_conn_t * conn = find_rdp_conn();
+	ck_assert_ptr_nonnull(conn);
+	ack_handshake(conn->rdp.snd_iss);
+	ck_assert_int_eq(conn->rdp.state, RDP_OPEN);
+	ck_assert_uint_eq(conn->rdp.window_size, 5);
+
+	const uint16_t iss = conn->rdp.snd_iss;
+	unsigned int acks = 0, delivered = 0, first_unacked = 0;
+	for (uint16_t i = 1; i <= CSP_CONN_RXQUEUE_LEN; i++) {
+		/* Three spare: the packet being built, the acknowledgement it may provoke, and
+		   one so `csp_buffer_get` cannot fail mid-loop. */
+		if (csp_buffer_remaining() < 3) {
+			break;
+		}
+		const unsigned int before = test_tx_count;
+		deliver_data((uint16_t)(1000 + i), iss);
+		delivered++;
+		if (test_tx_count > before) {
+			acks++;
+		} else if (first_unacked == 0) {
+			first_unacked = i;
+		}
+	}
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("rdp", "the_receive_queue_gate_stops_acknowledgements", "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("window_size", 5);
+		ctest_trace_int("rxqueue_len", CSP_CONN_RXQUEUE_LEN);
+		ctest_trace_int("buffer_count", CSP_BUFFER_COUNT);
+		ctest_trace_int("delivered", (int64_t)delivered);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("acks", (int64_t)acks);
+		ctest_trace_int("first_unacked", (int64_t)first_unacked);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 START_TEST(test_acks_stop_when_the_application_is_not_reading)
 {
 	setup_stack();
@@ -1886,6 +1950,7 @@ Suite * rdp_suite(void)
 	tcase_add_test(tc_ack, test_the_delay_count_fires_one_packet_after_it);
 	tcase_add_test(tc_ack, test_an_ack_is_sent_even_with_nothing_to_acknowledge);
 	tcase_add_test(tc_ack, test_acks_stop_when_the_application_is_not_reading);
+	tcase_add_test(tc_ack, test_the_receive_queue_gate_stops_acknowledgements);
 	suite_add_tcase(s, tc_ack);
 
 	tc_queue = tcase_create("queue");
