@@ -125,6 +125,12 @@ unsafe extern "C" {
     fn shim_bridge_set(a: c_int, b: c_int);
     fn shim_bridge_work();
     fn shim_node_inject_on(iface: c_int, frame: *const u8, len: u32) -> c_int;
+    fn shim_can_init(address: u16, netmask: u16) -> c_int;
+    fn shim_can_clear();
+    fn shim_can_count() -> c_int;
+    fn shim_can_get(i: c_int, id: *mut u32, data: *mut u8) -> c_int;
+    fn shim_can_send(dst: u16, dport: u8, sport: u8, body: *const u8, len: c_int) -> c_int;
+    fn shim_can_rx(id: u32, data: *const u8, dlc: u8) -> c_int;
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -475,6 +481,51 @@ pub fn c_bridge_step(iface: i32, frame: &[u8]) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Bring up a real `csp_if_can` interface on the C node, with a capturing driver.
+pub fn c_can_init(address: u16, netmask: u16) -> bool {
+    // SAFETY: idempotent; the shim owns the interface and its data block for the process.
+    unsafe { shim_can_init(address, netmask) == 0 }
+}
+
+/// One CAN frame: the 29-bit identifier and up to 8 data bytes.
+pub type CanFrame = (u32, Vec<u8>);
+
+/// Have the C fragment a CSP packet into CAN frames, and return them in order.
+///
+/// This is `csp_can_tx` — the real one. Every CFP comparison before this expanded the
+/// header's identifier macros inside `shim.c` and compared bit layouts; none of them ran a
+/// line of `csp_if_can.c`.
+pub fn c_can_send(dst: u16, dport: u8, sport: u8, body: &[u8]) -> Vec<CanFrame> {
+    let mut out = Vec::new();
+    // SAFETY: `body` is valid for the call and bounds-checked against a packet buffer on
+    // the C side; the capture array is fixed-size. Callers hold `LOCK`.
+    unsafe {
+        shim_can_clear();
+        if shim_can_send(dst, dport, sport, body.as_ptr(), body.len() as c_int) != 0 {
+            return out;
+        }
+        for i in 0..shim_can_count() {
+            let mut id: u32 = 0;
+            let mut data = vec![0u8; 8];
+            let n = shim_can_get(i, &mut id, data.as_mut_ptr());
+            if n >= 0 {
+                data.truncate(n as usize);
+                out.push((id, data));
+            }
+        }
+    }
+    out
+}
+
+/// Feed one CAN frame to the C's `csp_can_rx`. Returns libcsp's own return code.
+///
+/// Whether a packet came out is answered by pumping the router and reading the bound port,
+/// not by looking at a queue.
+pub fn c_can_rx(frame: &CanFrame) -> i32 {
+    // SAFETY: the data slice is valid for the call and its length is passed as the DLC.
+    unsafe { shim_can_rx(frame.0, frame.1.as_ptr(), frame.1.len() as u8) }
+}
+
 /// Accept and close every connection waiting on `port`, draining each; return the count.
 ///
 /// What matters when the connection table runs out is not how many slots exist but how many
@@ -568,6 +619,48 @@ pub fn c_node_release(port: u8) -> Vec<Vec<u8>> {
 
 /// Feed `frame` to the C node, run its router to quiescence, and report only what an
 /// application or a peer could see.
+/// Pump the router and read `watch_ports`, without injecting anything first.
+///
+/// For paths that put a packet on the queue themselves — `csp_can_rx` reassembles and calls
+/// `csp_qfifo_write` directly, so there is no frame to inject.
+pub fn c_node_drain(watch_ports: &[u8]) -> NodeOutcome {
+    let mut out = NodeOutcome::default();
+    // SAFETY: same buffers and bounds as `c_node_exchange`. Callers hold `LOCK`.
+    unsafe {
+        shim_node_pump();
+        for &port in watch_ports {
+            loop {
+                let (mut src, mut dst) = (0u16, 0u16);
+                let (mut dport, mut sport) = (0u8, 0u8);
+                let mut payload = vec![0u8; 512];
+                let mut n: c_int = 0;
+                let got = shim_node_recv(
+                    port,
+                    &mut src,
+                    &mut dst,
+                    &mut dport,
+                    &mut sport,
+                    payload.as_mut_ptr(),
+                    &mut n,
+                );
+                if got == 0 {
+                    break;
+                }
+                payload.truncate(n as usize);
+                out.delivered.push(Delivered {
+                    port,
+                    src,
+                    dst,
+                    dport,
+                    sport,
+                    payload,
+                });
+            }
+        }
+    }
+    out
+}
+
 pub fn c_node_exchange(frame: &[u8], watch_ports: &[u8]) -> NodeOutcome {
     let mut out = NodeOutcome::default();
     // SAFETY: every buffer below is sized for the largest frame the C can emit, and the
