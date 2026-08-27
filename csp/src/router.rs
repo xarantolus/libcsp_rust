@@ -1235,6 +1235,48 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ((mixed >> 16) ^ mixed) as u16
     }
 
+    /// Send any acknowledgement that has come due on time rather than on packet count.
+    ///
+    /// The receive-queue gate applies here too: a connection with no room to invite more
+    /// data should not be inviting it, whatever the ack timer says.
+    #[cfg(feature = "rdp")]
+    fn sweep_delayed_acks<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        now_ms: u32,
+    ) {
+        let mut handles = [None; CONNS];
+        let mut n_handles = 0;
+        for h in self.conns.rdp_open_handles() {
+            if n_handles < handles.len() {
+                handles[n_handles] = Some(h);
+                n_handles += 1;
+            }
+        }
+        for handle in handles.iter().take(n_handles).flatten().copied() {
+            let window = self
+                .conns
+                .rdp(handle)
+                .map(|c| c.opts.window_size as usize)
+                .unwrap_or(0);
+            if RXQ > window && self.conns.rx_spare(handle).unwrap_or(0) < window {
+                continue;
+            }
+            let Ok(idout) = self.conns.id_out(handle) else {
+                continue;
+            };
+            if let Some(ack) = self
+                .conns
+                .rdp_mut(handle)
+                .ok()
+                .and_then(|c| c.poll_ack(now_ms))
+            {
+                let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);
+            }
+        }
+    }
+
     /// Acknowledge on the strength of the application having read something.
     ///
     /// The receive-queue gate above stops acknowledging while a connection is nearly full,
@@ -1484,6 +1526,22 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // connection on each call, counting one attempt per sweep rather than per packet.
         #[cfg(feature = "rdp")]
         let closed = closed + self.sweep_unacked(pool, ifaces, now_ms);
+
+        // The delayed acknowledgement that only a timer can produce.
+        //
+        // `csp_rdp_check_timeouts` calls `csp_rdp_check_ack` on every open connection with
+        // delayed acks (`csp_rdp.c:451`). Without it, a peer that sends fewer packets than
+        // `ack_delay_count` is never acknowledged on `ack_timeout` — nothing else arrives
+        // to drive `poll_ack`, so the acknowledgement waits for the peer's retransmission
+        // instead. Measured: ten seconds of ticks with one packet outstanding produced
+        // **zero** acknowledgements where the C sends one after 250 ms.
+        //
+        // `should_ack`'s timeout branch was right the whole time and
+        // `rdp::a_proposed_ack_timeout_is_adopted` pinned it — by calling `poll_ack` in a
+        // loop itself, standing in for the timer the node did not have. A correct piece of
+        // the core that the layer above never called, which is this port's commonest defect.
+        #[cfg(feature = "rdp")]
+        self.sweep_delayed_acks(pool, ifaces, now_ms);
 
         if closed > 0 {
             self.purge_dead_accepts();

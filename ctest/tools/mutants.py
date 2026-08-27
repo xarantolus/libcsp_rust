@@ -78,8 +78,8 @@ MUTANTS = [
   # The C's receive-queue gate: stop acknowledging while the queue has less than a window of
   # spare room, so the peer stalls instead of overflowing a node that stopped reading.
   ("rdp: the receive-queue gate", "csp/src/router.rs",
-   "        if RXQ > window && spare < window {\n            pending_ack = false;\n        }",
-   "        let _ = spare;"),
+   "        if RXQ > window && self.conns.rx_spare(handle).unwrap_or(0) < window {\n            pending_ack = false;\n        }",
+   "        let _ = window;"),
   # If the port stops acknowledging, a C peer's send window shuts after `window_size` and
   # never reopens -- so its later messages simply never arrive. Only a peer that originates
   # more than one window of data can see it.
@@ -207,6 +207,11 @@ MUTANTS = [
   ("rdp: the node acknowledges data it delivers", "csp/src/router.rs",
    "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {",
    "            if let Some(ack) = None::<csp_core::rdp::Header> {"),
+  # An acknowledgement owed on the ack *timer*. Without the tick driving it, a peer that
+  # sent fewer packets than the delay count waits for its own retransmission instead.
+  ("rdp: the tick sends a delayed acknowledgement", "csp/src/router.rs",
+   "        self.sweep_delayed_acks(pool, ifaces, now_ms);",
+   "        let _ = &ifaces;"),
   # The release valve: without it a connection that stalled the peer never restarts it.
   ("rdp: reading restarts a stalled peer", "csp/src/router.rs",
    "        if let Some(ack) = self\n            .conns\n            .rdp_mut(handle)\n            .ok()\n            .and_then(|c| c.poll_ack(now_ms))\n        {\n            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);",
