@@ -233,12 +233,17 @@ fn every_service_request_matches_what_the_cs_client_builds() {
     setup();
 
     let ping_body: Vec<u8> = (0..8u8).collect();
-    let cases: [(CClient, u32, csp::client::Request<'_>); 5] = [
+    // `PingNoReply` was the one kind the shim could drive and this loop did not ask for.
+    // `csp_ping_noreply` opens its connection with CSP_O_CRC32 of its own accord rather
+    // than taking the caller's options, so it is also the case that proves the checksum
+    // arithmetic below is reading the flag and not a constant.
+    let cases: [(CClient, u32, csp::client::Request<'_>); 6] = [
         (CClient::Ping, 8, csp::client::ping(&ping_body)),
         (CClient::MemFree, 0, csp::client::memfree()),
         (CClient::BufFree, 0, csp::client::buf_free()),
         (CClient::Uptime, 0, csp::client::uptime()),
         (CClient::Ps, 0, csp::client::ps()),
+        (CClient::PingNoReply, 0, csp::client::ping_noreply()),
     ];
 
     for (kind, size, ours) in cases {

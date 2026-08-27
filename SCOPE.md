@@ -1870,6 +1870,29 @@ whoever maintains the fork can see what was found and decide for themselves.
     a deliberate divergence in the port's favour and the direction `unbind` already had to
     be fixed in once. `difftest/tests/node_bind_any.rs` asserts the **divergence** rather
     than equality, so a change back toward the C fails.
+32. **`csp_send_prio` raises the priority of every later packet on the connection.** It is
+    two lines (`csp_io.c:322`): `conn->idout.pri = prio; csp_send(conn, packet);`. The write
+    is to the *connection*, so a caller raising one urgent frame silently reclassifies
+    everything it sends on that connection afterwards, for the connection's life.
+
+    Measured on 2026-08-27, one connection, three sends — plain, `send_prio(0)`, plain:
+
+    | | plain | `send_prio(0)` | plain again |
+    |---|---|---|---|
+    | C | 2 | 0 | **0** |
+    | port | 2 | 0 | **2** |
+
+    `Node::send_prio` applies the override to that packet only. That divergence had been
+    written down in a doc comment on `send_prio` and asserted by a unit test on the port's
+    own half since the function was written — but `csp_send_prio` appeared nowhere in
+    `difftest/`, `ctest/` or `corpus/`, so the *C* half of the claim was a reading, and this
+    file did not list it at all.
+
+    The port keeps its behaviour. On a CAN bus priority is arbitration order, so the sticky
+    version wins the bus for every later frame against traffic it should be yielding to, and
+    nothing in the call's name says it will. Someone porting C that leans on the stickiness
+    has to set the connection's priority themselves. Asserted as a divergence, both sides
+    pinned to their value, in `difftest/tests/node_send_prio.rs`.
 
 ---
 
@@ -3365,3 +3388,30 @@ different operating points, in the shape of a test.
 Also: written as two `#[test]`s, the ordinary-port case read eight connections left over
 from the connection-less case as its own result — libcsp's port table is process-global.
 One test, in order, as `node_alias.rs` and `node_bind_any.rs` already had to be.
+
+### A divergence written down but never measured
+
+2026-08-27, third cycle of the same sweep. The list of public functions no integration test
+names had two application-facing entries left after `recvfrom`: `Node::send_prio` and
+`client::ping_noreply`. Both are now measured, and they came out opposite ways.
+
+**`send_prio`** is deviation 32 above. The port's behaviour was right and the *reason* given
+for it was a reading: `csp_send_prio` appeared in no harness, no suite and no corpus record,
+so "the C makes it stick" had never been observed. It does. Three sends on one connection,
+priorities off the wire: C `2, 0, 0`; port `2, 0, 2`.
+
+**`ping_noreply`** came out clean. `csp_ping_noreply` sends one `0x55` to the ping port with
+`CSP_O_CRC32` forced rather than taken from the caller, and the port builds the same request
+— which matters because the *other* sentinel in this family, `client::ps`, was missing its
+`0x55` for months and only a comparison against the C found it. `CClient::PingNoReply` was
+the one kind the shim could already drive that
+`every_service_request_matches_what_the_cs_client_builds` never asked for; it is the sixth
+case now, and its forced checksum is also what proves that loop's `crc` arithmetic reads the
+flag rather than a constant.
+
+**What I got wrong.** The first control for the divergence — make `send_prio` sticky, like
+the C — did not compile: it called a `set_id_out` that does not exist, and `cargo test`
+reported *no tests ran*, which at a glance reads like a control that failed to bite. Then
+the second attempt compiled but silently orphaned the doc comment above the function it was
+inserted before, so `-D missing_docs` killed it too. A control is only evidence once it has
+actually run and failed for the stated reason; both of those were neither.
