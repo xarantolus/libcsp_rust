@@ -570,10 +570,72 @@ impl<
     pub fn send(
         &mut self,
         conn: Handle,
-        mut packet: Packet<'a, BUFS, BUFSZ>,
+        packet: Packet<'a, BUFS, BUFSZ>,
         now_ms: u32,
     ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
-        let id = self.router.conns.id_out(conn)?;
+        self.send_flagged(conn, packet, 0, now_ms)
+    }
+
+    /// Send one fragment of a stream on a connection.
+    ///
+    /// This is `csp_sfp_send`'s loop body: append the `[u32 offset][u32 total]` trailer at
+    /// `data[length]` (`csp_sfp_header_add`) and mark the packet `FRAG`. Everything else —
+    /// the header, the RDP trailer and its retransmission copy, routing — is [`Node::send`],
+    /// so a fragment on an RDP connection goes out as `[body][sfp][rdp]`, the order
+    /// `csp_rdp.c` strips them in.
+    ///
+    /// `offset` and `total` come from [`sfp::Fragmenter`](csp_core::sfp::Fragmenter), and
+    /// each fragment's payload must be at most [`Node::conn_sfp_mtu`] bytes.
+    ///
+    /// **Why this exists.** `FRAG` is a per-packet flag, and [`Node::send`] stamps the
+    /// connection's own id over whatever the caller set, so before this the bit was
+    /// unreachable on a connection: the only send taking explicit flags is
+    /// [`Node::sendto`], which has no connection and therefore cannot carry RDP either.
+    /// A real C node refused a stream sent that way with `CSP_ERR_SFP` — measured, in
+    /// `difftest/tests/node_sfp.rs`.
+    ///
+    /// Unlike the C this does **not** leave `FRAG` set on the connection.
+    /// `csp_sfp.c:131` does `conn->idout.flags |= CSP_FFRAG` and nothing ever clears it, so
+    /// in libcsp every later plain datagram on that connection is marked a fragment and the
+    /// receiver destroys it (SCOPE.md 3).
+    #[cfg(feature = "sfp")]
+    pub fn send_fragment(
+        &mut self,
+        conn: Handle,
+        mut packet: Packet<'a, BUFS, BUFSZ>,
+        offset: u32,
+        total: u32,
+        now_ms: u32,
+    ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
+        let mut trailer = [0u8; csp_core::sfp::HEADER_LEN];
+        let tn = csp_core::sfp::Fragment::encode(offset, total, &[], &mut trailer)?;
+        let len = packet.with_payload(<[u8]>::len);
+        let appended = packet.with_payload_mut(|b| {
+            if len + tn > b.len() {
+                return (len, false);
+            }
+            b[len..len + tn].copy_from_slice(&trailer[..tn]);
+            (len + tn, true)
+        });
+        if !appended {
+            return Err(Error::BufferTooSmall { needed: len + tn });
+        }
+        self.send_flagged(conn, packet, csp_core::flags::FRAG, now_ms)
+    }
+
+    /// [`Node::send`], with `extra_flags` OR-ed into this packet's header only.
+    ///
+    /// The connection's stored flags are untouched, so the bit does not leak onto the next
+    /// packet — which is exactly the C's `CSP_FFRAG` bug.
+    fn send_flagged(
+        &mut self,
+        conn: Handle,
+        mut packet: Packet<'a, BUFS, BUFSZ>,
+        extra_flags: u8,
+        now_ms: u32,
+    ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
+        let mut id = self.router.conns.id_out(conn)?;
+        id.flags |= extra_flags;
         self.router.conns.touch(conn, now_ms)?;
 
         // On an RDP connection the payload carries a trailer and a copy stays behind until
@@ -2095,22 +2157,23 @@ mod tests {
         // plain datagram on that connection is marked as a fragment -- and the receiver,
         // per SCOPE.md 3, parses it as one, fails, and FREES it. The sender causes the
         // condition and the receiver destroys the packet.
+        //
+        // This used to set `FRAG` on the packet `send` had already returned and then check
+        // the next one did not have it -- which is true of any two packets and says nothing
+        // about the connection. It read as coverage because the port had no way to send a
+        // fragment at all; `send_fragment` is what makes the question askable.
         let s = S::new();
         let mut n = node(&s);
         n.route_default(3).unwrap();
         let c = n.connect(2, 8, 20, 0, 0).unwrap();
 
-        // Send something that looks like a fragment, by setting the flag on the packet.
         let mut frag = n.packet().unwrap();
         frag.set_payload(b"fragment").unwrap();
-        let out = n.send(c, frag, 0).unwrap();
-        let mut p = out.into_packet();
-        p.set_id(csp_core::Id {
-            flags: csp_core::flags::FRAG,
-            ..p.id()
-        });
-        assert!(p.id().is_fragment());
-        drop(p);
+        let out = n.send_fragment(c, frag, 0, 8, 0).unwrap();
+        assert!(
+            out.into_packet().id().is_fragment(),
+            "a fragment must leave marked as one"
+        );
 
         // A later plain packet on the SAME connection must not inherit it.
         let plain = n.packet().unwrap();
@@ -2119,6 +2182,31 @@ mod tests {
             !out.into_packet().id().is_fragment(),
             "the connection must not carry FRAG over to the next packet"
         );
+    }
+
+    #[cfg(feature = "sfp")]
+    #[test]
+    fn a_fragment_carries_its_offset_and_total_where_the_c_looks_for_them() {
+        // `csp_sfp_header_add` writes the trailer at `data[length]` and extends the length,
+        // so it lands after the payload, big-endian. Parsing it back with the reader the
+        // port would use on the receiving side is the round trip; that a *real C node*
+        // accepts the same bytes is `difftest/tests/node_sfp.rs`.
+        let s = S::new();
+        let mut n = node(&s);
+        n.route_default(3).unwrap();
+        let c = n.connect(2, 8, 20, 0, 0).unwrap();
+
+        let mut p = n.packet().unwrap();
+        p.set_payload(b"second").unwrap();
+        let out = n.send_fragment(c, p, 6, 12, 0).unwrap();
+        let packet = out.into_packet();
+        let (offset, total, payload) = packet.with_payload(|d| {
+            let f = csp_core::sfp::Fragment::parse(true, d).expect("a trailer the reader knows");
+            (f.offset, f.total, f.payload.to_vec())
+        });
+        assert_eq!(offset, 6);
+        assert_eq!(total, 12);
+        assert_eq!(payload, b"second");
     }
 
     #[cfg(feature = "rtable")]

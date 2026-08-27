@@ -2355,3 +2355,56 @@ each is the work. Two false alarms went first: `decode_clamped` looked undriven 
 search covered only `csp/src`, when the call is at `rdp.rs:919` inside the state machine the
 node does drive. The signal is not "unreferenced" but "unreferenced *and* not something an
 application would call", and only reading tells the two apart.
+
+### The port could not send a fragment on a connection
+
+2026-08-27, and the sixth instance of the shape above: a correct piece of `csp-core` that the
+layer over it never drives.
+
+`Node::send` stamps the connection's own id over whatever the caller put on the packet, and
+`conn_flags` never sets `FRAG` — it is a per-packet flag, not a connection option, so there
+was nowhere for it to come from. The only send taking explicit flags is `sendto`, which has
+no connection and therefore cannot carry RDP either. So an application could fragment a
+message with `sfp::Fragmenter`, size it with `Node::conn_sfp_mtu` — a function whose entire
+purpose is "how big may a fragment be *on this connection*" — and then had no way to send
+one.
+
+Measured against a real C node, not read: every fragment left with `flags=0x00`, and
+`csp_sfp_recv_fp` refused the transfer with **-103 `CSP_ERR_SFP`**. Had the receiver used a
+plain `csp_read` instead, it would have got each fragment as a datagram with eight bytes of
+trailer stuck on the end and no indication the message had been cut up.
+
+**What made it invisible.** Three things looked like coverage, and each was measured on
+something else:
+
+| looked like | actually measured |
+|---|---|
+| `ctest/suite_sfp.c`, 12 corpus records | `csp_sfp_recv_fp` called directly, on packets built by `make_packet` and pushed onto a hand-opened connection — no header on a wire, no routing, no bound port |
+| `csp-core::sfp` unit tests | the port's fragmenter and its own reassembler, against each other |
+| the multi-fragment stream-over-RDP record | a real C router and a bound port, but reassembling frames the *C test* built |
+
+Every one is a true statement about the SFP codec. None says a C peer accepts what the port
+sends. That is the same blind spot as the forwarding bug, which satisfied every assertion
+about which interface the router chose while destroying the packet.
+
+`csp::node::the_fragment_flag_is_per_packet_not_sticky_on_the_connection` was worse than
+absent. It sent a *plain* packet, set `FRAG` on the packet `send` had already returned, and
+then checked the next packet did not have it — true of any two packets, and a statement about
+nothing. It read as coverage precisely because the port could not send a fragment, so there
+was no other way to write it.
+
+**Fixed** with `Node::send_fragment(conn, packet, offset, total, now)` — `csp_sfp_send`'s
+loop body, with the loop left to the caller because sans-io has nowhere to loop. It appends
+the trailer where `csp_sfp_header_add` does and sets `FRAG` for that packet only; the RDP
+trailer then lands after it, giving the `[body][sfp][rdp]` order `csp_rdp.c` strips in
+reverse. It deliberately does not reproduce `csp_sfp.c:131`'s `conn->idout.flags |=
+CSP_FFRAG`, which nothing clears (deviation 3).
+
+Both new cells are checked end to end by `difftest/tests/node_sfp.rs` and `node_sfp_rdp.rs`:
+the port fragments, a real C node routes the frames to a bound port, and `csp_sfp_recv_fp`
+hands the application the original bytes. Three controls confirm the tests bite — no `FRAG`,
+a trailer off by one, and no trailer at all each fail them.
+
+**The delivery matrix is now covered in both directions at node level.** `{plain, SFP}` x
+`{no RDP, RDP}`, sending and receiving, against a real C node rather than against a reading
+of one.

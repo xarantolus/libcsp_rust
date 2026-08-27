@@ -105,6 +105,7 @@ unsafe extern "C" {
     fn shim_node_send_on(port: u8, body: *const u8, len: c_int) -> c_int;
     fn shim_node_release(port: u8);
     fn shim_node_set_dedup(mode: c_int);
+    fn shim_node_sfp_recv(port: u8, out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -272,6 +273,31 @@ pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Inject `frames` in order, then have the C node's application reassemble them as a stream.
+///
+/// Returns `Ok(bytes)` — what `csp_sfp_recv_fp` handed the application — or `Err(code)` with
+/// libcsp's own error. This is the only path that asks whether the fragments the port emits
+/// are ones a *real C node* routes to a bound port and reassembles: `ctest/suite_sfp.c`
+/// hands hand-built packets straight to `csp_sfp_recv_fp` on a hand-opened connection, with
+/// no header on a wire and no routing, so it cannot answer that question.
+pub fn c_node_sfp_recv(frames: &[Vec<u8>], port: u8) -> Result<Vec<u8>, i32> {
+    let mut out = vec![0u8; 4096];
+    // SAFETY: every pointer is a valid slice for the call; the shim bounds-checks `port`
+    // and the reassembled length against `maxlen`. Callers hold `LOCK`.
+    let n = unsafe {
+        for f in frames {
+            shim_node_inject(f.as_ptr(), f.len() as u32);
+        }
+        shim_node_pump();
+        shim_node_sfp_recv(port, out.as_mut_ptr(), out.len() as c_int)
+    };
+    if n < 0 {
+        return Err(n);
+    }
+    out.truncate(n as usize);
+    Ok(out)
 }
 
 /// Accept and close every connection waiting on `port`, draining each; return the count.

@@ -127,6 +127,30 @@ stream.read_to_slice(timeout, &mut buf)         // whole message, or BufferTooSm
 `read_to_slice` reports the size it needed. The C's flat receive sets an overflow flag the
 caller must remember to check.
 
+### Sending one
+
+`csp_sfp_send` takes a whole message and a read callback and loops. Sans-io has nowhere to
+loop — each fragment has to reach a wire before the next one is built — so the loop is the
+caller's and `send_fragment` is its body:
+
+```rust
+let mtu = node.conn_sfp_mtu(conn)?;               // already minus RDP/CRC/HMAC overhead
+for (offset, total, chunk) in Fragmenter::new(message, mtu)? {
+    let mut p = node.packet().unwrap();
+    p.set_payload(chunk)?;
+    transmit(node.send_fragment(conn, p, offset, total, now)?);
+}
+```
+
+`send_fragment` appends the `[u32 offset][u32 total]` trailer where `csp_sfp_header_add`
+puts it and sets `FRAG` on that packet. On an RDP connection the RDP trailer goes on after
+it, giving the `[body][sfp][rdp]` layout the C strips in reverse — `node_sfp.rs` and
+`node_sfp_rdp.rs` check both against a real C node's `csp_sfp_recv_fp`.
+
+Unlike the C the flag does **not** stick to the connection. `csp_sfp.c:131` does
+`conn->idout.flags |= CSP_FFRAG` and nothing ever clears it, so in libcsp every later plain
+datagram on that connection is marked a fragment and the receiver destroys it.
+
 ## Interfaces
 
 ```rust
@@ -363,7 +387,7 @@ It was carried in two documents. A coverage figure nobody can reproduce is the e
 of the claim that hid a third of the library. Run `just numbers` before changing any figure
 below.
 
-- **511 tests** across the crates, in 10 binaries, with `--all-features`.
+- **515 tests** across the crates, in 22 binaries, with `--all-features`.
 - **510 golden vector lines** in `vectors/v{1,2}.tsv`, captured from the running C library
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
@@ -374,7 +398,7 @@ below.
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.
-- **45 differential tests** in `difftest/`, millions of random inputs per run, linking the
+- **48 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
   lookups, and the real `csp_kiss_rx` state machine.
