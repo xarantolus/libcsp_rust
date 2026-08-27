@@ -149,6 +149,20 @@ MUTANTS = [
   # The built-in services had no comparison against libcsp of any kind until
   # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
   # of its tests and no other.
+  # cfp::Pbufs -- the port's counterpart of csp_if_can_pbuf.c -- had no user anywhere
+  # outside cfp.rs until node_can.rs drove it.
+  ("can: the pool keys a reassembler per sender", "csp-core/src/cfp.rs",
+   "        if let Some(i) = self\n            .slots\n            .iter()\n            .position(|s| matches!(s, Some((k, _, _)) if *k == key))",
+   "        if let Some(i) = self\n            .slots\n            .iter()\n            .position(|s| s.is_some())"),
+  ("can: the sweep reclaims only what has gone quiet", "csp-core/src/cfp.rs",
+   "                if now_ms.wrapping_sub(*last) > timeout_ms {",
+   "                if true {"),
+  # SCOPE.md deviation: the C wedges a sender whose transfer was truncated, because
+  # csp_can_pbuf_cleanup only runs when a *new* buffer is allocated. The port restarts on
+  # the repeated begin. This mutation regresses it to the C's behaviour.
+  ("can: a repeated begin restarts the transfer", "csp-core/src/cfp.rs",
+   "            self.id = Some(Id::decode(Version::V2, &header)?);\n            self.next_fc = 1;\n            self.len = 0;",
+   "            if self.id.is_some() {\n                return Err(Error::NoTransferInProgress);\n            }\n            self.id = Some(Id::decode(Version::V2, &header)?);\n            self.next_fc = 1;\n            self.len = 0;"),
   # CFP v1: `V1Reassembler` had no caller outside its own module before node_can_v1.rs --
   # not even a golden vector. The first three fail the send direction, the last two the
   # receive direction, and neither pair touches the other.
