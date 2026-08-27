@@ -69,7 +69,20 @@ if [ "${1:-}" = "check" ]; then
   expect "comparison: golden vectors" "$(cat vectors/v1.tsv vectors/v2.tsv | grep -vcE '^#|^$')" \
     '[0-9]+ vectors captured from the running C' COMPARISON.md
 
-  [ "$fail" -eq 0 ] && echo "docs/API.md and COMPARISON.md match the measurement"
+  # SCOPE.md's "record something today" is the one figure in that file that moves whenever a
+  # C test is added, which is most cycles. It read 125 of 144 against a measured 148 of 165.
+  # The rest of SCOPE.md's numbers are historical measurements and must NOT track the tree.
+  untraced_line=$(python3 ctest/tools/untraced.py 2>/dev/null | grep -oE '[0-9]+/[0-9]+ C tests record something')
+  expect "scope: tests that record" "${untraced_line%%/*}" \
+    '[0-9]+ of [0-9]+ record something today' SCOPE.md
+  scope_total=$(grep -oE '[0-9]+ of [0-9]+ record something today' SCOPE.md | grep -oE '[0-9]+' | sed -n 2p)
+  measured_total=$(echo "$untraced_line" | grep -oE '/[0-9]+' | tr -d '/')
+  if [ "$scope_total" != "$measured_total" ]; then
+    echo "SCOPE.md says scope: C tests total = ${scope_total:-<missing>}, measured $measured_total" >&2
+    fail=1
+  fi
+
+  [ "$fail" -eq 0 ] && echo "docs/API.md, COMPARISON.md and SCOPE.md match the measurement"
   exit "$fail"
 fi
 python3 - <<'PY'

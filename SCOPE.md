@@ -559,7 +559,7 @@ justification nobody checks decays into the same hand-wave as no justification a
 | `promisc::leaves_a_buffer_reserve` | libcsp's tap allocates from the shared pool and must not starve it. The port's tap is a fixed array inside `Router` with `promisc_missed` counting overflow — no shared allocation to starve. |
 | `promisc::queue_size_argument_is_ignored` | `csp_promisc_enable(N)` ignoring `N` is a libcsp quirk. `Router::set_promisc` takes a bool; there is no argument to ignore. |
 | `promisc::disabled_consumes_nothing` | Covered by `promisc::delivery_is_the_same_with_the_tap_off`: `tapped: 0`, `buffers_lost: 0`. |
-| `promisc::csp1_id_layout_matches_the_binding` | Covered byte-for-byte by `vectors/v1.tsv` (270 lines of real wire bytes from the C) and the difftest header codec, which compare the layout rather than a hand-written formula for it. |
+| `promisc::csp1_id_layout_matches_the_binding` | Covered byte-for-byte by `vectors/v1.tsv` (267 lines of real wire bytes from the C) and the difftest header codec, which compare the layout rather than a hand-written formula for it. |
 | `queue::queue_free_707` | `csp_queue_*` is an arch shim, out of scope in this file's exclusion table and marked `out-of-scope` in `api_map.tsv`. Sans-io: the caller owns the queues. |
 | `rdp::syn_options_are_bounded_above` | Behaviour covered by `a_hostile_syn_cannot_suppress_acknowledgement` (every field at its maximum) and `a_delay_count_beyond_the_window_is_bound_by_it`. The test itself reads `conn->rdp.*`. |
 | `rdp::syn_options_are_bounded_below` | Same as the row above, from the other side of the range. |
@@ -690,7 +690,7 @@ hand-built window is 4, the same as the C helper's, so they were at the right op
 point and honest; they were simply blind to this.
 
 **The lead is now a tool.** `just untraced` prints, per suite, the C tests that assert
-against a real node and record nothing — 125 of 144 record something today. That measurement
+against a real node and record nothing — 148 of 165 record something today. That measurement
 found the dedup window, the malformed-SYN connection leak, and this. It resolves recording
 helpers, because an earlier hand-rolled version that only looked for a literal
 `ctest_trace_begin` reported two already-covered tests as gaps and would have sent me to
@@ -2791,3 +2791,42 @@ three new checks is now confirmed to fail on a deliberately drifted figure.
 guards the one already being watched. `api_map` checked existence but not granularity; the
 untraced table checked justifications but not their targets; `numbers.sh` checked the
 document whose numbers were already under scrutiny.
+
+### Finishing the sweep the last cycle started
+
+2026-08-27. Last cycle extended `numbers.sh` from docs/API.md to COMPARISON.md and left
+SCOPE.md's 22 numeric claims and AUDIT.md's 12 unchecked. Finishing it, because "I will get
+to the rest later" is how the first one drifted.
+
+First, the generalisation of the dead vector file: **every checked-in data file, and whether
+anything names it.** Measured — `corpus/ctest.jsonl`, `ctest/CMakeLists.txt`,
+`ctest/tools/api_map.tsv`, `vectors/v1.tsv`, `vectors/v2.tsv`, all referenced. No second
+orphan.
+
+Then SCOPE.md's numbers. Nearly all of them are *historical* — "487 tests against a measured
+492", "21 tests, 11 records", "495 tests, two module audits" — records of what was true when
+something was found, and they must **not** track the tree; rewriting them would erase the
+finding. Three were present tense, and two had drifted:
+
+| claim | said | measured |
+|---|---|---|
+| "…record something **today**" | 125 of 144 | **148 of 165** |
+| `vectors/v1.tsv` is "270 lines of real wire bytes from the C" | 270 | **267** |
+| declared `csp_*` functions | 199 | 199 ✓ |
+
+The second is the smaller and the more instructive: 270 is the file's line count, and three
+of those lines are the comment header. "Lines of real wire bytes" counted the header as wire
+bytes — the number was measured, just not on the thing the sentence named.
+
+`numbers.sh` now checks the "record something today" sentence, both halves separately, since
+it moves whenever a C test is added and that is most cycles. Confirmed by drifting each: the
+numerator alone reports `= 125, measured 148`, the denominator alone `= 144, measured 165`.
+The v1.tsv figure is corrected but deliberately not guarded — that file changes only when the
+oracle does, and the oracle's output is verified byte-stable on every run that touches it.
+
+**AUDIT.md is deliberately left unguarded**, and this is a decision rather than an omission:
+all twelve of its figures are of the form "34 tests" / "46 tests" / "all 465 tests as they
+stood at the time of this audit" — snapshots of a module when it was audited, tied to
+conclusions drawn then. A tool that made them track the tree would silently rewrite the
+evidence for those conclusions. The distinction worth keeping is **present tense versus past
+tense**, not "in a document I have already automated".
