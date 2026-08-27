@@ -3183,3 +3183,41 @@ port's output through the same two checks made all seven rows agree.
 That is the "write down what each number was measured on" rule earning its place. The two
 quantities were both called *frames* and were not the same thing, and nothing but naming the
 measurement would have caught it.
+
+### "Buffer accounting at node level" measured only the C
+
+2026-08-27. Generalising the KISS finding — a test named as though it covered the port that
+only exercised the C — into a sweep: **which differential tests never assert on anything the
+port produced?**
+
+The first sweep was worthless and worth recording as such. Matching `assert` line by line
+flagged 47 tests, including ones written the previous cycle that demonstrably compare both
+sides: `cargo fmt` puts a multi-line `assert_eq!(` with its arguments on following lines, so
+a line-based match sees a bare `assert_eq!(` and concludes nothing is compared. Extracting
+whole balanced macro invocations cut it to 13, still with false positives — `node_i2c.rs`
+calls `i2c::physical_addr` inside its asserts and the pattern missed the local alias. The
+regex is a lead generator; reading the shortlist is the work.
+
+**Both `no_path_through_the_node_leaks_a_buffer` tests — `diff.rs` (v1) and `node_v2.rs` (v2)
+— construct no port node at all.** They assert that *libcsp* does not leak over 400 mixed
+exchanges. "Buffer accounting" is one of the four things the done-check prompt lists as
+existing node-level coverage, and for both wire versions it was a claim about the C.
+
+A node that leaks one buffer per dropped packet dies after a few hundred, and dropped packets
+are the ordinary case for a router — no route, unbound port, full receive queue. Both tests
+now run the same spread through a real port `Node` and check `buffers_free()` returns to its
+starting value, with the destination choice hoisted into a shared helper in `diff.rs` so the
+two halves cannot drift apart and quietly stop covering the same outcomes.
+
+The port half also asserts that **each outcome actually occurred** — delivered, forwarded,
+dropped. Without that, "no leak" is a claim about paths the loop never took, which is how a
+400-iteration loop can be worth nothing.
+
+**Measured: the port does not leak**, on either version. Taking ownership on `Routed::Forwarded`
+is the application's job, so the loop does it; not taking it would be a leak in the test
+rather than in the port.
+
+The control is `mem::forget` on the unbound-port drop. It fails at *"the pool was empty after
+231 exchanges"* rather than at the final comparison — a leak large enough becomes fatal before
+the count is checked, which is the more informative failure of the two. The final assertion
+still earns its place for a leak too slow to exhaust twenty-four buffers.

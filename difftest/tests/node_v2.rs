@@ -279,6 +279,80 @@ fn no_path_through_the_node_leaks_a_buffer() {
         "the C node leaked {} buffers over 400 v2 exchanges",
         before - c_node_buf_free()
     );
+
+    // --- and the port, over the same spread ---
+    //
+    // The half above asserts a property of libcsp. Named for "the node", it read as though
+    // it covered both, and it was the whole of "buffer accounting at node level" for v2.
+    let storage = CspStorage::<8, 24, 300, 64, 8>::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(NODE_ADDR));
+    node.ifaces
+        .add("INGRESS", NODE_ADDR, NETMASK, false)
+        .unwrap();
+    node.ifaces
+        .add("EGRESS", EGRESS_ADDR, NETMASK, true)
+        .unwrap();
+    node.bind(10).unwrap();
+
+    let free_before = node.buffers_free();
+    let mut rng = Rng(0x2_0002);
+    let (mut delivered, mut forwarded, mut dropped) = (0u32, 0u32, 0u32);
+
+    for _ in 0..400 {
+        let dst = match rng.next() % 4 {
+            0 => NODE_ADDR,
+            1 => FORWARD_DST,
+            2 => 9000,
+            _ => NODE_ADDR,
+        };
+        let dport = if rng.next() % 4 == 3 { 11 } else { 10 };
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: 4000,
+            dst,
+            dport,
+            sport: 40,
+        };
+        let len = (rng.next() % 20) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+
+        let Some(mut p) = node.packet() else {
+            panic!("the pool was empty after {delivered}/{forwarded}/{dropped}");
+        };
+        p.set_frame(VERSION, &framed(id, &payload)).unwrap();
+        node.router.receive(p, 0);
+
+        loop {
+            match node.work(0) {
+                Routed::Delivered { conn, .. } => {
+                    delivered += 1;
+                    while let Ok(Some(pkt)) = node.read(conn) {
+                        drop(pkt);
+                    }
+                    let _ = node.close(conn);
+                }
+                Routed::Forwarded { packet, .. } => {
+                    forwarded += 1;
+                    drop(node.take_forwarded(packet));
+                }
+                Routed::Dropped(_) => dropped += 1,
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+    }
+
+    assert_eq!(
+        node.buffers_free(),
+        free_before,
+        "the port leaked {} buffers over 400 v2 exchanges",
+        free_before - node.buffers_free()
+    );
+    // Each outcome must have been reached, or "no leak" is a claim about paths never taken.
+    assert!(delivered > 0, "nothing was delivered");
+    assert!(forwarded > 0, "nothing was forwarded");
+    assert!(dropped > 0, "nothing was dropped");
 }
 
 /// The local-subnet-beats-routing-table precedence, on v2.
