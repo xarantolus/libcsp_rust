@@ -91,7 +91,15 @@ def recorders(src):
 
 
 def justified():
-    """`suite::name` keys from SCOPE.md's untraced-justification table."""
+    """`suite::name` keys from SCOPE.md's untraced-justification table.
+
+    Matched by shape, not by position: *any* SCOPE.md table row whose first cell is a bare
+    `` `suite::name` `` counts. So an unrelated table that happens to name a record in its
+    first column reads as a justification for it, and this run fails with "justification rows
+    for tests that are not untraced". That has happened once; the fix is to move the name out
+    of column one, not to weaken the match, which is what makes a stale row impossible to
+    leave lying about.
+    """
     if not SCOPE.exists():
         return set()
     return {f"{s}::{n}" for s, n in JUSTIFIED.findall(SCOPE.read_text())}

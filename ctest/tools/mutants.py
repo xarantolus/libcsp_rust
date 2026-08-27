@@ -96,6 +96,18 @@ MUTANTS = [
   ("rdp: the initiator answers SYN|ACK", "csp-core/src/rdp.rs",
    "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });",
    "                    return Action::Opened;"),
+  # The port could not send a fragment on a connection at all: `send` stamps the
+  # connection's id over the caller's, and no connection option sets FRAG. A real C node
+  # answered the resulting stream with CSP_ERR_SFP.
+  ("sfp: a fragment leaves marked as one", "csp/src/node.rs",
+   "        self.send_flagged(conn, packet, csp_core::flags::FRAG, now_ms)",
+   "        self.send_flagged(conn, packet, 0, now_ms)"),
+  ("sfp: the trailer goes after the payload", "csp/src/node.rs",
+   "            b[len..len + tn].copy_from_slice(&trailer[..tn]);",
+   "            b[..tn].copy_from_slice(&trailer[..tn]);"),
+  ("sfp: the trailer carries this fragment's offset", "csp/src/node.rs",
+   "        let tn = csp_core::sfp::Fragment::encode(offset, total, &[], &mut trailer)?;",
+   "        let tn = csp_core::sfp::Fragment::encode(0, total, &[], &mut trailer)?;"),
   ("rdp: connect proposes its option block", "csp/src/router.rs",
    "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &body[..n])",
    "        self.queue_rdp_from_tick(pool, idout, ifaces, header, &[])"),
