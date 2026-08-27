@@ -238,4 +238,208 @@ fn two_senders_interleaved_do_not_contaminate_each_other() {
         payloads, want,
         "and neither has picked up a byte of the other"
     );
+
+    // And now the same frames through the port's own pool, which is the half this test
+    // was missing: everything above proves the *C* separates two senders.
+    assert_eq!(
+        port_pool_reassembles(&a, &b),
+        want.into_iter().cloned().collect::<Vec<_>>(),
+        "the port's Pbufs must separate them too"
+    );
+}
+
+/// Interleave two senders' frames through the port's `Pbufs`, and return what came out.
+///
+/// `cfp::Pbufs` is the counterpart of `csp_if_can_pbuf.c` — one reassembler per sender,
+/// keyed by the connection bits of the identifier. Measured on this branch: it had **no user
+/// anywhere outside `cfp.rs`**, so the port's concurrent reassembly had never been driven by
+/// anything but its own unit tests, and the interleaving case above proved only that the C
+/// separates two senders.
+fn port_pool_reassembles(a: &[CanFrame], b: &[CanFrame]) -> Vec<Vec<u8>> {
+    let mut pool: cfp::Pbufs<cfp::V2Reassembler, 4> = cfp::Pbufs::new();
+    // One output buffer per sender. A reassembler writes each fragment at its own offset,
+    // so a buffer allocated per *frame* keeps only the last one — which is what the first
+    // version of this did, and it reported two payloads of trailing bytes and zeroes.
+    let mut bufs = [[0u8; 512]; 2];
+    let mut out = Vec::new();
+    let mut i = 0;
+    loop {
+        let mut any = false;
+        for (which, frames) in [a, b].into_iter().enumerate() {
+            let Some((id, data)) = frames.get(i) else {
+                continue;
+            };
+            any = true;
+            let key = *id & cfp::V2_CONN_MASK;
+            let buf = &mut bufs[which];
+            let r = pool
+                .get_or_create(key, 0)
+                .expect("a slot for each of two senders");
+            match r.push(*id, data, buf) {
+                Ok(Some((_, n))) => {
+                    out.push(buf[..n].to_vec());
+                    pool.release(key);
+                }
+                Ok(None) => {}
+                Err(e) => panic!("the port's pool refused a frame: {e:?}"),
+            }
+        }
+        if !any {
+            break;
+        }
+        i += 1;
+    }
+    out.sort();
+    out
+}
+
+/// **Deliberate divergence.** A sender whose transfer is truncated, then retries.
+///
+/// Measured, not inferred — the first version of this test asserted that the C reclaims the
+/// stalled buffer after `PBUF_TIMEOUT_MS`, and that is not what it does.
+/// `csp_can_pbuf_cleanup` runs only from `csp_can_pbuf_new`, and `new` is reached only when
+/// `csp_can_pbuf_find` returns NULL. A stalled buffer with the *same* identifier bits is
+/// found, so cleanup never runs for it however long the sender waits:
+///
+/// | | retrying the same key after the timeout |
+/// |---|---|
+/// | C | first frame `CSP_ERR_NONE`, every later one `-2 CSP_ERR_INVAL`, nothing delivered |
+/// | port | the repeated `begin` restarts the transfer; the payload arrives intact |
+///
+/// So in the C a single lost frame wedges that sender until some *other* sender allocates a
+/// buffer and incidentally runs the sweep. On a quiet bus with one talker that is indefinite.
+/// The port treats a `begin` as what it says it is and starts over.
+///
+/// This asserts the **difference**, so a change back toward the C fails rather than passing
+/// quietly.
+#[test]
+fn a_truncated_transfer_wedges_the_c_and_the_port_recovers() {
+    let _g = lock();
+    setup();
+    c_clock_set(100_000);
+
+    let whole = body(30);
+    let frames = port_fragments(&whole, 5);
+    assert!(frames.len() > 2, "must span several frames");
+
+    // --- the C: stall, wait past the timeout, retry the same key ---
+    for f in &frames[..frames.len() - 1] {
+        assert_eq!(c_can_rx(f), 0);
+    }
+    assert_eq!(
+        c_node_drain(&[PORT]).delivered.len(),
+        0,
+        "an unfinished transfer delivers nothing"
+    );
+
+    c_clock_advance(2 * 1000);
+    let again = port_fragments(&whole, 5);
+    let rets: Vec<i32> = again.iter().map(c_can_rx).collect();
+    assert_eq!(rets[0], 0, "the C takes the repeated begin frame");
+    assert!(
+        rets[1..].iter().all(|&r| r != 0),
+        "and then refuses the rest: {rets:?}"
+    );
+    assert_eq!(
+        c_node_drain(&[PORT]).delivered.len(),
+        0,
+        "the retry is lost — the timeout did not free the stalled buffer, because \
+         csp_can_pbuf_cleanup only runs when a new buffer is allocated"
+    );
+
+    // A different sender does allocate, which runs the sweep — the C's only way out.
+    let other = {
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: R_ADDR + 1,
+            dst: C_ADDR,
+            dport: PORT,
+            sport: 40,
+        };
+        cfp::V2Fragmenter::new(id, R_ADDR + 1, 6, &whole)
+            .map(|f| (f.id, f.data().to_vec()))
+            .collect::<Vec<_>>()
+    };
+    for f in &other {
+        assert_eq!(c_can_rx(f), 0, "a different sender is unaffected");
+    }
+    assert_eq!(c_node_drain(&[PORT]).delivered.len(), 1);
+
+    // --- the port: the same stall and the same retry ---
+    let mut pool: cfp::Pbufs<cfp::V2Reassembler, 4> = cfp::Pbufs::new();
+    let key = frames[0].0 & cfp::V2_CONN_MASK;
+    let mut buf = [0u8; 512];
+    for f in &frames[..frames.len() - 1] {
+        let r = pool.get_or_create(key, 100_000).expect("slot");
+        assert!(matches!(r.push(f.0, &f.1, &mut buf), Ok(None)));
+    }
+    let mut done = None;
+    for f in &again {
+        let r = pool.get_or_create(key, 102_000).expect("slot");
+        match r.push(f.0, &f.1, &mut buf) {
+            Ok(Some((_, n))) => done = Some(buf[..n].to_vec()),
+            Ok(None) => {}
+            Err(e) => panic!("the port refused a retried frame: {e:?}"),
+        }
+    }
+    assert_eq!(
+        done.as_deref(),
+        Some(&whole[..]),
+        "the port recovers from a truncated transfer on the retry, where the C does not"
+    );
+}
+
+/// `Pbufs::expire` reclaims a transfer that has gone quiet, and only that one.
+///
+/// The port's sweep is explicit rather than a side effect of allocating, which is what lets
+/// it happen at all on a bus with one talker. Asserted through what comes out: after the
+/// sweep the stale slot is free, and a transfer still in flight is untouched.
+#[test]
+fn the_ports_sweep_reclaims_the_quiet_transfer_and_leaves_the_busy_one() {
+    let stale = body(30);
+    let busy = body(24);
+    let a = port_fragments(&stale, 7);
+    let b = {
+        let id = Id {
+            pri: 2,
+            flags: 0,
+            src: R_ADDR + 1,
+            dst: C_ADDR,
+            dport: PORT,
+            sport: 40,
+        };
+        cfp::V2Fragmenter::new(id, R_ADDR + 1, 7, &busy)
+            .map(|f| (f.id, f.data().to_vec()))
+            .collect::<Vec<_>>()
+    };
+    let (ka, kb) = (a[0].0 & cfp::V2_CONN_MASK, b[0].0 & cfp::V2_CONN_MASK);
+    assert_ne!(ka, kb);
+
+    let mut pool: cfp::Pbufs<cfp::V2Reassembler, 4> = cfp::Pbufs::new();
+    let mut bufs = [[0u8; 512]; 2];
+
+    // A stalls at t=1000; B keeps going until t=1900.
+    for f in &a[..a.len() - 1] {
+        let r = pool.get_or_create(ka, 1_000).expect("slot");
+        assert!(matches!(r.push(f.0, &f.1, &mut bufs[0]), Ok(None)));
+    }
+    for f in &b[..b.len() - 1] {
+        let r = pool.get_or_create(kb, 1_900).expect("slot");
+        assert!(matches!(r.push(f.0, &f.1, &mut bufs[1]), Ok(None)));
+    }
+
+    assert_eq!(
+        pool.expire(2_100, 1_000),
+        1,
+        "only the transfer that has been quiet longer than the timeout"
+    );
+
+    // B finishes normally: the sweep did not disturb it.
+    let last = b.last().unwrap();
+    let r = pool.get_or_create(kb, 2_100).expect("slot");
+    match r.push(last.0, &last.1, &mut bufs[1]) {
+        Ok(Some((_, n))) => assert_eq!(&bufs[1][..n], &busy[..], "B completes intact"),
+        other => panic!("B must complete: {other:?}"),
+    }
 }
