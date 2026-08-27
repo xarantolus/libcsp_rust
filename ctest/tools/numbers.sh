@@ -114,6 +114,22 @@ if [ "${1:-}" = "check" ]; then
   loc_ratio=$(echo "$loc" | grep -E '^Rust implementation' | grep -oE '[0-9]+\.[0-9]+')
   _expect_cmp "comparison: implementation ratio" "$loc_ratio" "$doc_ratio" COMPARISON.md
 
+  # The API breakdown COMPARISON.md states in the present tense. `just api` measures it and
+  # the paragraph quoted it, and the two were free to drift -- which is how the same document
+  # spent months saying "All 186 are now accounted for" after SCOPE.md had recorded that 186
+  # was not reproducible. Three rows moved from `ported` to `out-of-scope` the moment their
+  # mapping was measured, so this is not a hypothetical.
+  api_out=$(python3 ctest/tools/api_coverage.py)
+  api_field() { echo "$api_out" | grep -E "^ +[0-9]+ $1\$" | grep -oE '[0-9]+'; }
+  expect "comparison: api ported" "$(api_field ported)" \
+    '[0-9]+ ported' COMPARISON.md
+  expect "comparison: api out of scope" "$(api_field out-of-scope)" \
+    '[0-9]+ out of scope' COMPARISON.md
+  expect "comparison: api deferred" "$(api_field deferred)" \
+    '[0-9]+ deferred by an explicit decision' COMPARISON.md
+  expect "comparison: api total" "$(echo "$api_out" | grep -oE 'all [0-9]+ declared' | grep -oE '[0-9]+')" \
+    'All \*\*[0-9]+\*\* `csp_\*` functions' COMPARISON.md
+
   # SCOPE.md's "record something today" is the one figure in that file that moves whenever a
   # C test is added, which is most cycles. It read 125 of 144 against a measured 148 of 165.
   # The rest of SCOPE.md's numbers are historical measurements and must NOT track the tree.

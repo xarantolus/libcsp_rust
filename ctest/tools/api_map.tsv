@@ -65,9 +65,9 @@ csp_id_strip	ported	csp::pool::Packet::set_frame
 csp_id_setup_rx	ported	csp::pool::Packet::set_frame
 csp_id_clear	out-of-scope	zeroes an id in place; Rust constructs a fresh `Id` instead of clearing one
 csp_id_copy	out-of-scope	struct assignment; `Id` is `Copy`, so this is the `=` operator
-csp_id_extract_fixup_cspv1	ported	csp_core::id::Id::decode
-csp_id_prepend_fixup_cspv1	ported	csp_core::id::Id::encode
-csp_id_strip_fixup_cspv1	ported	csp_core::id::Id::decode
+csp_id_extract_fixup_cspv1	out-of-scope	ZeroMQ hub only -- little-endian v1 header, measured in difftest/tests/id_zmq_fixup.rs
+csp_id_prepend_fixup_cspv1	out-of-scope	ZeroMQ hub only -- little-endian v1 header, measured in difftest/tests/id_zmq_fixup.rs
+csp_id_strip_fixup_cspv1	out-of-scope	ZeroMQ hub only -- little-endian v1 header, measured in difftest/tests/id_zmq_fixup.rs
 csp_id_get_header_size	ported	csp_core::id::Version::header_size
 csp_id_get_host_bits	ported	csp_core::id::Version::host_bits
 csp_id_get_max_nodeid	ported	csp_core::id::Version::max_node_id
