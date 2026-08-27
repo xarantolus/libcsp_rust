@@ -70,6 +70,16 @@ MUTANTS = [
   ("rdp: an unacknowledged packet is resent", "csp/src/router.rs",
    "                    TxAction::Retransmit { token, .. } => {",
    "                    TxAction::Retransmit { token, .. } => { let _ = token; continue; }\n                    #[allow(unreachable_patterns)]\n                    TxAction::Retransmit { token, .. } => {"),
+  # An acknowledgement is a promise about a packet that was kept. Acking before the enqueue
+  # is attempted promises one that was then dropped, and the peer discards its only copy.
+  ("rdp: never acknowledge a dropped packet", "csp/src/router.rs",
+   "                        pending_ack = false;\n                        self.counters.rx_queue_full += 1;",
+   "                        self.counters.rx_queue_full += 1;"),
+  # The C's receive-queue gate: stop acknowledging while the queue has less than a window of
+  # spare room, so the peer stalls instead of overflowing a node that stopped reading.
+  ("rdp: the receive-queue gate", "csp/src/router.rs",
+   "        if RXQ > window && spare < window {\n            pending_ack = false;\n        }",
+   "        let _ = spare;"),
   # If the port stops acknowledging, a C peer's send window shuts after `window_size` and
   # never reopens -- so its later messages simply never arrive. Only a peer that originates
   # more than one window of data can see it.
@@ -190,9 +200,17 @@ MUTANTS = [
    "            rdp::Action::Deliver => {\n                if true { drop(packet); return Routed::Dropped(DropReason::RdpConsumed); }\n                // Strip the trailer"),
   ("rdp: the trailer is stripped before delivery", "csp/src/router.rs",
    "                packet.with_payload_mut(|_| (kept, ()));", "                let _ = kept;"),
+  # Re-anchored: the receive-path acknowledgement moved inside `if pending_ack` and gained
+  # four spaces of indent, so this pattern silently started matching `ack_after_read`
+  # instead -- a different function, with a different test story. A mutation that drifts
+  # onto its neighbour reports the neighbour's coverage as this one's.
   ("rdp: the node acknowledges data it delivers", "csp/src/router.rs",
-   "        if let Some(ack) = self\n            .conns\n            .rdp_mut(handle)\n            .ok()\n            .and_then(|c| c.poll_ack(now_ms))\n        {",
-   "        if let Some(ack) = None::<csp_core::rdp::Header> {"),
+   "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {",
+   "            if let Some(ack) = None::<csp_core::rdp::Header> {"),
+  # The release valve: without it a connection that stalled the peer never restarts it.
+  ("rdp: reading restarts a stalled peer", "csp/src/router.rs",
+   "        if let Some(ack) = self\n            .conns\n            .rdp_mut(handle)\n            .ok()\n            .and_then(|c| c.poll_ack(now_ms))\n        {\n            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);",
+   "        if let Some(ack) = None::<csp_core::rdp::Header> {\n            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);"),
   ("rdp: the queued ack reaches the wire", "csp/src/router.rs",
    "            let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);",
    "            let _ = ack;"),

@@ -186,6 +186,13 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     pub dedup: Dedup,
     /// Which traffic duplicate suppression applies to. Off by default, as in the C.
     pub dedup_mode: crate::dedup::DedupMode,
+    /// The most recent `now_ms` handed to `work`, `receive` or `tick`.
+    ///
+    /// `Node::read` has no clock of its own but has to be able to acknowledge — the C reads
+    /// a global clock there. Passing a literal `0` instead made `should_ack`'s
+    /// `now.wrapping_sub(ack_timestamp) > ack_timeout` wrap to a huge value and fire every
+    /// time, which turned a delay count of 5 into an acknowledgement per packet.
+    last_now_ms: u32,
     /// Routing table.
     pub routes: crate::route_policy::rtable::Table<16>,
     /// Bound ports.
@@ -248,6 +255,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             conns: conn::Table::new(),
             dedup: Dedup::new(),
             dedup_mode: crate::dedup::DedupMode::Off,
+            last_now_ms: 0,
             routes: crate::route_policy::rtable::Table::new(version),
             bound: [false; PORTS],
             promisc: [None; 8],
@@ -419,6 +427,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ifaces: &mut crate::iflist::IfList<N, A>,
         now_ms: u32,
     ) -> Routed {
+        self.last_now_ms = now_ms;
         // A packet that fanned out to several interfaces is reported one at a time, so the
         // extras come out before the next input is looked at.
         if let Some(r) = self.pop_pending() {
@@ -735,16 +744,15 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         //
         // Queued rather than returned, so it rides alongside whatever the action was; the
         // caller sees it on the next `work` call, the same as a fan-out destination.
-        if let Some(ack) = self
-            .conns
-            .rdp_mut(handle)
-            .ok()
-            .and_then(|c| c.poll_ack(now_ms))
-        {
-            let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);
-        }
+        // **Deferred past the action, not taken here.** This used to run before the match
+        // below, so a packet the connection had no room for was acknowledged and *then*
+        // dropped: the peer was told data had arrived that the application would never see,
+        // and had already released its retransmission copy. Measured against a real C peer
+        // — it sent 12, the application could read 8, and 4 were acknowledged into nothing.
+        // An acknowledgement is a promise about a packet that was kept.
+        let mut pending_ack = true;
 
-        match action {
+        let routed = match action {
             // Ahead of the gap: held under its sequence number until the missing packet
             // arrives, rather than dropped and re-acknowledged. `csp_rdp.c:723` does the
             // same with `csp_rdp_rx_queue_add`. The trailer is stripped now, so what comes
@@ -787,6 +795,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                         }
                     }
                     _ => {
+                        // Dropped for want of room. Do not acknowledge it: the peer must
+                        // keep its copy and retransmit, which is the whole contract.
+                        pending_ack = false;
                         self.counters.rx_queue_full += 1;
                         Routed::Dropped(DropReason::ReceiveQueueFull)
                     }
@@ -865,7 +876,44 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 }
                 Routed::Dropped(DropReason::RdpConsumed)
             }
+        };
+
+        // The acknowledgement, now that it is known the packet was kept — and only while
+        // the connection still has a window of spare room.
+        //
+        // `csp_rdp_check_ack` opens with exactly this gate, and the C's own comment says
+        // why: "Only ACK the message if there is room for a full window in the RX buffer.
+        // Unacknowledged segments are ACKed by csp_rdp_check_timeouts when the buffer is no
+        // longer full." Without it a peer keeps its window open against a node that has
+        // stopped consuming, and the overflow is silent. The stall clears in `Node::read`,
+        // which is where `csp_io.c:67` clears it too.
+        //
+        // Only when the queue is deeper than a window. `CSP_CONN_RXQUEUE_LEN` is 16 and
+        // `CSP_RDP_MAX_WINDOW` is 5, so the C is never asked to keep headroom it does not
+        // have; `RXQ` here is a const generic and can be smaller than the window a peer
+        // proposes. Gating unconditionally made `spare < window` true from the first packet
+        // on such a node, which then never acknowledged anything at all — caught by
+        // `a_delay_count_beyond_the_window_is_bound_by_it`, whose node is `RXQ` 4 against a
+        // clamped window of 5.
+        let window = self
+            .conns
+            .rdp(handle)
+            .map(|c| c.opts.window_size as usize)
+            .unwrap_or(0);
+        if RXQ > window && self.conns.rx_spare(handle).unwrap_or(0) < window {
+            pending_ack = false;
         }
+        if pending_ack {
+            if let Some(ack) = self
+                .conns
+                .rdp_mut(handle)
+                .ok()
+                .and_then(|c| c.poll_ack(now_ms))
+            {
+                let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);
+            }
+        }
+        routed
     }
 
     /// Route an already-built packet and queue it for the caller to transmit.
@@ -1187,6 +1235,41 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         ((mixed >> 16) ^ mixed) as u16
     }
 
+    /// Acknowledge on the strength of the application having read something.
+    ///
+    /// The receive-queue gate above stops acknowledging while a connection is nearly full,
+    /// which stalls the peer on purpose. Something has to restart it, or the connection is
+    /// wedged for good: `csp_io.c:67` re-runs `csp_rdp_check_ack` inside `csp_read`, and
+    /// this is that. Queued for the next `work`, like every other frame the node originates.
+    #[cfg(feature = "rdp")]
+    pub fn ack_after_read<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        handle: Handle,
+    ) {
+        let now_ms = self.last_now_ms;
+        let window = self
+            .conns
+            .rdp(handle)
+            .map(|c| c.opts.window_size as usize)
+            .unwrap_or(0);
+        if RXQ > window && self.conns.rx_spare(handle).unwrap_or(0) < window {
+            return;
+        }
+        let Ok(idout) = self.conns.id_out(handle) else {
+            return;
+        };
+        if let Some(ack) = self
+            .conns
+            .rdp_mut(handle)
+            .ok()
+            .and_then(|c| c.poll_ack(now_ms))
+        {
+            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);
+        }
+    }
+
     /// Open an RDP connection this node initiates: queue the `SYN` for the next `work`.
     ///
     /// `csp_rdp_connect` sends the SYN and then blocks until the router task reports the
@@ -1359,6 +1442,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         now_ms: u32,
         conn_timeout_ms: u32,
     ) -> usize {
+        self.last_now_ms = now_ms;
         // `RXQ`, not a literal: `expire_idle` skips any connection whose queue will not
         // fit, so a scratch array shorter than one connection's queue means that
         // connection never expires at all rather than merely waiting for the next sweep.

@@ -2607,6 +2607,149 @@ fn replay_reply_to_a_connect() -> serde_json::Value {
     })
 }
 
+/// The receive-queue gate: acknowledgements stop while the connection is nearly full.
+///
+/// `csp_rdp_check_ack` refuses to acknowledge while the receive queue has less than a window
+/// of spare room, so a peer stalls instead of overflowing a node whose application has
+/// stopped reading. The port had no such gate, and worse, acknowledged *before* attempting
+/// the enqueue — so a packet it then dropped had already been promised to the peer.
+#[cfg(feature = "rdp")]
+fn replay_rdp_receive_gate(window_size: u32, delivered: u32) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    // RXQ = 16, matching `CSP_CONN_RXQUEUE_LEN`; the pool is sized to outlast the burst.
+    type S = csp::CspStorage<8, 24, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 24, 264, 48, 32, 16> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 14, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    // A peer opens the connection, proposing the window the C was given.
+    let opts = rdp::SynOptions {
+        window_size,
+        conn_timeout: 20_000,
+        packet_timeout: 1_000,
+        delayed_acks: false,
+        ack_timeout: 250,
+        ack_delay_count: 2,
+    };
+    let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+    let bn = opts.encode(&mut body).unwrap();
+    let peer_iss = 1000u16;
+    let mut syn = n.packet().expect("pool");
+    syn.set_id(Id {
+        pri: 2,
+        flags: csp_core::flags::RDP,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    let mut framed = [0u8; rdp::HEADER_LEN + rdp::SYN_OPTIONS_LEN];
+    let k = rdp::Header {
+        flags: rdp::SYN,
+        seq_nr: peer_iss,
+        ack_nr: 0,
+    }
+    .encode(&body[..bn], &mut framed)
+    .unwrap();
+    syn.set_payload(&framed[..k]).unwrap();
+    n.router.receive(syn, 0);
+
+    let mut our_iss = 0u16;
+    loop {
+        match n.work(CLOCK) {
+            csp::Routed::Respond { packet, .. } => {
+                let p = n.take_forwarded(packet).expect("slot");
+                p.with_payload(|b| {
+                    if let Ok(h) = rdp::Header::decode(b) {
+                        our_iss = h.seq_nr;
+                    }
+                });
+                drop(p);
+            }
+            csp::Routed::Idle => break,
+            _ => continue,
+        }
+    }
+
+    // The handshake's third leg, then data — never read by the application.
+    let send = |n: &mut csp::Node<'_, 8, 24, 264, 48, 32, 16>, h: rdp::Header| {
+        let mut p = n.packet().expect("pool");
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: NODE,
+            dport: PORT,
+            sport: 40,
+        });
+        let mut buf = [0u8; rdp::HEADER_LEN + 8];
+        let payload: &[u8] = if h.flags == rdp::ACK && h.seq_nr != peer_iss {
+            b"x"
+        } else {
+            &[]
+        };
+        let k = h.encode(payload, &mut buf).unwrap();
+        p.set_payload(&buf[..k]).unwrap();
+        n.router.receive(p, 0);
+    };
+
+    send(
+        &mut n,
+        rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: peer_iss,
+            ack_nr: our_iss,
+        },
+    );
+    while !matches!(n.work(CLOCK), csp::Routed::Idle) {}
+
+    let mut acks = 0u32;
+    let mut first_unacked = 0u32;
+    for i in 1..=delivered {
+        send(
+            &mut n,
+            rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: peer_iss.wrapping_add(i as u16),
+                ack_nr: our_iss,
+            },
+        );
+        let mut saw_ack = false;
+        loop {
+            match n.work(CLOCK) {
+                csp::Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            if h.flags & rdp::ACK != 0 {
+                                saw_ack = true;
+                            }
+                        }
+                    });
+                    drop(p);
+                }
+                csp::Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        if saw_ack {
+            acks += 1;
+        } else if first_unacked == 0 {
+            first_unacked = i;
+        }
+    }
+
+    serde_json::json!({ "acks": acks, "first_unacked": first_unacked })
+}
+
 /// The port opening an RDP connection: what `Node::connect(RDP_REQ)` puts on the wire.
 ///
 /// The C's `csp_rdp_connect` emits the SYN and then blocks on a semaphore only its router
@@ -4384,6 +4527,31 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         // at 12 delivered. Both sides acknowledge all 12. The flight configuration — 64
         // buffers, a queue of 32 — does reach it. Kept because it pins the numbers and
         // because it will start discriminating the moment the oracle is built with them.
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "the_receive_queue_gate_stops_acknowledgements" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct GateInput {
+                window_size: u32,
+                rxqueue_len: u32,
+                buffer_count: u32,
+                delivered: u32,
+            }
+            let input: GateInput = serde_json::from_value(rec.input.clone()).unwrap();
+            let _ = input.buffer_count;
+            // The node has to be the same shape as the C it is compared with: `RXQ` here is
+            // `CSP_CONN_RXQUEUE_LEN` there, and the gate is a function of the two together.
+            // A 4-deep queue against the C's 16 would be a different experiment reported as
+            // a difference.
+            assert_eq!(input.rxqueue_len, 16, "this replay's node is RXQ = 16");
+            Some((
+                replay_rdp_receive_gate(input.window_size, input.delivered),
+                format!(
+                    "window {}, {} delivered unread",
+                    input.window_size, input.delivered
+                ),
+            ))
+        }
         "rdp" if rec.case == "acks_stop_when_the_application_is_not_reading" => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]

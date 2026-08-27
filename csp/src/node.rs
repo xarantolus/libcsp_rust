@@ -331,7 +331,18 @@ impl<
     /// `Ok(None)` means nothing is waiting — an ordinary outcome, not an error.
     pub fn read(&mut self, conn: Handle) -> Result<Option<Packet<'a, BUFS, BUFSZ>>> {
         match self.router.conns.dequeue_rx(conn)? {
-            Some(idx) => Ok(self.pool().from_index(idx)),
+            Some(idx) => {
+                // Reading freed a slot. On an RDP connection whose queue had filled, the
+                // node stopped acknowledging on purpose to stall the peer; this is what
+                // restarts it, and without it the connection stays wedged. `csp_read` does
+                // the same at `csp_io.c:67`.
+                #[cfg(feature = "rdp")]
+                {
+                    let pool = self.storage.pool_ref();
+                    self.router.ack_after_read(pool, &self.ifaces, conn);
+                }
+                Ok(self.pool().from_index(idx))
+            }
             None => Ok(None),
         }
     }
@@ -1455,6 +1466,324 @@ mod tests {
     /// Asserted through what a peer would see and what the application may do, not through
     /// the state machine's own fields: a `connect` that returned an open connection before
     /// the handshake finished would let the caller send data the peer discards.
+    /// With no headroom to keep, the queue fills — and nothing dropped is acknowledged.
+    ///
+    /// The receive-queue gate is skipped when `RXQ` is not deeper than the peer's window,
+    /// because a node that cannot offer a window of headroom has none to keep. (The C never
+    /// meets this: `CSP_CONN_RXQUEUE_LEN` is 16 against a maximum window of 5. `RXQ` here is
+    /// a const generic and a caller may size it below what a peer proposes.)
+    ///
+    /// That is the configuration where the queue genuinely overflows, and the only one in
+    /// which the drop-path guard is reachable at all — with the gate on, the peer is stalled
+    /// before the queue can fill. What must hold either way: **the node never acknowledges
+    /// more packets than the application can actually read.** An acknowledgement the
+    /// application never sees is a packet the peer has already forgotten.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn without_headroom_to_keep_nothing_dropped_is_acknowledged() {
+        use csp_core::rdp;
+
+        const PEER: u16 = 8;
+        const PORT: u8 = 21;
+        const PEER_ISS: u16 = 700;
+
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("test", ME, 5, true).unwrap();
+        n.bind(PORT).unwrap();
+
+        // Window 5 against `RXQ` 4: no headroom to keep, so the gate stands aside.
+        let opts = rdp::SynOptions {
+            window_size: 5,
+            delayed_acks: false,
+            ..rdp::SynOptions::default()
+        };
+        let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+        let bn = opts.encode(&mut body).unwrap();
+        let mut buf = [0u8; rdp::HEADER_LEN + rdp::SYN_OPTIONS_LEN];
+        let k = rdp::Header {
+            flags: rdp::SYN,
+            seq_nr: PEER_ISS,
+            ack_nr: 0,
+        }
+        .encode(&body[..bn], &mut buf)
+        .unwrap();
+        let peer_id = Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: ME,
+            dport: PORT,
+            sport: 41,
+        };
+        let mut syn = n.packet().expect("pool");
+        syn.set_id(peer_id);
+        syn.set_payload(&buf[..k]).unwrap();
+        n.router.receive(syn, 0);
+
+        let mut our_iss = 0u16;
+        loop {
+            match n.work(1000) {
+                Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            our_iss = h.seq_nr;
+                        }
+                    });
+                    drop(p);
+                }
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        let conn = n.accept().expect("announced");
+
+        let mut third = n.packet().expect("pool");
+        third.set_id(peer_id);
+        let mut tb = [0u8; rdp::HEADER_LEN];
+        let tk = rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: PEER_ISS,
+            ack_nr: our_iss,
+        }
+        .encode(&[], &mut tb)
+        .unwrap();
+        third.set_payload(&tb[..tk]).unwrap();
+        n.router.receive(third, 0);
+        while !matches!(n.work(1000), Routed::Idle) {}
+        assert!(n.is_rdp_open(conn));
+
+        // More packets than the queue holds, none read until the end.
+        let mut acks = 0usize;
+        for i in 1..=8u16 {
+            let mut p = n.packet().expect("pool");
+            p.set_id(peer_id);
+            let mut b = [0u8; rdp::HEADER_LEN + 4];
+            let k = rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: PEER_ISS.wrapping_add(i),
+                ack_nr: our_iss,
+            }
+            .encode(b"d", &mut b)
+            .unwrap();
+            p.set_payload(&b[..k]).unwrap();
+            n.router.receive(p, 0);
+            loop {
+                match n.work(1000 + i as u32) {
+                    Routed::Respond { packet, .. } => {
+                        let p = n.take_forwarded(packet).expect("slot");
+                        p.with_payload(|b| {
+                            if let Ok(h) = rdp::Header::decode(b) {
+                                if h.flags & rdp::ACK != 0 {
+                                    acks += 1;
+                                }
+                            }
+                        });
+                        drop(p);
+                    }
+                    Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        }
+
+        let mut read = 0usize;
+        while let Ok(Some(p)) = n.read(conn) {
+            read += 1;
+            drop(p);
+        }
+
+        assert!(
+            acks <= read,
+            "acknowledged {acks} packet(s) but the application could only read {read} -- \
+             the difference was promised to the peer and then dropped, and the peer has \
+             already released its only copy"
+        );
+    }
+
+    /// A full receive queue stalls the peer, and reading restarts it.
+    ///
+    /// Three properties, all of them about what a peer sees:
+    ///
+    /// 1. **Nothing dropped is ever acknowledged.** An acknowledgement is a promise that a
+    ///    packet was kept; the peer discards its only copy on the strength of it. This
+    ///    node used to acknowledge *before* attempting the enqueue, so a packet it had no
+    ///    room for was promised and then thrown away. Measured against a real C peer before
+    ///    the fix: it sent 12, the application could read 8, and 4 were acknowledged into
+    ///    nothing.
+    /// 2. **Acknowledgement stops before the queue overflows.** `csp_rdp_check_ack` keeps a
+    ///    window of headroom for exactly this reason, so the peer stalls rather than
+    ///    overflowing a node whose application has stopped reading.
+    /// 3. **Reading restarts it.** Without that the stall is permanent and the connection
+    ///    is wedged; `csp_read` re-runs the same check at `csp_io.c:67`.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn a_full_receive_queue_stalls_the_peer_and_reading_restarts_it() {
+        use csp_core::rdp;
+
+        const PEER: u16 = 8;
+        const PORT: u8 = 20;
+        const PEER_ISS: u16 = 500;
+
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("test", ME, 5, true).unwrap();
+        n.bind(PORT).unwrap();
+
+        // A peer opens an RDP connection, proposing a window smaller than our queue so the
+        // gate has headroom to keep. `RXQ` here is 4.
+        let opts = rdp::SynOptions {
+            window_size: 2,
+            delayed_acks: false,
+            ..rdp::SynOptions::default()
+        };
+        let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+        let bn = opts.encode(&mut body).unwrap();
+        let mut buf = [0u8; rdp::HEADER_LEN + rdp::SYN_OPTIONS_LEN];
+        let k = rdp::Header {
+            flags: rdp::SYN,
+            seq_nr: PEER_ISS,
+            ack_nr: 0,
+        }
+        .encode(&body[..bn], &mut buf)
+        .unwrap();
+        let peer_id = Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: ME,
+            dport: PORT,
+            sport: 40,
+        };
+        let mut syn = n.packet().expect("pool");
+        syn.set_id(peer_id);
+        syn.set_payload(&buf[..k]).unwrap();
+        n.router.receive(syn, 0);
+
+        // Drain the handshake, remembering our own initial sequence for the peer's ACK.
+        let mut our_iss = 0u16;
+        loop {
+            match n.work(1000) {
+                Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            our_iss = h.seq_nr;
+                        }
+                    });
+                    drop(p);
+                }
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        // A handshake carries no data, so the connection arrives through `accept`, not
+        // through a `Delivered` event.
+        let conn = n.accept().expect("the handshake announced a connection");
+
+        // The handshake's third leg. Without it the connection sits in `SynRcvd` and every
+        // data packet below is ignored -- which is what this test did at first, while its
+        // comment claimed otherwise.
+        let mut third = n.packet().expect("pool");
+        third.set_id(peer_id);
+        let mut tb = [0u8; rdp::HEADER_LEN];
+        let tk = rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: PEER_ISS,
+            ack_nr: our_iss,
+        }
+        .encode(&[], &mut tb)
+        .unwrap();
+        third.set_payload(&tb[..tk]).unwrap();
+        n.router.receive(third, 0);
+        while !matches!(n.work(1000), Routed::Idle) {}
+        assert!(n.is_rdp_open(conn), "the third leg opens the connection");
+
+        // One data packet from the peer, per step, never read by the application.
+        let deliver = |n: &mut N<'_>, seq: u16, now: u32| -> bool {
+            let mut p = n.packet().expect("pool");
+            p.set_id(peer_id);
+            let mut b = [0u8; rdp::HEADER_LEN + 4];
+            let k = rdp::Header {
+                flags: rdp::ACK,
+                seq_nr: seq,
+                ack_nr: our_iss,
+            }
+            .encode(b"d", &mut b)
+            .unwrap();
+            p.set_payload(&b[..k]).unwrap();
+            n.router.receive(p, 0);
+            let mut acked = false;
+            loop {
+                match n.work(now) {
+                    Routed::Respond { packet, .. } => {
+                        let p = n.take_forwarded(packet).expect("slot");
+                        p.with_payload(|b| {
+                            if let Ok(h) = rdp::Header::decode(b) {
+                                if h.flags & rdp::ACK != 0 {
+                                    acked = true;
+                                }
+                            }
+                        });
+                        drop(p);
+                    }
+                    Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+            acked
+        };
+
+        // Data until the queue is full, none of it read.
+        // `no_std`: a fixed array, not a Vec.
+        let mut acks = [false; 6];
+        for (i, slot) in acks.iter_mut().enumerate() {
+            let seq = PEER_ISS.wrapping_add(i as u16 + 1);
+            *slot = deliver(&mut n, seq, 1000 + i as u32);
+        }
+        assert!(
+            acks.iter().any(|a| !a),
+            "acknowledgement must stop once the queue is nearly full -- every one of the \
+             six was acknowledged, so the peer is never told to slow down and the overflow \
+             is silent"
+        );
+
+        // What the application can actually read is what was kept; nothing beyond it was
+        // acknowledged, because the ack now follows a successful enqueue.
+        let mut read = 0;
+        while let Ok(Some(p)) = n.read(conn) {
+            read += 1;
+            drop(p);
+        }
+        assert!(read > 0, "the application receives what fitted");
+
+        // Reading freed room, so the node acknowledges again and the peer may resume.
+        let mut resumed = false;
+        loop {
+            match n.work(2000) {
+                Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            if h.flags & rdp::ACK != 0 {
+                                resumed = true;
+                            }
+                        }
+                    });
+                    drop(p);
+                }
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        assert!(
+            resumed,
+            "reading must restart the peer -- without an acknowledgement after the queue \
+             drains the stall is permanent and the connection is wedged for good"
+        );
+    }
+
     #[cfg(feature = "rdp")]
     #[test]
     fn connect_over_rdp_sends_a_syn_and_opens_only_on_the_reply() {
