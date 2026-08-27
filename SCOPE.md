@@ -2830,3 +2830,49 @@ stood at the time of this audit" — snapshots of a module when it was audited, 
 conclusions drawn then. A tool that made them track the tree would silently rewrite the
 evidence for those conclusions. The distinction worth keeping is **present tense versus past
 tense**, not "in a document I have already automated".
+
+### The C's service client, and the reboot word nothing had checked
+
+2026-08-27. A third search, after "which C files are unbuilt" and "which public functions have
+no outside caller": **which functions in the *compiled* C does no harness ever invoke?**
+Measured across every `.c` in either build — 205 non-static `csp_*` functions, **124 never
+named by any harness**.
+
+Most of that 124 is noise, and saying why matters: `csp_crc32_update` is reached through
+`csp_crc32_append`, `csp_sha1_process` through `csp_sha1_memory`, the `_fixup_cspv1` helpers
+through `csp_id_prepend`. The behaviour is observed even where the symbol is not.
+
+`src/csp_services.c` is the exception. Its twelve functions are the client an application
+calls; nothing else in libcsp calls them, and nothing here did either. So `csp::client` had
+been compared against the C's *server* and against its own round trip — never against the C's
+client.
+
+Ten of the twelve block in `csp_transaction_w_opts` waiting for a reply this harness has no
+thread to produce. `csp_reboot` and `csp_shutdown` do not: `csp_transaction_persistent`
+returns straight after `csp_send` when `inlen == 0`. They are also the pair where being wrong
+is worst and least visible — **a magic word the port got wrong means "reboot the satellite"
+silently does nothing, and no round trip inside the port can catch it, because client and
+server both read `service::REBOOT_MAGIC`.**
+
+**Measured: the words match.** `csp_reboot` puts `80078007` on port 4, `csp_shutdown`
+`d1e5529a`, and `csp::client::{reboot,shutdown}` build the same bytes.
+
+One difference the same measurement turned up, not previously written down: **the C's client
+always sends reboot with `CSP_O_CRC32`** — `flags=0x01` and a four-byte trailer,
+`80078007413e7883` on the wire. The port's `client::Request` carries `{port, payload}` and
+leaves options to the caller, so what the port emits depends on how it is sent. That is not a
+break in either direction, but it means the port's node must accept a checksummed reboot from
+any real libcsp ground station, and that had never been driven.
+
+It does: the C sends 8 bytes after the header, the application is handed **4**.
+
+**The assertion that matters is the length, not the classification**, and the first version of
+this test had only the classification. The magic word is read from the front, so an unstripped
+four-byte checksum classifies as `Reboot` regardless — the test would have passed with the
+verification removed entirely. Confirmed by control: disabling the CRC branch in
+`security::check` fails the length assertion and nothing else. A corrupted checksum is also
+refused delivery, which is what separates verifying from truncating.
+
+Same shape as the last three cycles, and now unmistakable: **a test passes for the reason you
+wrote it only if you have made it fail for that reason.** The fix each time was one more
+assertion on what the application actually received.
