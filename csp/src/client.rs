@@ -101,11 +101,19 @@ pub const fn uptime() -> Request<'static> {
     }
 }
 
+/// The single byte `csp_ps` puts in its request (`csp_services.c:117-118`).
+///
+/// Every `csp_ps_hook` libcsp ships ignores the packet, so no stock node reads it — but a
+/// sentinel is the only reason the byte exists, and a hook that validates it would ignore a
+/// request without one. This sent an empty payload until it was compared against what the
+/// C's client actually emits.
+pub const PS_REQUEST: [u8; 1] = [0x55];
+
 /// Build a request for the process list.
 pub const fn ps() -> Request<'static> {
     Request {
         port: ports::PS,
-        payload: &[],
+        payload: &PS_REQUEST,
     }
 }
 

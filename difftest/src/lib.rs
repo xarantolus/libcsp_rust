@@ -126,6 +126,7 @@ unsafe extern "C" {
     fn shim_bridge_work();
     fn shim_node_inject_on(iface: c_int, frame: *const u8, len: u32) -> c_int;
     fn shim_client_reboot(dst: u16, shutdown_instead: c_int) -> c_int;
+    fn shim_client_request(kind: c_int, dst: u16, size: u32, opts: u8) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
@@ -480,6 +481,41 @@ pub fn c_bridge_step(iface: i32, frame: &[u8]) -> Vec<(String, Vec<u8>)> {
         }
     }
     out
+}
+
+/// Which member of `csp_services.c`'s client to drive.
+#[derive(Debug, Clone, Copy)]
+#[allow(missing_docs)]
+pub enum CClient {
+    Ping = 0,
+    MemFree = 1,
+    BufFree = 2,
+    Uptime = 3,
+    Ps = 4,
+}
+
+/// What one of libcsp's blocking service clients puts on the wire, with a zero timeout.
+///
+/// The reply-wait costs nothing at `timeout = 0` — `pthread_queue_dequeue` builds a deadline
+/// of now — so the request is observable even though no reply will come. `size` is only read
+/// for `Ping`.
+pub fn c_client_request(kind: CClient, dst: u16, size: u32, opts: u8) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: the shim owns the capture array and bounds-checks its indices. Callers hold `LOCK`.
+    unsafe {
+        if shim_client_request(kind as c_int, dst, size, opts) <= 0 {
+            return frames;
+        }
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
 }
 
 /// What libcsp's own `csp_reboot` / `csp_shutdown` put on the wire, framed.

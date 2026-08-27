@@ -15,9 +15,12 @@
 //!
 //! # Why reboot, and why only reboot
 //!
-//! Ten of the twelve block in `csp_transaction_w_opts` waiting for a reply, and this harness
-//! has no router thread to produce one. `csp_reboot` and `csp_shutdown` do not:
-//! `csp_transaction_persistent` returns straight after `csp_send` when `inlen == 0`.
+//! `csp_reboot` and `csp_shutdown` never wait — `csp_transaction_persistent` returns straight
+//! after `csp_send` when `inlen == 0`. The other ten *look* like they block, and the first
+//! version of this file said so and stopped there. They do not have to: the timeout is a
+//! parameter, `csp_read` hands it to `csp_queue_dequeue`, and `pthread_queue_dequeue` with `0`
+//! builds a deadline of *now*. At `timeout = 0` the request still goes out and the reply-wait
+//! costs nothing, which is all that is needed to compare the two clients' requests.
 //!
 //! They are also the pair where being wrong is worst and hardest to notice. A magic word the
 //! port got wrong means "reboot the satellite" silently does nothing, and a round trip inside
@@ -208,6 +211,65 @@ fn a_reboot_the_port_built_is_obeyed_by_a_real_c_node() {
             (rebooted, shut),
             (!shutdown, shutdown),
             "the C must act on what the port's client built (shutdown={shutdown})"
+        );
+    }
+}
+
+/// Every service request the C's client builds, against the port's.
+///
+/// What is compared: the destination port and the payload bytes. **Not** the header flags —
+/// `csp_ping` takes its `conn_options` from the caller and the others hard-code
+/// `CSP_O_CRC32`, whereas the port's `client::Request` is `{port, payload}` and leaves
+/// options to whoever sends it. That is a deliberate shape difference, not a payload one.
+///
+/// This is what caught `client::ps`: `csp_ps` puts a single `0x55` in its request
+/// (`csp_services.c:117`) and the port sent nothing. Every `csp_ps_hook` libcsp ships ignores
+/// the packet, so no stock node could tell — but a sentinel is the only reason the byte
+/// exists, and comparing against the C is the only way the difference was ever going to
+/// surface.
+#[test]
+fn every_service_request_matches_what_the_cs_client_builds() {
+    let _g = lock();
+    setup();
+
+    let ping_body: Vec<u8> = (0..8u8).collect();
+    let cases: [(CClient, u32, csp::client::Request<'_>); 5] = [
+        (CClient::Ping, 8, csp::client::ping(&ping_body)),
+        (CClient::MemFree, 0, csp::client::memfree()),
+        (CClient::BufFree, 0, csp::client::buf_free()),
+        (CClient::Uptime, 0, csp::client::uptime()),
+        (CClient::Ps, 0, csp::client::ps()),
+    ];
+
+    for (kind, size, ours) in cases {
+        let frames = c_client_request(kind, R_ADDR, size, 0);
+        assert_eq!(frames.len(), 1, "{kind:?}: the C's client sends one frame");
+        let id = Id::decode(VERSION, &frames[0]).expect("decodes");
+        assert_eq!(id.dport, ours.port, "{kind:?}: same service port");
+
+        // The C appends a CRC32 to everything but ping, so the payload is the front of the
+        // body, not all of it. Comparing the whole body would compare our payload against
+        // the C's payload-plus-checksum and fail for the wrong reason.
+        let body = &frames[0][HDR..];
+        let n = ours.payload.len();
+        assert!(
+            body.len() >= n,
+            "{kind:?}: the C's body is shorter than the port's payload"
+        );
+        assert_eq!(
+            &body[..n],
+            ours.payload,
+            "{kind:?}: the port must build the request the C builds"
+        );
+        let crc = if id.has_flag(csp_core::flags::CRC32) {
+            4
+        } else {
+            0
+        };
+        assert_eq!(
+            body.len(),
+            n + crc,
+            "{kind:?}: and nothing else — the C's body is the payload plus its checksum"
         );
     }
 }

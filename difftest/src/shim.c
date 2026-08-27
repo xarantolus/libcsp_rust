@@ -1039,3 +1039,29 @@ int shim_client_reboot(uint16_t dst, int shutdown_instead) {
 	shim_node_pump();
 	return shim_tx_n;
 }
+
+/*
+ * The rest of `csp_services.c`'s client, with a zero timeout.
+ *
+ * The previous round of this stopped at `csp_reboot`/`csp_shutdown`, on the grounds that the
+ * other ten "block in csp_transaction_w_opts". They do not have to: the timeout is a
+ * parameter, `csp_read` passes it to `csp_queue_dequeue`, and `pthread_queue_dequeue` with 0
+ * builds a deadline of *now* and returns immediately. So the request still goes out and the
+ * reply-wait costs nothing -- which is all that is needed to compare what the C's client puts
+ * on the wire against what the port's builds.
+ *
+ * `kind`: 0 ping, 1 memfree, 2 buf_free, 3 uptime, 4 ps. Returns frames captured.
+ */
+int shim_client_request(int kind, uint16_t dst, unsigned int size, uint8_t opts) {
+	shim_node_clear_tx();
+	switch (kind) {
+		case 0: (void)csp_ping(dst, 0, size, opts); break;
+		case 1: csp_memfree(dst, 0); break;
+		case 2: csp_buf_free(dst, 0); break;
+		case 3: csp_uptime(dst, 0); break;
+		case 4: csp_ps(dst, 0); break;
+		default: return -1;
+	}
+	shim_node_pump();
+	return shim_tx_n;
+}
