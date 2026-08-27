@@ -106,6 +106,17 @@ unsafe extern "C" {
     fn shim_node_release(port: u8);
     fn shim_node_set_dedup(mode: c_int);
     fn shim_node_sfp_recv(port: u8, out: *mut u8, maxlen: c_int) -> c_int;
+    fn shim_node_client_send(dst: u16, dport: u8, body: *const u8, len: c_int) -> c_int;
+    fn shim_node_client_read(out: *mut u8, out_len: *mut c_int) -> c_int;
+    fn shim_node_client_close();
+    fn shim_cmp_build_ident_request(out: *mut u8) -> c_int;
+    fn shim_cmp_parse_ident_reply(
+        buf: *const u8,
+        len: c_int,
+        hostname: *mut u8,
+        model: *mut u8,
+        revision: *mut u8,
+    ) -> c_int;
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -298,6 +309,97 @@ pub fn c_node_sfp_recv(frames: &[Vec<u8>], port: u8) -> Result<Vec<u8>, i32> {
     }
     out.truncate(n as usize);
     Ok(out)
+}
+
+/// A CMP IDENT request laid out by libcsp's own `struct csp_cmp_ident_msg`.
+///
+/// Taken from the C struct rather than written out here on purpose: libcsp sends `sizeof`
+/// the *reply* member for a request, so the padding is part of what the port has to accept,
+/// and a transcription of the layout into Rust would put the thing under test on both sides
+/// of the comparison.
+pub fn c_cmp_ident_request() -> Vec<u8> {
+    let mut out = vec![0u8; 256];
+    // SAFETY: `out` is far larger than `sizeof(struct csp_cmp_ident_msg)`.
+    let n = unsafe { shim_cmp_build_ident_request(out.as_mut_ptr()) };
+    out.truncate(n as usize);
+    out
+}
+
+/// The C node opens a connection to `dst:dport`, sends `body`, and returns the frames.
+///
+/// The direction nothing else covers: every other node-level exchange has the C answering,
+/// or originating on a connection the *peer* opened. Here the C is the one that connects,
+/// so the port's reply has to find a connection a real C client is waiting on.
+pub fn c_node_client_send(dst: u16, dport: u8, body: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: `body` is valid for the call and the shim bounds-checks it against its own
+    // packet buffer. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        if shim_node_client_send(dst, dport, body.as_ptr(), body.len() as c_int) != 1 {
+            return frames;
+        }
+        shim_node_pump();
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
+}
+
+/// Inject `frame` and read what the C client's application gets off its own connection.
+pub fn c_node_client_recv(frame: &[u8]) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; 512];
+    let mut len: c_int = 0;
+    // SAFETY: both pointers are valid for the call; the shim copies at most one packet's
+    // payload, which cannot exceed `out`. Callers hold `LOCK`.
+    let got = unsafe {
+        shim_node_inject(frame.as_ptr(), frame.len() as u32);
+        shim_node_pump();
+        shim_node_client_read(out.as_mut_ptr(), &mut len)
+    };
+    if got != 1 {
+        return None;
+    }
+    out.truncate(len as usize);
+    Some(out)
+}
+
+/// Close the C client's connection.
+pub fn c_node_client_close() {
+    // SAFETY: idempotent on the C side. Callers hold `LOCK`.
+    unsafe { shim_node_client_close() }
+}
+
+/// Parse a CMP IDENT reply with the C's own struct, as a C application would.
+///
+/// `None` if the C would not recognise it: wrong size, wrong type byte, or wrong code.
+pub fn c_cmp_parse_ident(reply: &[u8]) -> Option<(String, String, String)> {
+    let (mut h, mut m, mut r) = ([0u8; 64], [0u8; 64], [0u8; 64]);
+    // SAFETY: the three out buffers are larger than the struct's corresponding fields
+    // (CSP_HOSTNAME_LEN, CSP_MODEL_LEN, CSP_CMP_IDENT_REV_LEN are all well under 64).
+    let ok = unsafe {
+        shim_cmp_parse_ident_reply(
+            reply.as_ptr(),
+            reply.len() as c_int,
+            h.as_mut_ptr(),
+            m.as_mut_ptr(),
+            r.as_mut_ptr(),
+        )
+    };
+    if ok != 1 {
+        return None;
+    }
+    let cstr = |b: &[u8]| {
+        String::from_utf8_lossy(&b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())])
+            .into_owned()
+    };
+    Some((cstr(&h), cstr(&m), cstr(&r)))
 }
 
 /// Accept and close every connection waiting on `port`, draining each; return the count.
