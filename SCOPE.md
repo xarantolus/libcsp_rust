@@ -3508,3 +3508,45 @@ And the reply half of the test passed with `find`'s port match replaced by `true
 allocated first, so a scan that ignored the port entirely still returned it. One reply now
 goes to each connection, and the one addressed to the *later* connection is the half that can
 only arrive by matching.
+
+### The quiet-connection bug survived in the plain path
+
+2026-08-27, straight after the ephemeral-port finding — same file, next question. `csp_conn.c`
+had already given up one defect; the rest of it was worth reading with the same care.
+
+`csp_conn_check_timeouts` looks like a general reaper. It is not: the loop body is entered
+only for a connection carrying `CSP_FRDP` (`csp_conn.c:32`). **libcsp expires no plain
+connection at all**, client or server — it is closed by the application or not at all.
+
+`Table::expire_idle` swept every open connection past `conn_timeout_ms`. Measured, a plain
+client connection left quiet:
+
+```text
+C:    after 1000 sweeps the reply is Some("repl")
+port: tick closed 1 connection(s); routing the reply gave Dropped(PortNotBound)
+```
+
+That is the **same defect this repository already found and fixed once**, in the RDP path,
+recorded a few hundred lines above as *"a connection that is merely quiet — a telemetry link
+between passes — was dropped while the C kept answering on it"*. The fix there was gated on
+RDP state; the plain path kept sweeping, and a request/response link that goes quiet between
+passes lost the connection and then the reply.
+
+The sweep is not removed, and the difference is the one that matters:
+
+- **Client** connections — opened by this node's `connect`, with the application holding the
+  handle — are never swept. That is libcsp's behaviour exactly.
+- **Server** connections — created by the router when a packet arrives for a bound port, and
+  closed by nothing if the application never accepts them — still are. libcsp leaks those;
+  a peer sending one packet per slot and stopping would exhaust a `no_std` table for good.
+  A deliberate divergence, and asserted as one, so deleting the sweep fails too.
+
+Both halves have a control that bites, in opposite directions: restoring the old condition
+fails the client test and leaves the server test green; disabling the sweep does the reverse.
+Neither test alone would have been enough.
+
+The C half needed no clock, which is worth noting for the next time something looks
+untestable in `difftest/` (whose libcsp has a real one): `csp_conn_check_timeouts` cannot
+close a plain connection however often it runs, because it never looks at one. Running it a
+thousand times is the strongest form of that statement the harness can make, and it is
+stronger than any single advance of a virtual clock would have been.

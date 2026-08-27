@@ -1000,7 +1000,14 @@ impl<
         self.router.work(pool, &mut self.ifaces, now_ms)
     }
 
-    /// Periodic maintenance: RDP timers and idle connection expiry.
+    /// Periodic maintenance: RDP timers, and expiry of idle **server** connections.
+    ///
+    /// Returns how many connections it closed. `conn_timeout_ms` applies only to
+    /// connections a peer opened by sending to a bound port — the ones nothing else will
+    /// ever close. A connection this node's application opened with
+    /// [`connect`](Self::connect) is never taken from under it however long it stays quiet,
+    /// which is what libcsp does: `csp_conn_check_timeouts` looks at RDP connections and
+    /// nothing else (`csp_conn.c:32`). See `difftest/tests/node_idle.rs`.
     pub fn tick(&mut self, now_ms: u32, conn_timeout_ms: u32) -> usize {
         let pool = self.storage.pool_ref();
         self.router
