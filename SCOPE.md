@@ -3962,3 +3962,39 @@ diverge on numbers no natural mutation would land on. The verdict is weaker than
 against `request_len`'s `_` arm — which only weakens a length gate that the dispatch refuses
 anyway. It reported NOTHING NOTICED, correctly: the mutation was not about the rule its name
 claimed. The tool told me, which is what it is for.
+
+### Three source files had no mutation at all, two of them the security checks
+
+2026-08-27. Counting mutations per target file rather than reading the list:
+
+| file | mutations |
+|---|---|
+| `csp/src/router.rs` | 58 |
+| … | … |
+| `csp-core/src/hmac.rs` | **1** |
+| `csp-core/src/crc32.rs` | **0** |
+| `csp/src/pool.rs` | **0** |
+| `csp/src/qfifo.rs` | **0** |
+| `csp/src/iface.rs` | **0** |
+
+`crc32::verify` and `hmac::verify_over` are the two checks that decide whether a corrupted
+or an unauthenticated packet reaches the application, and in 209 mutations nothing had ever
+broken either. Three now do, and all three bite:
+
+- `crc32: a wrong checksum is refused` — 3 records.
+- `crc32: the checksum covers the payload` — 4 records.
+- `hmac: a wrong tag is refused` — 2 records.
+
+`hmac::a_mac_over_the_payload_only` is still unmovable, and honestly so: it is a codec
+round-trip — append a tag, verify it — so a `verify_over` that accepts anything does not
+change the fact that it succeeded. The bytes `append` produces are pinned by the golden
+vectors instead.
+
+**A mutation I got wrong, for the fourth time in the same way.** `pool: a slot is not handed
+out twice` let `acquire` return a slot whose refcount was not zero. That does not leave the
+program *running and wrong* — a test that allocates until the pool is empty never gets
+`None`, so `just mutants` hung and had to be killed rather than reporting anything. `pool.rs`
+therefore stays at zero mutations, with the reason written where the next person will look.
+Four times now: `conn_less: only a conn-less port` took the corpus binary down, the ISN
+replay assertion panicked it, removing the eth `seg_size` guard sliced out of bounds, and now
+this one hangs it. The rule is at the top of the happy-path block and I keep needing it.

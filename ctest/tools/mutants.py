@@ -152,6 +152,25 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # Counting mutations per file found three with none at all and one with a single entry:
+  # `crc32.rs` (0), `pool.rs` (0), `qfifo.rs` (0), `hmac.rs` (1). The two below are the
+  # checks that decide whether a corrupted or unauthenticated packet reaches the
+  # application, and nothing in 209 mutations had ever broken either.
+  #
+  # `pool.rs` stays at zero for now. The obvious mutation -- let `acquire` hand out a slot
+  # whose refcount is not zero -- does not leave the program running and wrong: a test that
+  # allocates until the pool is empty never gets `None`, and `just mutants` hangs instead of
+  # reporting. That is the fourth mutation in this file to fail that way, and the rule is
+  # written at the top of the happy-path block for a reason.
+  ("crc32: a wrong checksum is refused", "csp-core/src/crc32.rs",
+   "    if tail != expected {\n        return Err(crate::Error::BadChecksum);\n    }",
+   "    if false {\n        return Err(crate::Error::BadChecksum);\n    }"),
+  ("crc32: the checksum covers the payload", "csp-core/src/crc32.rs",
+   "    c.update(payload);\n    let expected = c.finalize().to_be_bytes();",
+   "    let expected = c.finalize().to_be_bytes();"),
+  ("hmac: a wrong tag is refused", "csp-core/src/hmac.rs",
+   "    if diff != 0 {\n        return Err(Error::BadChecksum);\n    }",
+   "    if false {\n        return Err(Error::BadChecksum);\n    }"),
   # Three more from the unmovable list, each a *positive* rule that no "remove a guard"
   # mutation can reach: a plain packet is accepted, delivery does not depend on the tap, and
   # an unknown CMP code is not answered.
