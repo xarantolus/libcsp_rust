@@ -363,7 +363,7 @@ It was carried in two documents. A coverage figure nobody can reproduce is the e
 of the claim that hid a third of the library. Run `just numbers` before changing any figure
 below.
 
-- **509 tests** across the crates, in 10 binaries, with `--all-features`.
+- **510 tests** across the crates, in 10 binaries, with `--all-features`.
 - **510 golden vector lines** in `vectors/v{1,2}.tsv`, captured from the running C library
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header

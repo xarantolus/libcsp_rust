@@ -575,6 +575,21 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         })
     }
 
+    /// Every open RDP connection, whether or not it has anything to retransmit.
+    ///
+    /// Distinct from [`Table::rdp_handles`], which filters on a non-empty transmit queue:
+    /// an acknowledgement owed on the ack timer belongs to a connection that has *received*
+    /// something and sent nothing, so that filter would skip exactly the case.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_open_handles(&self) -> impl Iterator<Item = Handle> + '_ {
+        self.conns.iter().enumerate().filter_map(|(i, c)| {
+            (c.state == State::Open && c.rdp.is_open()).then_some(Handle {
+                idx: i as u16,
+                generation: c.generation,
+            })
+        })
+    }
+
     /// Hold a packet that arrived ahead of the gap, under its sequence number.
     ///
     /// Fails when the queue is full, which is the caller's cue to drop the packet rather
