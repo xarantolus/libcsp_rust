@@ -50,6 +50,38 @@ int shim_id_encode(uint8_t pri, uint8_t flags, uint16_t src, uint16_t dst,
 	return n;
 }
 
+/*
+ * The same, through `csp_id_prepend_fixup_cspv1`.
+ *
+ * `csp_id1_prepend(packet, true)` swaps `htobe32` for `htole32` (`csp_id.c:57`), so a v1
+ * header comes out in the *host's* byte order rather than network order. At v2 the fixup
+ * path is `csp_id2_prepend` unchanged. Compiled only when
+ * `CSP_FIXUP_V1_ZMQ_LITTLE_ENDIAN` is set, which the canonical build does.
+ *
+ * Its one caller in libcsp is `csp_if_zmqhub.c`, which is out of scope -- this exists so
+ * that "not the same as `csp_id_prepend`" is a measurement rather than a reading of the
+ * `#if`.
+ */
+int shim_id_encode_fixup(uint8_t pri, uint8_t flags, uint16_t src, uint16_t dst,
+                         uint8_t dport, uint8_t sport, uint8_t *out) {
+	csp_packet_t packet;
+	memset(&packet, 0, sizeof(packet));
+	packet.id.pri = pri;
+	packet.id.flags = flags;
+	packet.id.src = src;
+	packet.id.dst = dst;
+	packet.id.dport = dport;
+	packet.id.sport = sport;
+	packet.length = 0;
+	packet.frame_begin = packet.data;
+
+	csp_id_prepend_fixup_cspv1(&packet);
+
+	int n = csp_id_get_header_size();
+	memcpy(out, packet.frame_begin, (size_t)n);
+	return n;
+}
+
 /* Decode a header into the six fields. */
 void shim_id_decode(const uint8_t *data, uint8_t *pri, uint8_t *flags,
                     uint16_t *src, uint16_t *dst, uint8_t *dport, uint8_t *sport) {

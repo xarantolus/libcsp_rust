@@ -33,6 +33,15 @@ unsafe extern "C" {
         sport: u8,
         out: *mut u8,
     ) -> c_int;
+    fn shim_id_encode_fixup(
+        pri: u8,
+        flags: u8,
+        src: u16,
+        dst: u16,
+        dport: u8,
+        sport: u8,
+        out: *mut u8,
+    ) -> c_int;
     fn shim_id_decode(
         data: *const u8,
         pri: *mut u8,
@@ -1306,6 +1315,28 @@ pub static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// hides which test actually broke.
 pub fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The header `csp_id_prepend_fixup_cspv1` writes — the ZeroMQ hub's little-endian v1.
+///
+/// Identical to [`c_id_encode`] at v2 and byte-reversed at v1. Its only caller in libcsp is
+/// `csp_if_zmqhub.c`, which is out of scope; this exists so that "not the same codec" is
+/// measured rather than read off the `#if`.
+pub fn c_id_encode_fixup(id: &csp_core::Id) -> Vec<u8> {
+    let mut buf = [0u8; 16];
+    // SAFETY: `buf` is larger than any header the C can write (max 6 bytes).
+    let n = unsafe {
+        shim_id_encode_fixup(
+            id.pri,
+            id.flags,
+            id.src,
+            id.dst,
+            id.dport,
+            id.sport,
+            buf.as_mut_ptr(),
+        )
+    };
+    buf[..n as usize].to_vec()
 }
 
 /// Encode a header with the C, returning the header bytes.
