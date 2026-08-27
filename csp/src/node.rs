@@ -1466,6 +1466,148 @@ mod tests {
     /// Asserted through what a peer would see and what the application may do, not through
     /// the state machine's own fields: a `connect` that returned an open connection before
     /// the handshake finished would let the caller send data the peer discards.
+    /// An acknowledgement owed on the ack *timer* is sent by the tick, with nothing arriving.
+    ///
+    /// With delayed acks on — the default — a peer that sends fewer packets than
+    /// `ack_delay_count` is acknowledged only when `ack_timeout` elapses.
+    /// `csp_rdp_check_timeouts` calls `csp_rdp_check_ack` on every open connection for
+    /// exactly this (`csp_rdp.c:451`). The port's `should_ack` had the timeout branch and
+    /// nothing ever called it outside the receive path, so the acknowledgement waited for
+    /// the peer to retransmit instead: measured at **zero** acknowledgements across ten
+    /// seconds of ticks, where the C sends one after 250 ms.
+    ///
+    /// `rdp::a_proposed_ack_timeout_is_adopted` did not catch it, because its replay drives
+    /// `poll_ack` in a loop itself — standing in for the timer the node did not have.
+    #[cfg(feature = "rdp")]
+    #[test]
+    fn an_acknowledgement_owed_on_the_timer_is_sent_by_the_tick() {
+        use csp_core::rdp;
+
+        const PEER: u16 = 8;
+        const PORT: u8 = 22;
+        const PEER_ISS: u16 = 900;
+        const ACK_TIMEOUT_MS: u32 = 250;
+
+        let s = S::new();
+        let mut n = node(&s);
+        n.ifaces.add("test", ME, 5, true).unwrap();
+        n.bind(PORT).unwrap();
+
+        // Delay count 4, so one packet cannot reach it: only the timer can produce the ack.
+        let opts = rdp::SynOptions {
+            window_size: 2,
+            delayed_acks: true,
+            ack_delay_count: 4,
+            ack_timeout: ACK_TIMEOUT_MS,
+            ..rdp::SynOptions::default()
+        };
+        let mut body = [0u8; rdp::SYN_OPTIONS_LEN];
+        let bn = opts.encode(&mut body).unwrap();
+        let mut buf = [0u8; rdp::HEADER_LEN + rdp::SYN_OPTIONS_LEN];
+        let k = rdp::Header {
+            flags: rdp::SYN,
+            seq_nr: PEER_ISS,
+            ack_nr: 0,
+        }
+        .encode(&body[..bn], &mut buf)
+        .unwrap();
+        let pid = Id {
+            pri: 2,
+            flags: csp_core::flags::RDP,
+            src: PEER,
+            dst: ME,
+            dport: PORT,
+            sport: 42,
+        };
+        let mut syn = n.packet().expect("pool");
+        syn.set_id(pid);
+        syn.set_payload(&buf[..k]).unwrap();
+        n.router.receive(syn, 0);
+
+        let mut our_iss = 0u16;
+        loop {
+            match n.work(1000) {
+                Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            our_iss = h.seq_nr;
+                        }
+                    });
+                    drop(p);
+                }
+                Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        let conn = n.accept().expect("announced");
+
+        let mut third = n.packet().expect("pool");
+        third.set_id(pid);
+        let mut tb = [0u8; rdp::HEADER_LEN];
+        let tk = rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: PEER_ISS,
+            ack_nr: our_iss,
+        }
+        .encode(&[], &mut tb)
+        .unwrap();
+        third.set_payload(&tb[..tk]).unwrap();
+        n.router.receive(third, 0);
+        while !matches!(n.work(1000), Routed::Idle) {}
+        assert!(n.is_rdp_open(conn));
+
+        // One data packet, well under the delay count, and nothing acknowledged for it yet.
+        let mut d = n.packet().expect("pool");
+        d.set_id(pid);
+        let mut db = [0u8; rdp::HEADER_LEN + 4];
+        let dk = rdp::Header {
+            flags: rdp::ACK,
+            seq_nr: PEER_ISS.wrapping_add(1),
+            ack_nr: our_iss,
+        }
+        .encode(b"d", &mut db)
+        .unwrap();
+        d.set_payload(&db[..dk]).unwrap();
+        n.router.receive(d, 0);
+        let mut early = 0;
+        while !matches!(n.work(1000), Routed::Idle) {
+            early += 1;
+        }
+        let _ = early;
+
+        // Now only time passes. Nothing else arrives; the application does not read.
+        let mut acks = 0;
+        for step in 1..=8u32 {
+            let now = 1000 + step * ACK_TIMEOUT_MS;
+            n.tick(now, 20_000);
+            loop {
+                match n.work(now) {
+                    Routed::Respond { packet, .. } => {
+                        let p = n.take_forwarded(packet).expect("slot");
+                        p.with_payload(|b| {
+                            if let Ok(h) = rdp::Header::decode(b) {
+                                if h.flags & rdp::ACK != 0 {
+                                    acks += 1;
+                                }
+                            }
+                        });
+                        drop(p);
+                    }
+                    Routed::Idle => break,
+                    _ => continue,
+                }
+            }
+        }
+
+        assert!(
+            acks > 0,
+            "the ack timer produced nothing in {}ms with a packet outstanding -- the peer \
+             is left to retransmit for an acknowledgement that was already owed",
+            8 * ACK_TIMEOUT_MS
+        );
+    }
+
     /// With no headroom to keep, the queue fills — and nothing dropped is acknowledged.
     ///
     /// The receive-queue gate is skipped when `RXQ` is not deeper than the peer's window,

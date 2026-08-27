@@ -223,9 +223,15 @@ it and dropping it. `poll_ack` has no equivalent.
 
 Measured with the application never reading: **12 delivered, 12 acknowledged, the gate never
 fired.** It suppresses at a queue depth above `16 − 4 = 12`, and the node exhausts its
-**15** buffers at 12 delivered. So at the canonical sizes the flow control cannot trigger —
-the pool runs out first — and the port's missing gate is not a behavioural difference at
-all.
+**15** buffers at 12 delivered.
+
+**That conclusion was wrong, and the wrongness was in the word "cannot".** The gate cannot
+trigger *at those numbers* — window 4. Proposing a window of 5 moves the threshold to 12,
+which the same pool reaches: 13 delivered, 11 acknowledged, the 12th onward silent. The port
+had no gate and, worse, acknowledged before attempting the enqueue; against a real C peer it
+promised four packets it then dropped. Both are fixed and the section below records it.
+`poll_ack` now has an equivalent, so the sentence that followed this one — "the port's
+missing gate is not a behavioural difference at all" — is doubly obsolete.
 
 At the flight sizes it is. `CSP_BUFFER_COUNT` 64 with `CSP_CONN_RXQUEUE_LEN` 32 and a
 window of 4 gates at a depth above 28, reachable long before 64 buffers are gone. So this is
@@ -2243,3 +2249,36 @@ And reverting a control mutation with `git checkout csp/src/router.rs` **discard
 fix**, which was uncommitted in that same file. Rebuilt from the conversation. A whole-file
 checkout is not an undo for a one-line experiment when the file holds work in progress —
 this is the second time, and the first is already written down elsewhere in this file.
+
+### The acknowledgement the ack timer owes, that nothing sent
+
+2026-08-27. `csp_rdp_check_timeouts` calls `csp_rdp_check_ack` on every open connection with
+delayed acks (`csp_rdp.c:451`). Delayed acks are the **default**, so a peer that sends fewer
+packets than `ack_delay_count` is acknowledged only when `ack_timeout` elapses — there is no
+further packet to drive it.
+
+The port's `should_ack` had the timeout branch and the node never called it outside the
+receive path. Measured: **zero acknowledgements across ten seconds of ticks** with one packet
+outstanding, where the C sends one after 250 ms. Not a hang — the peer's retransmission
+eventually provokes the ack — but every sub-delay-count exchange pays a retransmission
+timeout (1000 ms) instead of an ack timeout (250 ms), on the link that can least afford it.
+
+`Router::tick` now sweeps open RDP connections for an acknowledgement that has come due,
+subject to the same receive-queue gate: a connection with no room to invite more data should
+not be inviting it, whatever the timer says.
+
+**Why the existing record did not catch it.** `rdp::a_proposed_ack_timeout_is_adopted`
+measures exactly this behaviour and passes — because its replay drives `poll_ack` in a loop
+itself, standing in for the timer. Its own comment says so: *"The C's loop advances 250 ms at
+a time and calls `csp_conn_check_timeouts`."* The replay modelled the timer rather than
+using the node's, so it proved `should_ack` correct and said nothing about whether anything
+called it. That is this port's commonest defect shape — a correct piece of the core the layer
+above never drives — and it is the fourth time: `RxQueue`, `TxQueue`, the CMP server, and now
+the ack timer.
+
+**A mutation that had stopped applying.** Rebuilding `router.rs` after a `git checkout`
+accident (recorded above) rewrote the gate as one expression where the mutation anchored on
+two statements, so `rdp: the receive-queue gate` reported *MUTATION DID NOT APPLY* and the
+gate was guarded by nothing. `mutants.py` prints that case rather than counting it as
+noticed, which is the only reason it was visible. Re-anchored, and the anchor is now checked
+against the source before the sweep is trusted.
