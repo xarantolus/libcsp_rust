@@ -106,6 +106,9 @@ unsafe extern "C" {
     fn shim_node_release(port: u8);
     fn shim_node_set_dedup(mode: c_int);
     fn shim_node_accept_count(port: u8) -> c_int;
+    fn shim_clock_set(ms: u32);
+    fn shim_clock_advance(ms: u32);
+    fn shim_node_check_timeouts();
     fn shim_node_promisc_enable() -> c_int;
     fn shim_node_promisc_read(out: *mut u8, dst: *mut u16) -> c_int;
     fn shim_node_clear_tx();
@@ -278,6 +281,28 @@ pub fn c_node_send_on(port: u8, body: &[u8]) -> Vec<Vec<u8>> {
 pub fn c_node_accept_count(port: u8) -> i32 {
     // SAFETY: bounds-checked on the C side; frees every packet it reads. Callers hold `LOCK`.
     unsafe { shim_node_accept_count(port) }
+}
+
+/// Set the C node's clock, in milliseconds.
+///
+/// `arch/posix/csp_time.c` is left out of this build and the shim supplies `csp_get_ms`, so
+/// libcsp's own timers are reachable by assignment rather than by sleeping. Without it,
+/// anything gated on an RDP timer or a connection timeout could not be asked at all.
+pub fn c_clock_set(ms: u32) {
+    // SAFETY: writes one `static uint32_t` the C reads. Callers hold `LOCK`.
+    unsafe { shim_clock_set(ms) }
+}
+
+/// Move the C node's clock forward.
+pub fn c_clock_advance(ms: u32) {
+    // SAFETY: as `c_clock_set`.
+    unsafe { shim_clock_advance(ms) }
+}
+
+/// Run libcsp's periodic connection maintenance: RDP timers and idle expiry.
+pub fn c_node_check_timeouts() {
+    // SAFETY: walks libcsp's connection array and pumps its router. Callers hold `LOCK`.
+    unsafe { shim_node_check_timeouts() }
 }
 
 /// Turn the C node's promiscuous tap on.

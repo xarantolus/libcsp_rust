@@ -432,10 +432,27 @@ four buffers stay held immediately after `csp_close`. Its close does reset the p
 `ACK|RST` frame -- but feeding that to the peer and pumping the reply back did not release
 them within the exchange.
 
-Whether libcsp's connection timeout eventually frees them is **not established here**, and
-is deliberately not asserted either way: driving it needs real time, because this harness
-keeps `arch/posix/csp_time.c` (only `ctest/` omits it for a virtual clock). Recording "the C
-leaks four buffers" would be a number without the condition that decides what it means.
+**The harness can now ask.** `difftest` no longer builds `arch/posix/csp_time.c`; `shim.c`
+supplies `csp_get_ms` itself, so libcsp's own timers — RDP retransmission, the connection
+timeout, the close-wait timeout — are reachable by assignment instead of by sleeping for
+whole seconds. Every existing differential test passes unchanged with the substituted clock.
+That capability is the point: "does the C ever free that?" was previously a question this
+harness could not put.
+
+What it answers, measured: **it does not, within 32 virtual seconds of a 10 s connection
+timeout.** Free buffers stay at 11 of 15 throughout. One of the two open connections does
+close at +16 s; the survivor's `timestamp` is refreshed to that moment and then stops
+advancing, so its close-wait deadline is measured from a baseline that moved.
+
+What is **still not established**, and deliberately not asserted: whether that is a genuine
+libcsp leak or an artefact of this harness driving only one end of the close. Both branches
+in `csp_rdp_check_timeouts` that would release it (`csp_conn.c` CONNECTION TIMEOUT at
+`csp_rdp.c:357`, CLOSE-WAIT at `:370`) call `csp_conn_close` a second time, which should get
+past the `CSP_ERR_AGAIN` early return — so the mechanism exists and something is preventing
+it firing. Characterising that means going further into libcsp than a done-check on the port
+warrants. Recorded with its numbers and conditions so it can be picked up deliberately,
+rather than as "the C leaks four buffers", which is the claim the evidence does not yet
+support.
 
 ### One spoofed RST dropped the link — the port had no blind-reset defence
 
