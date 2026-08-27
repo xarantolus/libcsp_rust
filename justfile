@@ -132,6 +132,7 @@ test:
 # The full pre-commit gate.
 check: canonical
     python3 ctest/tools/api_coverage.py
+    python3 ctest/tools/cites.py
     # Not the untraced *count* -- that is a lead, not a defect. This fails only when an
     # untraced test has no written basis in SCOPE.md, or a basis names a test that records.
     @python3 ctest/tools/untraced.py > /dev/null || python3 ctest/tools/untraced.py
@@ -152,6 +153,12 @@ check: canonical
 
 fmt:
     cargo fmt --all
+
+# Every `csp_foo.c:NNN` the port cites, against the line it points at. The submodule is
+# pinned, so a wrong line number was always wrong -- nine pointed at a closing brace or a
+# blank line, four of them at the wrong function entirely.
+cites:
+    python3 ctest/tools/cites.py
 
 # The size figures COMPARISON.md quotes, with the definitions they are counted by.
 # They were quoted for months with no definition recorded anywhere and none of them

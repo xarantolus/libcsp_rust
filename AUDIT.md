@@ -607,7 +607,7 @@ Reading `csp_send_direct` for the nexthop contract exposed something larger, in 
 **the C does not pick one destination.** It collects every routing-table entry tied for
 the longest prefix and sends a **clone to each**, the last getting the original; if no
 route matched at all, it does the same over every default-marked interface
-(`csp_io.c:206-240`). Both redundant links and broadcast-to-all-interfaces are configured
+(`csp_io.c:209-240`). Both redundant links and broadcast-to-all-interfaces are configured
 this way. The port resolved to a single destination, silently making both single-path —
 a node with two routes to the same subnet for redundancy would have been using one of
 them, with nothing to indicate the other was idle.
