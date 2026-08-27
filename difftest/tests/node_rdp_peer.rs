@@ -159,7 +159,7 @@ fn a_real_c_peer_can_send_us_data_over_rdp() {
         }
     }
 
-    c_node_release(RDP_PORT);
+    let _ = c_node_release(RDP_PORT);
 
     assert_eq!(
         received.len(),

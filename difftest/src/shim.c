@@ -579,12 +579,22 @@ int shim_node_send_on(uint8_t port, const uint8_t *body, int len) {
 	return 1;
 }
 
-/* Close a connection held by `shim_node_send_on`, which resets the peer. */
+/*
+ * Close a connection held by `shim_node_send_on`.
+ *
+ * On an RDP connection this starts the close *handshake* rather than finishing it:
+ * `csp_conn_close` returns early when `csp_rdp_close` reports `CSP_ERR_AGAIN`
+ * (`csp_conn.c:230`), before both the receive-queue flush and `csp_rdp_queue_flush`. So
+ * anything held for retransmission stays held until the peer answers -- which is why the
+ * caller gets the frames back, to feed them to the peer and let the close complete.
+ */
 void shim_node_release(uint8_t port) {
 	if (port < SHIM_PORTS && shim_held[port] != NULL) {
 		csp_close(shim_held[port]);
 		shim_held[port] = NULL;
 	}
+	csp_qfifo_wake_up();
+	while (csp_route_work() == CSP_ERR_NONE) { }
 }
 
 int shim_node_serve(uint8_t port) {
