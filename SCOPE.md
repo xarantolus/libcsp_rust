@@ -2408,3 +2408,51 @@ a trailer off by one, and no trailer at all each fail them.
 **The delivery matrix is now covered in both directions at node level.** `{plain, SFP}` x
 `{no RDP, RDP}`, sending and receiving, against a real C node rather than against a reading
 of one.
+
+### The CMP reply nothing put on a wire
+
+2026-08-27. CMP had node-level coverage in one direction. `node_v2.rs`'s
+`the_cmp_client_understands_what_a_real_c_node_answers` has the port ask and a real C node
+answer. The reverse — a peer asking *the port* — looked covered and was not, and the
+distinction is worth writing down because it is the forwarding bug's shape exactly:
+
+| | what it drove | where it stopped |
+|---|---|---|
+| the served-by-a-real-node record | a real `Router`, a bound port 0, the application's `read`, `respond_cmp` | records `replies`, `reply_len`, `reply_type`, `reply_code` — the encoder's output, in memory. **The reply was never sent.** |
+| the other CMP records | `respond_cmp` as a function | never near a node |
+| golden vectors, `suite_cmp.c` | the C's encoder and dispatcher | say nothing about the port's reply path |
+
+So the reply *bytes* were byte-compared against the C's — `an_ident_reply_carries_the_configured_identity` records the full 93-byte reply as hex — and the request path was driven through a real router. Between them sat the step nobody took: putting the reply on a wire, and having a peer accept it. That is where the port has already shipped one silent drop.
+
+**Measured: the port was right.** `difftest/tests/node_cmp_server.rs` has a real C node
+`csp_connect` to the port, send an IDENT request laid out by `struct csp_cmp_ident_msg`,
+and read the port's reply off its own connection — which libcsp's struct then parses as a C
+application would. Hostname, model and revision come back intact. No fix was needed; what
+was missing was the evidence.
+
+The harness gained the direction it never had: `shim_node_client_send`/`_read` make the C
+node the one that *connects*. Every node-level exchange before this had the C answering, or
+originating on a connection the peer had opened, so the port's reply had never had to find a
+connection a real C client was waiting on.
+
+Controls: repointing `reply_to` at the request's own ports fails at the C client's receive;
+shortening `Ident::LEN` by one byte fails inside libcsp's struct parse — "did not recognise
+the port's IDENT reply (92 bytes)". A no-op mutation passes, so the harness is not failing
+on its own.
+
+#### What the same sweep found already covered
+
+Recorded so the next pass does not re-open them:
+
+- **Broadcast transmission and route fan-out.** `ctest/suite_route.c` drives a real C node
+  with real interfaces and a recording nexthop, capturing how many frames left, by which
+  interface, and the destination each carried — `a_routed_broadcast_leaves_as_the_local_broadcast`,
+  `a_broadcast_rewrite_carries_to_the_other_interface`, `an_application_send_to_a_broadcast_is_rewritten_too`,
+  `a_table_routed_destination_leaves_unchanged`. This is wire-level, not decision-level.
+- **The two shape-mismatch cases** are function-level on *both* sides — `suite_sfp.c` calls
+  `csp_sfp_recv_fp` directly, and the port's replay calls `Delivery::classify` directly.
+  That is deliberate rather than a gap: classification is a per-packet header-bit decision
+  the application makes on a packet it already holds, and the node has no part in it. The
+  delivery that precedes it is covered by `a_packet_for_a_bound_port_reaches_the_application_identically`,
+  and the one case where the router *does* matter has its own node-level replay
+  (`a_fragment_read_as_a_datagram_keeps_the_sfp_header`).

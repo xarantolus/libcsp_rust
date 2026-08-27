@@ -14,6 +14,7 @@
 #include <csp/crypto/csp_sha1.h>
 #include <csp/crypto/csp_hmac.h>
 #include <csp/csp_sfp.h>
+#include <csp/csp_cmp.h>
 
 /* csp_id_* dispatch on the global csp_conf.version. */
 void shim_set_version(int v) {
@@ -739,4 +740,96 @@ int shim_node_sfp_recv(uint8_t port, uint8_t *out, int maxlen) {
 	if ((int)shim_sfp_len > maxlen) { return -102; }
 	memcpy(out, shim_sfp_buf, shim_sfp_len);
 	return (int)shim_sfp_len;
+}
+
+/* --- the C as a client of the port's services ----------------------------- */
+
+/*
+ * A connection the C node opened, held so the reply can be read off it.
+ *
+ * Every node-level exchange before this had the C *answering*: a frame in, a delivery or a
+ * forward or a service reply out. `shim_node_send_on` inverted the data direction but on a
+ * connection the peer had opened. Nothing had the C be the one that connects -- so the
+ * port's reply path, the one that has to find the asking connection on a real peer, had
+ * never been asked a question by a real C client.
+ */
+static csp_conn_t * shim_client_conn;
+
+/*
+ * `csp_connect` + `csp_send` to `dst:dport`. Frames land in the tx capture.
+ *
+ * `opts` is 0, so `csp_connect` does not block -- only an RDP connect waits on the router
+ * task's semaphore, and there is no router task here.
+ *
+ * Returns 1 on success, 0 if no connection or buffer was available.
+ */
+int shim_node_client_send(uint16_t dst, uint8_t dport, const uint8_t *body, int len) {
+	if (shim_client_conn == NULL) {
+		shim_client_conn = csp_connect(2, dst, dport, 0, 0);
+	}
+	if (shim_client_conn == NULL) { return 0; }
+
+	csp_packet_t *out = csp_buffer_get(0);
+	if (out == NULL) { return 0; }
+	if (len > (int)sizeof(out->data)) { csp_buffer_free(out); return 0; }
+	memcpy(out->data, body, (size_t)len);
+	out->length = (uint16_t)len;
+	csp_send(shim_client_conn, out);
+	return 1;
+}
+
+/*
+ * Read one reply off the connection the C opened, as `csp_transaction` would.
+ *
+ * Returns 1 and the payload if something was waiting, 0 otherwise.
+ */
+int shim_node_client_read(uint8_t *out, int *out_len) {
+	if (shim_client_conn == NULL) { return 0; }
+	csp_packet_t *packet = csp_read(shim_client_conn, 0);
+	if (packet == NULL) { return 0; }
+	int n = (int)packet->length;
+	memcpy(out, packet->data, (size_t)n);
+	*out_len = n;
+	csp_buffer_free(packet);
+	return 1;
+}
+
+void shim_node_client_close(void) {
+	if (shim_client_conn != NULL) { csp_close(shim_client_conn); shim_client_conn = NULL; }
+}
+
+/*
+ * Build a CMP request exactly as libcsp lays one out.
+ *
+ * `csp_cmp_ident` and friends fill a `struct csp_cmp_message` and send `sizeof` the
+ * relevant member, so the request the port must accept is two bytes of header followed by
+ * the *reply-sized* body -- padding libcsp requires and a hand-written request would omit.
+ * Taking the size from the C struct is the point: a transcription of the layout into Rust
+ * would be the thing under test, not the oracle.
+ */
+int shim_cmp_build_ident_request(uint8_t *out) {
+	struct csp_cmp_ident_msg msg;
+	memset(&msg, 0, sizeof(msg));
+	msg.type = CSP_CMP_REQUEST;
+	msg.code = CSP_CMP_IDENT;
+	memcpy(out, &msg, sizeof(msg));
+	return (int)sizeof(msg);
+}
+
+/*
+ * Parse a CMP IDENT reply with the C's own struct, the way a C application does.
+ *
+ * Returns 1 if the reply is a well-formed IDENT of the right size, 0 otherwise; the three
+ * strings are what `csp_cmp_ident` would hand its caller.
+ */
+int shim_cmp_parse_ident_reply(const uint8_t *buf, int len,
+                               char *hostname, char *model, char *revision) {
+	if (len != (int)sizeof(struct csp_cmp_ident_msg)) { return 0; }
+	struct csp_cmp_ident_msg msg;
+	memcpy(&msg, buf, sizeof(msg));
+	if (msg.type != CSP_CMP_REPLY || msg.code != CSP_CMP_IDENT) { return 0; }
+	memcpy(hostname, msg.hostname, sizeof(msg.hostname));
+	memcpy(model, msg.model, sizeof(msg.model));
+	memcpy(revision, msg.revision, sizeof(msg.revision));
+	return 1;
 }
