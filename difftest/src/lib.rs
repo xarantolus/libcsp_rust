@@ -4,7 +4,7 @@
 //! can run both on identical bytes and compare. **Dev-only** — this crate is never a
 //! dependency of `csp-core` or `csp`, which is the whole point of the port.
 //!
-//! The 922 golden vectors check the inputs someone thought of. This checks the ones nobody
+//! The 510 golden vectors check the inputs someone thought of. This checks the ones nobody
 //! did.
 //!
 //! # Where the two are *expected* to differ
