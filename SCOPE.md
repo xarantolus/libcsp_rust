@@ -3998,3 +3998,37 @@ therefore stays at zero mutations, with the reason written where the next person
 Four times now: `conn_less: only a conn-less port` took the corpus binary down, the ISN
 replay assertion panicked it, removing the eth `seg_size` guard sliced out of bounds, and now
 this one hangs it. The rule is at the top of the happy-path block and I keep needing it.
+
+### One of the two shape-mismatch cases was never node-level
+
+2026-08-27. Rather than trust the earlier answer that the standing prompt's node-level list
+is covered, measured it: of 37 replay functions in `csp/tests/corpus.rs`, **29 build a
+`Node` or `Router`** and 8 are codec-level (`replay_cmp`, `replay_eth`, `replay_hmac`,
+`replay_rdp_acks`, `replay_rtable`, `replay_sfp`, `replay_sfp_in`, `replay_sfp_multi`).
+
+The two shape-mismatch cases were split across that line, and nobody had noticed:
+
+| case | replay |
+|---|---|
+| `a_fragment_read_as_a_datagram_keeps_the_sfp_header` | node-level, label *"through a Node"* |
+| `a_plain_datagram_given_to_the_stream_reader_is_destroyed` | fell through to the generic `"sfp" =>` arm — a hand-built `Packet` and a direct `Delivery::classify` |
+
+So the destructive half — the one where libcsp **frees the packet** and the port hands it
+back — never ran through a router at all. It does now. Both halves of the divergence were
+verified by control: classifying a plain datagram as a stream makes the record equal the C's
+and the `assert_ne` fires, and zeroing `recovered` does the same.
+
+**A correction to the previous cycle.** I reported that sweep as finding eleven
+literal-valued observation fields, nine of them honest branch conclusions. The regex was
+line-anchored and could not see a field inside a single-line `json!`. Re-run properly there
+are **49** literal-valued fields across 23 distinct (field, value) pairs — including
+`"ret": -103` at three sites and `"sfp_result": -103` at four more.
+
+Having read them: those are not fabrications. The C's observation is an errno and the port
+has none, so the port's `Err` is *translated* into the C's number, and the key sets are
+deliberately kept identical because a `diverges` verdict compares whole objects and two
+objects with different keys are unequal for free — which the code comments already say. The
+one that reads badly is `ret: -103` on the `Datagram` arm, where the port **succeeded**; it
+is doing real work (it makes success and failure differ only in `recovered`, and equality
+with the C is the alarm) but it says the opposite of what happened. Left as it is, with the
+reasoning now written where the next reader will find it rather than inferred.

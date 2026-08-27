@@ -3436,6 +3436,97 @@ fn replay_rdp_handshake(case: &str) -> serde_json::Value {
 /// call. `csp_route.c` never looks at `CSP_FFRAG` -- only `csp_sfp.c` does -- so the C hands
 /// the reader the body with the SFP header still attached. This drives the port's real
 /// router and its real `read`, so what it reports is what an application would get.
+/// A plain datagram handed to the stream reader — **through a node**, not the codec alone.
+///
+/// The two shape-mismatch cases were asymmetric: `a_fragment_read_as_a_datagram` had a
+/// node-level replay and its sibling fell through to the generic `"sfp" =>` arm, which
+/// builds a `Packet` by hand and calls `Delivery::classify` on it. That leaves the path from
+/// a frame arriving to the application asking for the wrong shape unexercised, which is what
+/// the standing prompt lists as the gap.
+///
+/// The observation keeps the C's three fields, because a `diverges` verdict compares whole
+/// objects and a different key set would make the comparison pass without looking at a
+/// value. `ret` is the C's `CSP_ERR_SFP` number in both arms for the same reason -- the C's
+/// observation is an errno and the port has none, so the port's *failure* is translated into
+/// it. The divergence therefore lands on `recovered`: the C frees the packet and reports
+/// nothing, the port hands it back with its bytes. If the port regressed to destroying it,
+/// this arm would not be taken, `recovered` would be 0, the object would equal the C's and
+/// `assert_ne` would fail. Both halves of that were verified by control.
+fn replay_plain_given_to_the_stream_reader(input: &SfpInput) -> serde_json::Value {
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 10;
+
+    type S = csp::CspStorage<8, 16, 264, 48, 32>;
+    let storage = S::new();
+    let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+        csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("INGRESS", NODE, 12, true).unwrap();
+    n.bind(PORT).unwrap();
+
+    let body = unhex(&input.body);
+    let mut p = n.packet().expect("the pool is empty");
+    p.set_id(Id {
+        pri: 2,
+        flags: 0,
+        src: PEER,
+        dst: NODE,
+        dport: PORT,
+        sport: 40,
+    });
+    p.set_payload(&body).unwrap();
+    n.router.receive(p, 0);
+
+    let mut out = serde_json::json!({ "ret": -103, "delivered_bytes": 0, "recovered": 0 });
+    loop {
+        match n.work(0) {
+            csp::Routed::Delivered { conn, .. } => {
+                // Read it as a *stream*, which is the mismatch under test: the application
+                // asked for something the packet is not.
+                struct ConnSrc<'s, 'a> {
+                    node: &'s mut csp::Node<'a, 8, 16, 264, 48, 32, 4>,
+                    conn: csp::conn::Handle,
+                }
+                impl<'a> csp::delivery::PacketSource<'a, 16, 264> for ConnSrc<'_, 'a> {
+                    fn next_packet(
+                        &mut self,
+                        _timeout_ms: u32,
+                    ) -> Option<csp::Packet<'a, 16, 264>> {
+                        self.node.read(self.conn).ok().flatten()
+                    }
+                }
+                let mut src = ConnSrc { node: &mut n, conn };
+                let Some(first) = csp::delivery::PacketSource::next_packet(&mut src, 0) else {
+                    continue;
+                };
+                out = match csp::delivery::Delivery::classify(first, &mut src) {
+                    csp::delivery::Delivery::Datagram(pkt) => {
+                        let len = pkt.with_payload(|d| d.len());
+                        serde_json::json!({
+                            "ret": -103, "delivered_bytes": 0, "recovered": len
+                        })
+                    }
+                    csp::delivery::Delivery::Stream(mut st) => {
+                        let mut buf = [0u8; 256];
+                        match st.read_to_slice(1000, &mut buf) {
+                            Ok(n) => serde_json::json!({
+                                "ret": 0, "delivered_bytes": n, "recovered": 0
+                            }),
+                            Err(_) => serde_json::json!({
+                                "ret": -103, "delivered_bytes": 0, "recovered": 0
+                            }),
+                        }
+                    }
+                };
+                break;
+            }
+            csp::Routed::Idle => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 fn replay_fragment_read_as_a_datagram(input: &SfpInput) -> serde_json::Value {
     const NODE: u16 = 10;
     const PEER: u16 = 11;
@@ -4087,6 +4178,13 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             Some((
                 replay_sfp_multi(&input),
                 format!("{} fragment(s)", input.fragments.len()),
+            ))
+        }
+        "sfp" if rec.case == "a_plain_datagram_given_to_the_stream_reader_is_destroyed" => {
+            let input: SfpInput = serde_json::from_value(rec.input.clone()).unwrap();
+            Some((
+                replay_plain_given_to_the_stream_reader(&input),
+                "through a Node, read as a stream".to_string(),
             ))
         }
         "sfp" => {
