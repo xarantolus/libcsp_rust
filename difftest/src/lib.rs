@@ -107,6 +107,13 @@ unsafe extern "C" {
     fn shim_node_set_dedup(mode: c_int);
     fn shim_node_sfp_recv(port: u8, out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_node_client_send(dst: u16, dport: u8, body: *const u8, len: c_int) -> c_int;
+    fn shim_node_client_send_prio(
+        prio: u8,
+        dst: u16,
+        dport: u8,
+        body: *const u8,
+        len: c_int,
+    ) -> c_int;
     fn shim_node_client_read(out: *mut u8, out_len: *mut c_int) -> c_int;
     fn shim_node_client_close();
     fn shim_cmp_build_ident_request(out: *mut u8) -> c_int;
@@ -484,6 +491,31 @@ pub fn c_node_client_send(dst: u16, dport: u8, body: &[u8]) -> Vec<Vec<u8>> {
     unsafe {
         shim_node_clear_tx();
         if shim_node_client_send(dst, dport, body.as_ptr(), body.len() as c_int) != 1 {
+            return frames;
+        }
+        shim_node_pump();
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
+}
+
+/// The same, but through `csp_send_prio` with `prio`.
+///
+/// Uses the *same held connection* as [`c_node_client_send`], which is the point: what the
+/// call leaves behind on that connection is only visible in what the next plain send does.
+pub fn c_node_client_send_prio(prio: u8, dst: u16, dport: u8, body: &[u8]) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: same bounds and buffers as `c_node_client_send`. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        if shim_node_client_send_prio(prio, dst, dport, body.as_ptr(), body.len() as c_int) != 1 {
             return frames;
         }
         shim_node_pump();

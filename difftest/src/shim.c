@@ -864,6 +864,33 @@ int shim_node_client_send(uint16_t dst, uint8_t dport, const uint8_t *body, int 
 }
 
 /*
+ * `csp_send_prio` on the same held connection, so what it leaves behind is observable.
+ *
+ * `csp_io.c:322` is two lines: `conn->idout.pri = prio; csp_send(conn, packet);`. The write
+ * is to the *connection*, not the packet, so the next ordinary `csp_send` on it carries the
+ * new priority too. A caller raising the priority of one urgent frame silently raises every
+ * frame after it. Nothing in either harness had ever called it.
+ *
+ * `prio` is the CSP priority, 0 (critical) to 3 (low). Returns 1 on success, 0 if no
+ * connection or buffer was available.
+ */
+int shim_node_client_send_prio(uint8_t prio, uint16_t dst, uint8_t dport,
+                               const uint8_t *body, int len) {
+	if (shim_client_conn == NULL) {
+		shim_client_conn = csp_connect(2, dst, dport, 0, 0);
+	}
+	if (shim_client_conn == NULL) { return 0; }
+
+	csp_packet_t *out = csp_buffer_get(0);
+	if (out == NULL) { return 0; }
+	if (len > (int)sizeof(out->data)) { csp_buffer_free(out); return 0; }
+	memcpy(out->data, body, (size_t)len);
+	out->length = (uint16_t)len;
+	csp_send_prio(prio, shim_client_conn, out);
+	return 1;
+}
+
+/*
  * Read one reply off the connection the C opened, as `csp_transaction` would.
  *
  * Returns 1 and the payload if something was waiting, 0 otherwise.

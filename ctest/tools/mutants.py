@@ -149,6 +149,12 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # `csp_send_prio` writes the priority into the *connection*; the port applies it to the
+  # packet. A deliberate divergence (SCOPE.md 32) that nothing had ever measured -- the C
+  # side of it was a doc comment.
+  ("send_prio: the override reaches the wire", "csp/src/node.rs",
+   "        let mut id = self.router.conns.id_out(conn)?;\n        id.pri = pri;",
+   "        let mut id = self.router.conns.id_out(conn)?;\n        let _ = pri;"),
   # `CSP_SO_CONN_LESS`: the packet goes to the socket, not to a connection, so a server on
   # such a port takes peers it has no connections for. Nothing had ever named the option.
   ("conn_less: the socket is the endpoint", "csp/src/router.rs",
