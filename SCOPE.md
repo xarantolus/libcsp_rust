@@ -2456,3 +2456,56 @@ Recorded so the next pass does not re-open them:
   delivery that precedes it is covered by `a_packet_for_a_bound_port_reaches_the_application_identically`,
   and the one case where the router *does* matter has its own node-level replay
   (`a_fragment_read_as_a_datagram_keeps_the_sfp_header`).
+
+### The built-in services had never been put next to the C
+
+2026-08-27. `csp::service::respond` handles ping, ps, memfree, buf_free, uptime and reboot —
+ports 1 to 6, the services a ground station actually uses. Measured, not assumed:
+
+- **no corpus record.** The eleven suites are buffer, cmp, conn, dedup, eth, hmac, promisc,
+  queue, rdp, route, security, sfp. There is no `suite_service.c`.
+- **no golden vector, no differential test.**
+- **its only callers anywhere are three `#[cfg(test)]` bodies in `client.rs`.**
+
+So every statement about the built-in services was a reading of `csp_service_handler.c`.
+Ping is how an operator finds out whether the link works at all; reboot is the one service
+that cannot be undone from the ground. Neither had ever been compared with libcsp.
+
+**Measured: the port was right.** `difftest/tests/node_service.rs` puts the two side by
+side, driving the port's whole path — router, bound port, the application's `read`,
+`Request::decode`, `respond`, `reply_to` onto a wire — so what is compared is what a peer
+receives.
+
+Not every service is comparable the same way, and saying which is which is half the work:
+
+| service | compared on |
+|---|---|
+| PING | byte for byte, at 0, 4 and 200 bytes — a pure echo, no node state involved |
+| PS | reply-or-silence, both empty and non-empty, so the silent case is not passing because nothing ever answers |
+| REBOOT / SHUTDOWN | which payloads open the guard, and that the two magic words are not confused |
+| MEMFREE | both stacks *given* the same number: the C's comes from a hook, the port's from the caller |
+| BUF_FREE, UPTIME | not comparable by value — the C reports its own pool and clock. The port is fed the number the C reported, so the shared claim is the **encoding**, which is what a ground decoder depends on |
+
+Four controls, each failing exactly one test and no other: a ping short by one byte, an empty
+process list answered anyway, little-endian counters, and a reboot guard that accepts any
+payload.
+
+One real difference, in the port's favour and already deliberate: `Request::decode` refuses a
+REBOOT payload shorter than four bytes. `csp_service_handler.c:50` does
+`memcpy(&magic_word, packet->data, sizeof(magic_word))` with no length check, so a
+zero-length reboot request reads four bytes past the payload and compares whatever is in the
+buffer against the magic word. Reused buffers make that a real, if unlikely, path to an
+uncommanded reboot.
+
+#### The harness would have rebooted the machine
+
+Found while setting this up, and worth its own note: `difftest/build.rs` linked
+`src/arch/posix/csp_system.c`, whose `csp_reboot_hook` is `sync();
+reboot(LINUX_REBOOT_CMD_RESTART)` on Linux. Any test that sent port 4 with the right magic
+word would have rebooted the host running it — which is precisely the test anyone would
+write when they got to the reboot service. `ctest/hooks.c` had already dealt with this for
+the C-oracle build; `difftest` had not, because nothing had yet needed the reboot path.
+
+`build.rs` now omits that file and `shim.c` supplies recording hooks, the same technique
+already used for `csp_time.c`. It is also what makes MEMFREE comparable at all: the real hook
+reports however much RAM the host happens to have free.

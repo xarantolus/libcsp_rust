@@ -117,6 +117,11 @@ unsafe extern "C" {
         model: *mut u8,
         revision: *mut u8,
     ) -> c_int;
+    fn shim_service_rebooted() -> c_int;
+    fn shim_service_shut_down() -> c_int;
+    fn shim_service_hooks_reset();
+    fn shim_set_memfree(bytes: u32);
+    fn shim_set_ps_entries(n: u32);
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -400,6 +405,34 @@ pub fn c_cmp_parse_ident(reply: &[u8]) -> Option<(String, String, String)> {
             .into_owned()
     };
     Some((cstr(&h), cstr(&m), cstr(&r)))
+}
+
+/// Whether the C node's reboot / shutdown hook was reached, since the last reset.
+///
+/// The real posix hooks reboot the machine, so this build supplies recording ones instead
+/// (see `build.rs`). Without that, "does the magic word gate the reboot service" is a
+/// question no test could safely ask.
+pub fn c_service_rebooted() -> (bool, bool) {
+    // SAFETY: two reads of a static int, no arguments. Callers hold `LOCK`.
+    unsafe { (shim_service_rebooted() != 0, shim_service_shut_down() != 0) }
+}
+
+/// Clear the recorded hooks and restore the fixed MEMFREE value.
+pub fn c_service_hooks_reset() {
+    // SAFETY: writes only the shim's own statics. Callers hold `LOCK`.
+    unsafe { shim_service_hooks_reset() }
+}
+
+/// What the C node reports for MEMFREE, so the two stacks can be given the same number.
+pub fn c_set_memfree(bytes: u32) {
+    // SAFETY: writes one static. Callers hold `LOCK`.
+    unsafe { shim_set_memfree(bytes) }
+}
+
+/// What `csp_ps_hook` returns — the C's PS handler replies only if this is non-zero.
+pub fn c_set_ps_entries(n: u32) {
+    // SAFETY: writes one static. Callers hold `LOCK`.
+    unsafe { shim_set_ps_entries(n) }
 }
 
 /// Accept and close every connection waiting on `port`, draining each; return the count.
