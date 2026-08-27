@@ -2651,3 +2651,52 @@ The interleaving case holds the transfer identifier **equal** between the two se
 start, so only the source field distinguishes them. That is the fix the v2 version of this
 test needed after a control caught it varying two fields at once; doing it right the first
 time here is the lesson actually being applied rather than just recorded.
+
+### The reassembly pool nothing drove, and a wedge in the C it exposed
+
+2026-08-27. The search that produced the give-up counter and `V1Reassembler` — public
+functions referenced nowhere outside their own file — re-run over the current tree: **30 of
+235**. Most are legitimately application- or driver-facing (`into_datagram`, `total_len`,
+`fanout_missed`, and the six `Interface::note_*` counter setters a driver calls; `note_refusal`
+dispatches to two of them inside the same file, which is why they look unreferenced). One was
+not.
+
+**`cfp::Pbufs` — the port's counterpart of `csp_if_can_pbuf.c` — had no user anywhere outside
+`cfp.rs`.** And the interleaving cases added the day before were half-tests: they fed the
+*C's* pool two senders and checked the *C* kept them apart. The port's concurrent reassembly,
+the entire reason `Pbufs` exists, had never been driven by anything but its own unit tests.
+
+Driving it turned up a divergence in the C, found by measurement after an assertion of mine
+turned out to be wrong.
+
+**What I asserted, and what is true.** The first version of the expiry test asserted that the
+C reclaims a stalled buffer after `PBUF_TIMEOUT_MS` and reassembles the sender's retry. It
+does not. `csp_can_pbuf_cleanup` runs only from `csp_can_pbuf_new`, and `new` is reached only
+when `csp_can_pbuf_find` returns NULL — a stalled buffer with the same identifier bits is
+*found*, so the sweep never runs for it however long the sender waits. Measured:
+
+| | retrying the same key after the timeout |
+|---|---|
+| C | first frame `CSP_ERR_NONE`, every later one `-2 CSP_ERR_INVAL`, nothing delivered |
+| port | the repeated `begin` restarts the transfer; the payload arrives intact |
+
+So in the C a single lost frame wedges that sender until some *other* sender allocates a
+buffer and incidentally runs the sweep. On a quiet bus with one talker that is indefinite —
+and a CAN bus with one talker is exactly a spacecraft between passes. The port treats a
+`begin` as what it says it is and starts over, and its sweep is an explicit call rather than a
+side effect of allocating, so it can happen with no traffic at all.
+
+Recorded as a deliberate deviation and asserted **as a divergence**: a control that regresses
+the port to the C's behaviour (refuse a `begin` while a transfer is in progress) fails
+`a_truncated_transfer_wedges_the_c_and_the_port_recovers` and nothing else.
+
+Four controls in total. The pool handing every key the same reassembler fails the interleaving
+and sweep cases; a sweep that reclaims everything, and one that reclaims nothing, each fail the
+sweep case; the regression above fails only the divergence case.
+
+**And a harness bug worth recording, because it produced a plausible wrong answer.** The first
+version of the pool helper allocated the output buffer *inside* the per-frame loop. A
+reassembler writes each fragment at its own offset, so every frame landed in a fresh zeroed
+array and only the last survived — the failure printed two payloads of zeroes ending in the
+right two bytes, which reads like a subtle off-by-one in the port rather than a mistake in the
+test. One buffer per sender, not per frame.
