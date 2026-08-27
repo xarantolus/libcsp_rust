@@ -656,8 +656,15 @@ fn replay_eth(input: &EthInput) -> EthObserved {
     // port look more permissive than the C when it is only better provisioned.
     const CSP_BUFFER_SIZE: usize = 256;
     const V2_HEADER: usize = 6;
-    let mut r = eth::Reassembler::with_min_len(V2_HEADER as u16);
-    let mut out = [0u8; CSP_BUFFER_SIZE + V2_HEADER];
+    // A *pool*, not one reassembler. `csp_eth_pbuf.c` holds a list, and the key
+    // `csp_if_eth.c:153` builds is the packet id concatenated with the source address — so
+    // several transfers are in flight whenever two nodes on the segment talk at once, which
+    // is the ordinary case. With a single `Reassembler` the port refused every segment of
+    // the second sender and delivered one packet where the C delivered two; the two
+    // `two_senders_*` records are what caught it.
+    let mut pool: csp_core::cfp::Pbufs<eth::Reassembler, 4> = csp_core::cfp::Pbufs::new();
+    let mut outs = [[0u8; CSP_BUFFER_SIZE + V2_HEADER]; 4];
+    let mut slot_for: [Option<u32>; 4] = [None; 4];
     let mut refused = 0;
     let mut frame = 0;
     let mut delivered = 0;
@@ -676,18 +683,34 @@ fn replay_eth(input: &EthInput) -> EthObserved {
             // the header and ignores the rest, as `csp_eth_rx` does. Trimming here would
             // put the guard in the test again.
             let payload = bytes.get(eth::HEADER_LEN..).ok_or(())?;
-            if r.push(&h, payload, &mut out).map_err(|_| ())? {
+            let key = h.reassembly_key();
+            // One output buffer per in-flight transfer, found by the same key as the
+            // reassembler: segments arrive interleaved, so a shared buffer would splice
+            // them.
+            let idx = slot_for
+                .iter()
+                .position(|s| *s == Some(key))
+                .or_else(|| {
+                    let i = slot_for.iter().position(|s| s.is_none())?;
+                    slot_for[i] = Some(key);
+                    Some(i)
+                })
+                .ok_or(())?;
+            let r = pool
+                .get_or_create_with(key, 0, || eth::Reassembler::with_min_len(V2_HEADER as u16))
+                .ok_or(())?;
+            if r.push(&h, payload, &mut outs[idx]).map_err(|_| ())? {
                 let total = h.packet_length as usize;
-                let id = csp_core::id::Id::decode(Version::V2, &out[..total]).map_err(|_| ())?;
+                let id =
+                    csp_core::id::Id::decode(Version::V2, &outs[idx][..total]).map_err(|_| ())?;
                 // Only what is addressed to this node reaches the application; the C suite
                 // sends some frames to a peer to exercise the address filter.
                 if id.dst == LOCAL_ADDR || input.promisc != 0 {
                     delivered += 1;
-                    if body.is_empty() {
-                        body = tohex(&out[V2_HEADER..total]);
-                    }
+                    body.push_str(&tohex(&outs[idx][V2_HEADER..total]));
                 }
-                r.reset();
+                pool.release(key);
+                slot_for[idx] = None;
             }
             Ok(())
         })();

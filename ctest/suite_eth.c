@@ -111,11 +111,14 @@ static unsigned int drain_qfifo(void) {
 		if (item.packet == NULL) {
 			break;
 		}
-		if (delivered_n == 0) {
-			delivered_body_len = item.packet->length > sizeof(delivered_body)
-									 ? sizeof(delivered_body)
-									 : item.packet->length;
-			memcpy(delivered_body, item.packet->data, delivered_body_len);
+		/* Every body, in order, concatenated -- not just the first. Recording one of two
+		   deliveries cannot tell "both arrived intact" from "two packets spliced from each
+		   other's segments", which is exactly what the interleaving cases below ask. */
+		{
+			size_t room = sizeof(delivered_body) - delivered_body_len;
+			size_t n_copy = item.packet->length < room ? item.packet->length : room;
+			memcpy(delivered_body + delivered_body_len, item.packet->data, n_copy);
+			delivered_body_len += n_copy;
 		}
 		csp_buffer_free(item.packet);
 		delivered_n++;
@@ -124,8 +127,19 @@ static unsigned int drain_qfifo(void) {
 	return n;
 }
 
+/* As `whole_packet`, but with a caller-chosen fill so two senders' payloads differ.
+   With both filled the same way, a test that interleaves them cannot tell an intact pair
+   from a spliced one -- the bytes are identical either way. */
+static uint16_t whole_packet_seeded(uint8_t * out, size_t payload_len, uint16_t dst,
+									uint8_t seed);
+
 /* A complete, well-formed single-segment frame carrying a CSP packet for us. */
 static uint16_t whole_packet(uint8_t * out, size_t payload_len, uint16_t dst) {
+	return whole_packet_seeded(out, payload_len, dst, 0xD5);
+}
+
+static uint16_t whole_packet_seeded(uint8_t * out, size_t payload_len, uint16_t dst,
+									uint8_t seed) {
 	csp_packet_t * p = csp_buffer_get(0);
 	ck_assert_ptr_nonnull(p);
 	p->id.pri = 2;
@@ -137,7 +151,7 @@ static uint16_t whole_packet(uint8_t * out, size_t payload_len, uint16_t dst) {
 	/* Positional, not a constant fill: with every byte the same, a reassembly that put the
 	   segments back in the wrong order would produce identical bytes and pass. */
 	for (size_t i = 0; i < payload_len; i++) {
-		p->data[i] = (uint8_t)(0xD5 ^ i);
+		p->data[i] = (uint8_t)(seed ^ i);
 	}
 	p->length = (uint16_t)payload_len;
 	csp_id_prepend(p);
@@ -447,6 +461,62 @@ START_TEST(test_two_segments_are_reassembled)
 }
 END_TEST
 
+/* Two senders, interleaved, with different packet ids.
+ *
+ * The C holds a *list* of reassembly buffers, so several transfers can be in flight at once.
+ * Nothing in this suite had ever interleaved anything -- all twenty cases were one transfer
+ * at a time -- so the list had never been exercised. */
+START_TEST(test_two_senders_with_different_packet_ids_both_reassemble)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body_a[CSP_BUFFER_SIZE], body_b[CSP_BUFFER_SIZE];
+	const uint16_t len_a = whole_packet_seeded(body_a, 32, LOCAL_ADDR, 0xD5);
+	const uint16_t len_b = whole_packet_seeded(body_b, 24, LOCAL_ADDR, 0x3C);
+	const uint16_t first = 10;
+
+	deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR, first, len_a, ETH_HDR + first, body_a, first);
+	deliver(CSP_ETH_TYPE_CSP, 9, PEER_ADDR + 1, first, len_b, ETH_HDR + first, body_b, first);
+	ck_assert_uint_eq(drain_qfifo(), 0);
+
+	deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR, (uint16_t)(len_a - first), len_a,
+			ETH_HDR + (len_a - first), body_a + first, (size_t)(len_a - first));
+	int ret = deliver(CSP_ETH_TYPE_CSP, 9, PEER_ADDR + 1, (uint16_t)(len_b - first), len_b,
+					  ETH_HDR + (len_b - first), body_b + first, (size_t)(len_b - first));
+
+	record("two_senders_with_different_packet_ids_both_reassemble", ret, before);
+}
+END_TEST
+
+/* The same, but both senders use the same packet id.
+ *
+ * `csp_if_eth_unpack_header` builds the reassembly key as the packet id *concatenated with
+ * the source address* (`csp_if_eth.c:153`), so a shared id is not a collision: the sources
+ * still separate them. Reading `csp_eth_pbuf_find`'s `packet->cfpid == id` alone suggests
+ * otherwise, which is why this is measured. */
+START_TEST(test_two_senders_sharing_a_packet_id_are_kept_apart_by_source)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body_a[CSP_BUFFER_SIZE], body_b[CSP_BUFFER_SIZE];
+	/* Same length, different fill: the only way a splice is visible. */
+	const uint16_t len_a = whole_packet_seeded(body_a, 32, LOCAL_ADDR, 0xD5);
+	const uint16_t len_b = whole_packet_seeded(body_b, 32, LOCAL_ADDR, 0x3C);
+	const uint16_t first = 10;
+
+	deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR, first, len_a, ETH_HDR + first, body_a, first);
+	deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR + 1, first, len_b, ETH_HDR + first, body_b, first);
+	deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR, (uint16_t)(len_a - first), len_a,
+			ETH_HDR + (len_a - first), body_a + first, (size_t)(len_a - first));
+	int ret = deliver(CSP_ETH_TYPE_CSP, 8, PEER_ADDR + 1, (uint16_t)(len_b - first), len_b,
+					  ETH_HDR + (len_b - first), body_b + first, (size_t)(len_b - first));
+
+	record("two_senders_sharing_a_packet_id_are_kept_apart_by_source", ret, before);
+}
+END_TEST
+
 /* Two segments of the same packet that disagree about how long it is. The pbuf is released
    rather than left holding a buffer until it times out. */
 START_TEST(test_segments_disagreeing_on_the_packet_length_are_refused)
@@ -636,6 +706,8 @@ Suite * eth_suite(void)
 	tcase_add_test(tc_rx, test_a_whole_packet_in_one_segment_is_delivered);
 	tcase_add_test(tc_rx, test_a_frame_padded_to_the_ethernet_minimum_is_delivered);
 	tcase_add_test(tc_rx, test_two_segments_are_reassembled);
+	tcase_add_test(tc_rx, test_two_senders_with_different_packet_ids_both_reassemble);
+	tcase_add_test(tc_rx, test_two_senders_sharing_a_packet_id_are_kept_apart_by_source);
 	tcase_add_test(tc_rx, test_segments_disagreeing_on_the_packet_length_are_refused);
 	tcase_add_test(tc_rx, test_segments_totalling_more_than_the_packet_are_refused);
 	tcase_add_test(tc_rx, test_a_packet_for_another_node_is_not_delivered);
