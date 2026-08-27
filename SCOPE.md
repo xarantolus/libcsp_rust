@@ -1932,6 +1932,23 @@ whoever maintains the fork can see what was found and decide for themselves.
     (`csp_if_eth.c:229`), so it only means a spoofer has to be first. `ArpTable` updates and
     evicts LRU. Asserted as divergences in `difftest/tests/eth_arp.rs`; the broadcast
     fallback, which is the rule a driver actually leans on, is asserted as *agreement*.
+35. **The RDP initial sequence number is a different function of the same clock.**
+    `csp_rdp.c:548` is `unsigned int seed = csp_get_ms(); snd_iss = rand_r(&seed)` — the
+    seed is function-local and re-read on every SYN, so the C's ISN is a pure function of
+    the clock and not random at all. An attacker who can estimate a peer's uptime to the
+    millisecond can guess the sequence number its next connection will open with.
+
+    The port keeps the property and not the number: `Router::initial_seq` mixes `now_ms`
+    with a multiplicative constant, because a sans-io `no_std` core has no entropy source
+    to do better with and reproducing `rand_r` would only copy the weakness. Measured at
+    clock 1 234 567 the C opens at 17867 and the port at a different value; both give the
+    same answer for the same clock and a different one for a different clock.
+
+    Corpus: `rdp::isn_is_a_function_of_the_clock`. The record was `c_only` on the grounds
+    that *"the port takes the ISN as a parameter rather than deriving it from a clock, so
+    there is nothing here for it to match"* — true when written, false since `initial_seq`
+    was added, and nothing noticed until a mutation replacing that function with a constant
+    `0` moved one unit test and no corpus record at all.
 
 ---
 
@@ -3799,3 +3816,40 @@ larger one it stopped flagging line 54 of `csp_port.c` — because that comment 
 NULL" and there is a `return NULL;` two lines above the brace. A threshold fitted until the
 output looks right is not a check, so it is documented in the tool as rejected rather than
 shipped at whichever setting made this cycle's list shortest.
+
+### The mutation set was almost all "remove a guard"
+
+2026-08-27. `just mutants` prints the corpus records **no mutation could move**, with the
+honest caveat that it cannot tell "measuring something no mutation touches" from "not
+measuring the port at all". 27 of 151 were in that list, and nobody had mined it.
+
+The first five mutations I added were more of the same kind the list already had — weaken a
+bound, drop a check — and they moved **two** records. That is the finding: nearly every
+mutation in the file removes a guard, and removing a guard cannot move a record that never
+trips it. A negative-path record is unmovable unless you break *its* guard, and a
+happy-path record is unmovable by guard removal at all.
+
+Four mutations that break correct behaviour instead — the completion report, the payload
+offset, the duplicate answer, the ISN — moved **19** records between them:
+
+| | records moved |
+|---|---|
+| five more guard mutations | 2 |
+| four happy-path mutations | 19 |
+
+124 → 131 of 151 records now move under something, and the unmovable list is 27 → 20.
+
+**And one of the four found a live defect in the corpus itself.** `rdp: the ISN is a
+function of the clock` moved a unit test and **not** `rdp::isn_is_a_function_of_the_clock`,
+the record named for exactly that property. The record was `c_only` — no port-side replay at
+all — justified by a comment saying the port "takes the ISN as a parameter rather than
+deriving it from a clock, so there is nothing here for it to match". `Router::initial_seq`
+had made that false, and the justification outlived it. The record is now `diverges` with a
+replay that reads the ISN off the SYN and pins the property (same clock, same number;
+different clock, different number), and deviation 35 above says why the numbers differ. The
+divergence-documentation guard caught the missing SCOPE entry on the first run.
+
+The C trace was narrowed at the same time: it recorded `snd_nxt` and `snd_una`, which at
+that instant are internal bookkeeping. Only the sequence number the SYN carries is
+comparable, and a record that reports fields one side cannot see is a record that can only
+be `c_only`.

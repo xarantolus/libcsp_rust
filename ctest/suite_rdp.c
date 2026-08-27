@@ -328,14 +328,24 @@ START_TEST(test_rdp_isn_is_a_function_of_the_clock)
 	ck_assert_uint_eq(conn->rdp.snd_iss, RDP_ISS_AT_1234567_MS);
 
 	/* Recorded after the assertions, so a record only exists for a case the harness got
-	   right. The verdict is c_only: the port takes the ISN as a parameter rather than
-	   deriving it from a clock, so there is nothing here for it to match. */
-	ctest_trace_begin("rdp", "isn_is_a_function_of_the_clock", "c_only");
+	   right.
+
+	   The verdict was `c_only`, on the grounds that "the port takes the ISN as a parameter
+	   rather than deriving it from a clock, so there is nothing here for it to match".
+	   That stopped being true: `Router::initial_seq` derives it from `now_ms`, and the
+	   only test of that was one the port wrote itself. It is `diverges` now -- both stacks
+	   make the ISN a pure function of the clock and they compute different functions of it,
+	   the C's being `rand_r` over a per-SYN seed and the port's a fixed mix, because a
+	   sans-io core has no entropy source to do better with.
+
+	   Only what a peer can see is recorded. `snd_nxt` and `snd_una` at this instant are
+	   internal bookkeeping; the sequence number on the SYN is the ISN as the wire carries
+	   it, and it is what the port can be compared on. The assertions above still check all
+	   three inside the C. */
+	ctest_trace_begin("rdp", "isn_is_a_function_of_the_clock", "diverges");
 	ctest_trace_obj_begin("observed");
 	ctest_trace_int("clock_ms", 1234567);
 	ctest_trace_int("snd_iss", conn->rdp.snd_iss);
-	ctest_trace_int("snd_nxt", conn->rdp.snd_nxt);
-	ctest_trace_int("snd_una", conn->rdp.snd_una);
 	ctest_trace_obj_end();
 	ctest_trace_end();
 }

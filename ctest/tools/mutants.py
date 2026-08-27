@@ -152,6 +152,40 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # **Happy-path mutations.** Nearly every mutation above weakens a guard, and weakening a
+  # guard cannot move a record that never trips it -- which is why 27 records could not be
+  # moved by anything and why five new guard mutations moved only two of them. These break
+  # correct behaviour instead: the completion report, the payload offset, the ISN, the
+  # duplicate answer, and the rule that a reply is not answered.
+  ("eth: a finished transfer is reported finished", "csp-core/src/eth.rs",
+   "        self.received = self.received.saturating_add(payload.len() as u16);\n        Ok(self.is_complete())",
+   "        self.received = self.received.saturating_add(payload.len() as u16);\n        Ok(false)"),
+  ("eth: a segment lands where it belongs", "csp-core/src/eth.rs",
+   "        out[offset..end].copy_from_slice(payload);",
+   "        out[..payload.len()].copy_from_slice(payload);"),
+  ("dedup: a packet not seen before is not a duplicate", "csp/src/dedup.rs",
+   "        self.next = (self.next + 1) % DEDUP_COUNT;\n        false",
+   "        self.next = (self.next + 1) % DEDUP_COUNT;\n        true"),
+  ("rdp: the ISN is a function of the clock", "csp/src/router.rs",
+   "        let mixed = now_ms.wrapping_mul(2_654_435_761);\n        ((mixed >> 16) ^ mixed) as u16",
+   "        let _ = now_ms;\n        0"),
+  # Seven records that no mutation could move. The tool cannot tell "measuring something no
+  # mutation touches" from "not measuring the port at all", so each of these targets one of
+  # them directly: if the record notices, it measures the port and the gap was in this list;
+  # if it does not, the record is vacuous and that is the finding.
+  ("eth: the header fields are not transposed", "csp-core/src/eth.rs",
+   "        out[16..18].copy_from_slice(&self.src_addr.to_be_bytes());\n        out[18..20].copy_from_slice(&self.seg_size.to_be_bytes());",
+   "        out[16..18].copy_from_slice(&self.seg_size.to_be_bytes());\n        out[18..20].copy_from_slice(&self.src_addr.to_be_bytes());"),
+  ("eth: the ethertype reaches the wire", "csp-core/src/eth.rs",
+   "        out[12..14].copy_from_slice(&self.ethertype.to_be_bytes());",
+   "        out[12..14].copy_from_slice(&0u16.to_be_bytes());"),
+  ("dedup: the window is 100 ms", "csp/src/dedup.rs",
+   "pub const DEDUP_WINDOW_MS: u32 = 100;", "pub const DEDUP_WINDOW_MS: u32 = 0;"),
+  ("cmp: the peek maximum is 200", "csp-core/src/cmp.rs",
+   "    pub const PEEK_MAX: usize = 200;", "    pub const PEEK_MAX: usize = 255;"),
+  ("security: an unsupported flag is refused", "csp-core/src/security.rs",
+   "    if id.has_flag(flags::HMAC) && !support.hmac {\n        return Err(Refusal::Unsupported);\n    }",
+   "    if false {\n        return Err(Refusal::Unsupported);\n    }"),
   # `check_default` has two branches and nothing had ever driven either: an early return
   # when something is already default, and a sweep that marks everything else. What it
   # decides is whether an unroutable packet is dropped or put on every link.
