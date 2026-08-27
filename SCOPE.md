@@ -2617,3 +2617,37 @@ and never matched anywhere in the workspace, and its documentation was `Routed::
 describing RDP handshakes arriving "this way". A transparent bridge terminates nothing and so
 originates nothing. Removed, rather than left as a public variant whose doc invites an
 application to write a dead arm.
+
+### CFP v1 reassembly: the half of the CAN interface the last cycle left
+
+2026-08-27. `node_can.rs` closed the gap that `csp_if_can.c` had never been compiled — and
+covered **v2 only**. `csp_can_rx` dispatches on `csp_conf.version`, which is init-only, so the
+v1 half was untouched by construction and stayed exactly as it was.
+
+Measured on this branch before writing anything: **`csp_core::cfp::V1Reassembler` had no
+caller anywhere outside its own module** — no golden vector, no differential test, no node
+test. `V1Fragmenter` had exactly one, in the golden-vector generator. So v1 reassembly was a
+reading of `csp_can1_rx` and nothing else, and "CAN is covered" was a claim about half an
+interface.
+
+The two layouts share almost nothing. CFP 1 puts the whole 4-byte CSP header **and** a 2-byte
+total length in the first frame's data, leaving *two* payload bytes; CFP 2 puts a 4-byte
+header extension there and leaves *four*. CFP 1 counts `remain` down in the identifier and has
+no end bit; CFP 2 has begin and end bits and a fragment counter. v2 passing implies nothing
+about v1.
+
+**Measured: the port was right.** `difftest/tests/node_can_v1.rs` drives both directions at
+lengths straddling CFP 1's own boundaries (1, 2, 3, 10, 11, 100 — 2 and 3 are the first-frame
+edge, 10 and 11 the second), plus two senders interleaved.
+
+Five controls, and the split matters: three on the fragmenter (no declared length, `remain`
+off by one, source field zeroed) fail the send direction and the interleaving case; two on the
+reassembler (declared length read from the wrong offset, continuations overwriting instead of
+appending) fail the receive direction. Neither pair touches the other, so each direction is
+pinned by a control of its own — the receive direction being the one that had nothing behind
+it at all.
+
+The interleaving case holds the transfer identifier **equal** between the two senders from the
+start, so only the source field distinguishes them. That is the fix the v2 version of this
+test needed after a control caught it varying two fields at once; doing it right the first
+time here is the lesson actually being applied rather than just recorded.

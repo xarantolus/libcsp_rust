@@ -149,6 +149,24 @@ MUTANTS = [
   # The built-in services had no comparison against libcsp of any kind until
   # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
   # of its tests and no other.
+  # CFP v1: `V1Reassembler` had no caller outside its own module before node_can_v1.rs --
+  # not even a golden vector. The first three fail the send direction, the last two the
+  # receive direction, and neither pair touches the other.
+  ("can v1: the begin frame declares the total length", "csp-core/src/cfp.rs",
+   "            data[V1_HEADER_SIZE..V1_DATA_OFFSET].copy_from_slice(&(total as u16).to_be_bytes());",
+   "            data[V1_HEADER_SIZE..V1_DATA_OFFSET].copy_from_slice(&0u16.to_be_bytes());"),
+  ("can v1: remain counts the frames still to come", "csp-core/src/cfp.rs",
+   "            let remain = (total + V1_DATA_OFFSET - 1) / CAN_FRAME_SIZE;",
+   "            let remain = (total + V1_DATA_OFFSET - 1) / CAN_FRAME_SIZE + 1;"),
+  ("can v1: the fragmenter names its source", "csp-core/src/cfp.rs",
+   "                id: v1_id(self.src, self.dest, TYPE_BEGIN, remain as u32, self.ident),",
+   "                id: v1_id(0, self.dest, TYPE_BEGIN, remain as u32, self.ident),"),
+  ("can v1: the declared length is read after the header", "csp-core/src/cfp.rs",
+   "            let declared =\n                u16::from_be_bytes([data[V1_HEADER_SIZE], data[V1_HEADER_SIZE + 1]]) as usize;",
+   "            let declared = u16::from_be_bytes([data[0], data[1]]) as usize;"),
+  ("can v1: continuations append, not overwrite", "csp-core/src/cfp.rs",
+   "            out[self.received..self.received + n].copy_from_slice(&data[..n]);\n            self.received += n;",
+   "            out[..n].copy_from_slice(&data[..n]);\n            self.received += n;"),
   # csp_if_can.c had never been compiled, here or in ctest, so every CFP comparison was of
   # the identifier's bit layout with shim.c expanding the header macros itself.
   ("can: the fragmenter names its sender", "csp-core/src/cfp.rs",
