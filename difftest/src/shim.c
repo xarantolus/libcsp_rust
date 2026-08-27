@@ -489,6 +489,33 @@ int shim_node_pump(void) {
 	return n;
 }
 
+/* --- the Ethernet ARP table ---------------------------------------------- */
+
+#include <csp/interfaces/csp_if_eth.h>
+
+/*
+ * `csp_eth_arp_set_addr` / `csp_eth_arp_get_addr` decide the destination MAC of every
+ * outgoing Ethernet frame, and neither harness had ever called them.
+ *
+ * Two rules worth measuring rather than reading: `set` **returns without updating** when an
+ * entry for that CSP address already exists (`csp_if_eth.c:101`, "Already set"), and `get`
+ * falls back to the broadcast MAC for an address it has never heard of
+ * (`csp_if_eth.c:133`). A third follows from `arp_alloc`: the array is a bump allocator with
+ * no eviction, so after ARP_MAX_ENTRIES distinct addresses nothing new is ever learned.
+ *
+ * The table is a file-scope list with no reset, so a test must use fresh CSP addresses
+ * rather than expect to start empty.
+ */
+void shim_arp_set(uint16_t csp_addr, const uint8_t *mac) {
+	uint8_t copy[6];
+	memcpy(copy, mac, sizeof(copy));
+	csp_eth_arp_set_addr(copy, csp_addr);
+}
+
+void shim_arp_get(uint16_t csp_addr, uint8_t *mac_out) {
+	csp_eth_arp_get_addr(mac_out, csp_addr);
+}
+
 /* --- CMP memory access, bounded ------------------------------------------ */
 
 /*

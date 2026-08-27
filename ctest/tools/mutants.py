@@ -152,6 +152,17 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # The ARP table decides the destination MAC of every outgoing Ethernet frame. Neither
+  # `csp_eth_arp_set_addr` nor `csp_eth_arp_get_addr` had ever been called by a harness, and
+  # `ArpTable` had no caller anywhere.
+  ("arp: an unknown address broadcasts", "csp-core/src/eth.rs",
+   "        BROADCAST_MAC\n    }\n\n    /// Whether `addr` is known, without touching its recency.",
+   "        [0u8; MAC_LEN]\n    }\n\n    /// Whether `addr` is known, without touching its recency."),
+  ("arp: a moved peer is followed", "csp-core/src/eth.rs",
+   "            e.1 = mac;\n            e.2 = now;\n            return;",
+   "            e.2 = now;\n            return;"),
+  ("arp: a full table still learns", "csp-core/src/eth.rs",
+   "        self.entries[oldest] = Some((addr, mac, now));", "        let _ = oldest;"),
   # The v2 peek/poke reply must be CMP_PEEK_V2_SIZE(len) = 11 + 3 + len. Three bytes short
   # and `csp_transaction_persistent` refuses the whole reply, so ground cannot peek at all.
   ("cmp v2: the reply carries its tail", "csp-core/src/cmp.rs",

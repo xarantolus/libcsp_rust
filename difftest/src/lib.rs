@@ -119,6 +119,8 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_client_read(out: *mut u8, out_len: *mut c_int) -> c_int;
     fn shim_node_client_close();
+    fn shim_arp_set(csp_addr: u16, mac: *const u8);
+    fn shim_arp_get(csp_addr: u16, mac_out: *mut u8);
     fn shim_mem_base() -> u64;
     fn shim_mem_fill(seed: u8, step: u8);
     fn shim_mem_read(off: u32, out: *mut u8, len: c_int) -> c_int;
@@ -295,6 +297,20 @@ pub fn c_node_bind(port: u8) -> i32 {
 pub fn c_node_bind_any() -> i32 {
     // SAFETY: no arguments; idempotent behind a flag on the C side. Callers hold `LOCK`.
     unsafe { shim_node_bind_any() }
+}
+
+/// Teach libcsp's Ethernet ARP table that `csp_addr` lives at `mac`.
+pub fn c_arp_set(csp_addr: u16, mac: [u8; 6]) {
+    // SAFETY: `mac` is six bytes, which is what the shim copies. Callers hold `LOCK`.
+    unsafe { shim_arp_set(csp_addr, mac.as_ptr()) }
+}
+
+/// The MAC libcsp would address a frame for `csp_addr` to.
+pub fn c_arp_get(csp_addr: u16) -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    // SAFETY: the shim writes exactly six bytes. Callers hold `LOCK`.
+    unsafe { shim_arp_get(csp_addr, mac.as_mut_ptr()) }
+    mac
 }
 
 /// The base address libcsp's CMP peek/poke region answers to in this harness.
