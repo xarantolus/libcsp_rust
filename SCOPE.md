@@ -1645,7 +1645,7 @@ whoever maintains the fork can see what was found and decide for themselves.
 2. **Duplicate weak `csp_input_hook`** — defined `__weak` twice in one library
    (`csp_route.c:106` and `csp_bridge.c:19`); which wins is link-order dependent. Becomes
    one trait method.
-3. **Wrong-shape SFP delivery is destructive** — `csp_sfp_header_remove` (`csp_sfp.c:32-35`)
+3. **Wrong-shape SFP delivery is destructive** — `csp_sfp_header_remove` (`csp_sfp.c:33-35`)
    bails the moment `CSP_FFRAG` is clear and the caller frees the packet, so a plain
    datagram sent to a stream port is lost with a misleading `-103`. The port returns the
    packet to the handler instead.
@@ -1791,7 +1791,7 @@ whoever maintains the fork can see what was found and decide for themselves.
     nothing. The port has no separate listen step: `bind` is the whole operation, and the
     backlog is a const generic on the node, so the number is where the storage is.
 25. **`csp_socket_close` unbinds only the first port that names the socket.** It `break`s
-    out of the scan (`csp_port.c:145`), but `csp_bind` never checks whether the socket is
+    out of the scan (`csp_port.c:149`), but `csp_bind` never checks whether the socket is
     already bound elsewhere — it only checks that the *port* is free. So one socket bound
     to ports 10 and 11, then closed, leaves port 11 pointing at a socket whose receive
     queue has just been drained and whose storage the caller is about to reuse. In the
@@ -1850,7 +1850,7 @@ whoever maintains the fork can see what was found and decide for themselves.
     the same data, one stack calling it a success.
 31. **`csp_socket_close` frees connections as if they were packets, and so frees nothing.**
     It dequeues `socket->rx_queue` into a `csp_packet_t *` and calls `csp_buffer_free` on
-    each (`csp_port.c:150`). For a connection-oriented socket that queue holds
+    each (`csp_port.c:158`). For a connection-oriented socket that queue holds
     `csp_conn_t *` — `csp_route.c:194` enqueues the connection, `csp_accept` dequeues one.
     So the pointer handed to `csp_buffer_free` is a connection; its `CONTAINER_OF` steps
     backwards off the front of the connection object, the `skbf_addr` check fails, and it
@@ -1895,7 +1895,7 @@ whoever maintains the fork can see what was found and decide for themselves.
     pinned to their value, in `difftest/tests/node_send_prio.rs`.
 33. **A `PEEK_V2` reply echoes the address in the host's byte order.**
     `csp_cmp_peek_v2_handler` does `cmp->vaddr = htobe64(cmp->vaddr)` **in place**
-    (`csp_cmp_peek_poke.c:65`) to read the request, and never converts it back — so the
+    (`csp_cmp_peek_poke.c:66`) to read the request, and never converts it back — so the
     address field of the reply carries whatever byte order the *node's CPU* uses. Measured
     on a little-endian host, a peek at `0x0000_beef_0000_0010`:
 
@@ -3762,3 +3762,40 @@ rather than the port's behaviour.
 The loopback exemption is worth one line: the C skips `&csp_if_lo` by identity, and the port
 registers no loopback interface at all, so `None` is the ordinary call and there is nothing
 to skip. Both branches now have a mutation.
+
+### Nine citations that pointed at a closing brace
+
+2026-08-27. Three cycles running, the thing that turned out to be wrong was a **claim about
+libcsp** rather than the port's behaviour. Citations are the machine-checkable part of that
+class: the submodule is pinned at `13a8c841`, so a cited line number is fixed forever and a
+wrong one was always wrong — it never drifted into being wrong.
+
+`ctest/tools/cites.py` checks all 188 of them, in `just check`. Two rules, both
+deterministic: the file and line exist, and **the cited line is not blank and not a lone
+brace**. Nine failed the second, four of them pointing at the wrong function entirely:
+
+| file | said | points at | corrected to |
+|---|---|---|---|
+| `csp_port.c` ×1 | 54 | `}` closing `csp_port_get_callback` | 70, the catch-all fallback inside `csp_port_get_socket` |
+| `csp_port.c` ×2 | 145 | blank | 149, the `break` |
+| `csp_port.c` ×2 | 150 | `}` | 158, the `csp_buffer_free(packet)` two comments attribute to it |
+| `csp_port.c` ×1 | 135 | blank | 138, `csp_socket_close` |
+| `csp_sfp.c` ×1 | 32 | blank | 33, the `CSP_FFRAG` test |
+| `csp_cmp_peek_poke.c` ×1 | 65 | blank | 66, the `htobe64` |
+| `csp_io.c` ×1 | 206 | `#endif` | 209, the default-interface loop |
+
+(The "said" column is deliberately not written in citation form: those numbers are the
+defect, and `just cites` scans this file too.)
+
+None changes a conclusion — every claim they support is still true, and several were
+verified against a running node in the last few cycles. What they cost is a reader's time
+and the ability to check the claim at all, which is the whole point of citing a line.
+
+**A heuristic I tried and threw away.** Requiring the citing comment and the cited line to
+share an identifier looked like the real check. It is tunable to catch the four wrong-function
+citations *or* to pass the correct ones, not both: with a small context window it flagged five
+correct citations whose key identifiers are three characters (`irq`, `RDP`, `EAK`), and with a
+larger one it stopped flagging line 54 of `csp_port.c` — because that comment happens to say "returns
+NULL" and there is a `return NULL;` two lines above the brace. A threshold fitted until the
+output looks right is not a check, so it is documented in the tool as rejected rather than
+shipped at whichever setting made this cycle's list shortest.
