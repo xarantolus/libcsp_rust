@@ -667,6 +667,9 @@ fn replay_eth(input: &EthInput) -> EthObserved {
     let mut slot_for: [Option<u32>; 4] = [None; 4];
     let mut refused = 0;
     let mut frame = 0;
+    let mut dropped = 0;
+    // Which slot this frame claimed, so a refusal can give it back.
+    let mut claimed = 0usize;
     let mut delivered = 0;
     let mut body = String::new();
 
@@ -696,9 +699,16 @@ fn replay_eth(input: &EthInput) -> EthObserved {
                     Some(i)
                 })
                 .ok_or(())?;
-            let r = pool
+            claimed = idx;
+            // `csp_eth_rx` counts a frame it cannot get a pbuf for as `drop`, not `frame`
+            // (`csp_if_eth.c:191`) -- the frame was well formed and the node had nowhere to
+            // put it. Everything else it refuses is `frame`.
+            let Some(r) = pool
                 .get_or_create_with(key, 0, || eth::Reassembler::with_min_len(V2_HEADER as u16))
-                .ok_or(())?;
+            else {
+                dropped = 1;
+                return Err(());
+            };
             if r.push(&h, payload, &mut outs[idx]).map_err(|_| ())? {
                 let total = h.packet_length as usize;
                 let id =
@@ -716,15 +726,38 @@ fn replay_eth(input: &EthInput) -> EthObserved {
         })();
         if outcome.is_err() {
             refused = 1;
-            frame = 1;
+            if dropped == 0 {
+                frame = 1;
+            }
+            // A refused segment must not leave a reassembler behind. `csp_eth_rx` refuses
+            // its early guards *before* `csp_eth_pbuf_find` allocates anything, and calls
+            // `csp_eth_pbuf_free(..., true, ...)` on the two late ones -- so a bad frame
+            // costs a real node nothing either way.
+            //
+            // Measured the moment `buffers_consumed` stopped being a literal: the port
+            // reported 1 against the C's 0 on every refusal record. A peer that sends one
+            // malformed segment per packet id would have walked this pool dry.
+            if let Some(k) = slot_for[claimed] {
+                pool.release(k);
+            }
+            slot_for[claimed] = None;
         }
     }
+
+    // Both of these were literal `0`s. The C measures `drop` off the interface counter and
+    // `buffers_consumed` as `before - csp_buffer_remaining()`, so a transfer left in flight
+    // shows up as a buffer the node is still holding -- and the port was answering "none,
+    // always" without being asked. Exactly the shape SCOPE.md already records for
+    // `replay_node_send`'s `buffers_lost`, still present here.
+    //
+    // The port's equivalent of a held pbuf is a reassembly slot that never completed.
+    let buffers_consumed = slot_for.iter().filter(|s| s.is_some()).count() as u32;
 
     EthObserved {
         refused,
         frame,
-        drop: 0,
-        buffers_consumed: 0,
+        drop: dropped,
+        buffers_consumed,
         delivered,
         delivered_body: body,
     }

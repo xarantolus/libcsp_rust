@@ -690,7 +690,7 @@ hand-built window is 4, the same as the C helper's, so they were at the right op
 point and honest; they were simply blind to this.
 
 **The lead is now a tool.** `just untraced` prints, per suite, the C tests that assert
-against a real node and record nothing — 148 of 165 record something today. That measurement
+against a real node and record nothing — 149 of 166 record something today. That measurement
 found the dedup window, the malformed-SYN connection leak, and this. It resolves recording
 helpers, because an earlier hand-rolled version that only looked for a literal
 `ctest_trace_begin` reported two already-covered tests as gaps and would have sent me to
@@ -3890,3 +3890,41 @@ One of the seven also crashed rather than diverged: removing the `payload.len() 
 guard leaves the slice under it out of bounds, so it panicked the corpus binary and reported
 `REPLAY PANICKED` — an answer about the harness where one about coverage was wanted, for the
 third time. A mutation has to leave the program *running and wrong*.
+
+### Two observation fields the port was never asked about
+
+2026-08-27. Sweeping the replays for observation fields whose value is a *literal* rather
+than a measurement — the shape SCOPE.md already records once, where `replay_node_send`
+reported `"buffers_lost": 0` as a constant for months. Eleven candidates; most are the
+honest conclusion of the branch they sit in ("this path produced no reply"). Two are not:
+
+```rust
+EthObserved { refused, frame, drop: 0, buffers_consumed: 0, delivered, delivered_body }
+```
+
+`drop` and `buffers_consumed` were unconditional constants in `replay_eth`'s single exit. The
+C measures them — `iface->drop` off the interface counter, `buffers_consumed` as
+`before - csp_buffer_remaining()` — and 21 of 22 eth records had 0 for both, so the
+comparison could never fail and the port was never asked.
+
+**Removing the literals found a real defect.** `buffers_consumed` measured on the port side
+came out **1 against the C's 0 on every refusal record**: the replay claimed a reassembly
+slot *before* calling `push`, and kept it when `push` refused the frame. `csp_eth_rx` refuses
+its early guards before `csp_eth_pbuf_find` allocates anything at all, and calls
+`csp_eth_pbuf_free(..., true, ...)` on the two late ones — a malformed frame costs a real
+node nothing either way. A peer sending one bad segment per packet id would have walked the
+port's reassembly pool dry. Removing the release again fails **11** eth records.
+
+`drop` is now the pool-exhaustion outcome, as it is in the C (`csp_if_eth.c:191`): a frame
+the node had nowhere to put is `drop`, everything else it refuses is `frame`.
+
+**And the field needed a case that could exercise it.** Every existing eth record ends with
+the buffer count back where it started, so `buffers_consumed` was 0 in all 21 and could not
+distinguish a port that accounts for in-flight reassembly from one that does not — which is
+how a literal survived there in the first place. `eth::an_incomplete_transfer_holds_a_buffer`
+sends the first of two segments and nothing else; the C holds one buffer, and so must the
+port. Restoring the literal fails exactly that record.
+
+The general lesson is the one this file keeps arriving at from new directions: a field that
+is constant on both sides is not a comparison. The sweep that found it is a five-line regex
+over the replay constructors, and it is worth re-running whenever a replay is added.

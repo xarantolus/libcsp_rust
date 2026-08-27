@@ -435,6 +435,35 @@ START_TEST(test_a_frame_padded_to_the_ethernet_minimum_is_delivered)
 }
 END_TEST
 
+/* A transfer that stops after its first segment leaves the node holding a pbuf.
+ *
+ * Every other case in this suite ends with the buffer count back where it started, so
+ * `buffers_consumed` was 0 in all 21 records and could not tell a port that accounts for
+ * in-flight reassembly from one that does not -- which is how the Rust replay came to
+ * report it as a literal `0` for as long as it did. This is the case that gives the field
+ * something to say. */
+START_TEST(test_an_incomplete_transfer_holds_a_buffer)
+{
+	setup_stack(false);
+	const int before = csp_buffer_remaining();
+
+	uint8_t body[CSP_BUFFER_SIZE];
+	const uint16_t frame_length = whole_packet(body, 44, LOCAL_ADDR);
+	const uint16_t first = 12;
+	ck_assert_uint_lt(first, frame_length);
+
+	int ret = deliver(CSP_ETH_TYPE_CSP, 21, PEER_ADDR, first, frame_length,
+					  ETH_HDR + first, body, first);
+
+	ck_assert_int_eq(ret, CSP_ERR_NONE);
+	ck_assert_uint_eq(ifdata.iface.frame, 0);
+	ck_assert_uint_eq(drain_qfifo(), 0);
+	/* The half-finished transfer is holding exactly one. */
+	ck_assert_int_eq(csp_buffer_remaining(), before - 1);
+	record("an_incomplete_transfer_holds_a_buffer", ret, before);
+}
+END_TEST
+
 START_TEST(test_two_segments_are_reassembled)
 {
 	setup_stack(false);
@@ -705,6 +734,7 @@ Suite * eth_suite(void)
 	TCase * tc_rx = tcase_create("reassembly");
 	tcase_add_test(tc_rx, test_a_whole_packet_in_one_segment_is_delivered);
 	tcase_add_test(tc_rx, test_a_frame_padded_to_the_ethernet_minimum_is_delivered);
+	tcase_add_test(tc_rx, test_an_incomplete_transfer_holds_a_buffer);
 	tcase_add_test(tc_rx, test_two_segments_are_reassembled);
 	tcase_add_test(tc_rx, test_two_senders_with_different_packet_ids_both_reassemble);
 	tcase_add_test(tc_rx, test_two_senders_sharing_a_packet_id_are_kept_apart_by_source);
