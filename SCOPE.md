@@ -1912,6 +1912,26 @@ whoever maintains the fork can see what was found and decide for themselves.
     library has no way to know a peer's endianness and no business guessing. The data bytes
     — the part anyone reads — are identical, as is the reply length. Asserted as a
     divergence in `difftest/tests/node_cmp_peek_v2.rs`, so it cannot change unnoticed.
+34. **The Ethernet ARP table never updates and never evicts.**
+    `csp_eth_arp_set_addr` returns early when an entry for that CSP address already exists
+    (`csp_if_eth.c:101`, *"Already set"*), and `arp_alloc` is a bump allocator over a fixed
+    array of ten with no free (`csp_if_eth.c:72`) — `arp_used` only ever rises. Measured:
+
+    | | C | port |
+    |---|---|---|
+    | never heard of | broadcast `ff:ff:ff:ff:ff:ff` | the same |
+    | a second MAC for a known address | **ignored** | **replaces** it |
+    | the 11th distinct address | **never learned** | evicts the least recently used |
+
+    Together the C's two rules mean a node that has heard from ten peers addresses every
+    *new* peer by broadcast for the rest of the mission, and a peer that changes MAC is
+    unreachable for the rest of the mission. Neither is recoverable in orbit.
+
+    The first-write-wins rule is not the anti-spoofing win it resembles: `csp_eth_rx` learns
+    from `ether_shost` on **every** frame, before the is-it-for-me filter
+    (`csp_if_eth.c:229`), so it only means a spoofer has to be first. `ArpTable` updates and
+    evicts LRU. Asserted as divergences in `difftest/tests/eth_arp.rs`; the broadcast
+    fallback, which is the rule a driver actually leans on, is asserted as *agreement*.
 
 ---
 
@@ -3659,3 +3679,25 @@ had ever driven these codes in `difftest/` at all.
 `NoHooks`, whose `mem_read` defaults to refusing. The port answered nothing, which looked
 like "PEEK_V2 is not implemented" and was really "the two nodes were configured differently".
 Writing down what each side was measured on is what caught it before it became the finding.
+
+### The ARP table: correct, and driven by nothing
+
+2026-08-27, same shortlist. `csp_eth_arp_set_addr` and `csp_eth_arp_get_addr` were on it, and
+`csp_if_eth.c` was in `ctest`'s build — for the EFP reassembly suite — but not `difftest`'s.
+On the port side `ArpTable` had **no caller at all**: not in `csp`, not in either harness,
+only its own unit tests. That is the third shape from the very first sweep — *a correct piece
+of `csp-core` the layer above never drives* — and the same one `format_route` turned out to be
+one cycle ago.
+
+Here it is arguably right: the port is sans-io, the driver owns the NIC, and choosing a
+destination MAC is the driver's call. But it meant the semantics had never been put beside
+libcsp's, and the two disagree twice. Deviation 34 above records what was measured.
+
+**What the measurement is worth, given nothing calls it.** The broadcast fallback is asserted
+as *agreement* rather than as a port-side unit test, because that is the rule a driver leans
+on to decide whether it may send at all — get it wrong and the choice is between dropping the
+packet and reimplementing the table. The two divergences are asserted as divergences, so a
+later "fix" toward the C would fail rather than quietly make a moved peer unreachable.
+
+`csp_if_eth.c` and `csp_if_eth_pbuf.c` are now in `difftest`'s build too, which is what made
+any of this measurable.
