@@ -2282,3 +2282,38 @@ two statements, so `rdp: the receive-queue gate` reported *MUTATION DID NOT APPL
 gate was guarded by nothing. `mutants.py` prints that case rather than counting it as
 noticed, which is the only reason it was visible. Re-anchored, and the anchor is now checked
 against the source before the sweep is trusted.
+
+### The give-up counter that only ever rose
+
+2026-08-27. `MAX_RETRANSMITS` means "no progress after N", and the C makes that true by
+zeroing `conn->rdp.retransmits` on **every** acknowledgement — so N counts *consecutive*
+failures. Its comment says exactly that: *"Give up on a peer that never acknowledges
+anything."*
+
+The port split that into two counters. `Connection::retransmits` is reset on every ack,
+faithfully. `TxQueue::retransmits` — the one the give-up decision actually reads — was reset
+only by `flush()` on close, and by a `note_progress()` method that **nothing called**.
+
+Measured: six rounds of send / retransmit twice / acknowledge, with the peer answering every
+time, and the queue **gave up on round five**. Twelve retransmissions against a limit of ten,
+spread over a connection that was working. On a lossy-but-usable link — which is the
+interesting case for a spacecraft — a long-lived RDP connection is torn down for lack of a
+progress signal that was being delivered the whole time.
+
+Fixed where progress actually happens: the release of an acknowledged entry inside
+`TxQueue::poll`. `note_progress` is removed rather than left as a method a caller must
+remember, which is what let this happen.
+
+**Its unit test called `note_progress` directly** and asserted the counter reached zero —
+proving the helper worked while nothing performed the reset. It now drives the release path,
+which makes it a statement about the port rather than about the helper. That is the fifth
+instance of this shape, after `RxQueue`, `TxQueue`, the CMP server and the ack timer.
+
+**How it was found, and what the search is worth.** Rather than another one-off, this cycle
+enumerated every public function in `csp-core` and `csp` and listed those referenced nowhere
+outside their own test module: 51 of 235. Most are legitimately application-facing — the
+crate exists to be called from outside — so the list is *leads*, not defects, and reading
+each is the work. Two false alarms went first: `decode_clamped` looked undriven because the
+search covered only `csp/src`, when the call is at `rdp.rs:919` inside the state machine the
+node does drive. The signal is not "unreferenced" but "unreferenced *and* not something an
+application would call", and only reading tells the two apart.

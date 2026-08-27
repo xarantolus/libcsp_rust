@@ -207,6 +207,11 @@ MUTANTS = [
   ("rdp: the node acknowledges data it delivers", "csp/src/router.rs",
    "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {",
    "            if let Some(ack) = None::<csp_core::rdp::Header> {"),
+  # An acknowledgement is progress: it resets the give-up counter. Without it a connection
+  # on a lossy-but-working link is torn down after N retransmissions across its whole life.
+  ("rdp: an acknowledgement is progress", "csp-core/src/rdp.rs",
+   "                self.retransmits = 0;\n                continue;",
+   "                continue;"),
   # An acknowledgement owed on the ack *timer*. Without the tick driving it, a peer that
   # sent fewer packets than the delay count waits for its own retransmission instead.
   ("rdp: the tick sends a delayed acknowledgement", "csp/src/router.rs",
