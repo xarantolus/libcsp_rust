@@ -31,9 +31,19 @@ pub enum Bridged {
     /// Nothing waiting. Ordinary.
     Idle,
     /// The packet should be sent out the opposing interface.
+    ///
+    /// Carries the pool slot, exactly as [`Routed::Forwarded`] does, because naming an
+    /// interface is not forwarding. Without it `bridge_work` popped the packet, reported
+    /// where it should go, and dropped it on the way out of the function — so a node
+    /// running the bridge forwarded nothing at all, and the tests passed because they
+    /// compared the interface index.
     Forward {
         /// Interface to send on.
         iface: u8,
+        /// Pool slot holding the packet. The caller owns it — take it with
+        /// [`Node::take_forwarded`](crate::Node::take_forwarded) and hand it to the
+        /// interface.
+        packet: u16,
     },
     /// A control frame this node produced and the caller must send.
     ///
@@ -1610,7 +1620,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         };
 
         self.counters.forwarded += 1;
-        Bridged::Forward { iface: out }
+        Bridged::Forward {
+            iface: out,
+            packet: packet.into_index(),
+        }
     }
 
     /// Release everything the router is holding.
@@ -2503,12 +2516,26 @@ mod tests {
 
     #[test]
     fn the_bridge_sends_each_side_to_the_other() {
+        // Asserting the interface alone is what let the bridge destroy every packet it
+        // claimed to forward: `Bridged::Forward` carried no slot, so `bridge_work` popped
+        // the packet, named a destination and dropped it. Take the packet and read it.
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
-        r.receive(pkt(&pool, 25, 20, b"a to b"), 1);
-        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
-        r.receive(pkt(&pool, 25, 20, b"b to a"), 2);
-        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 1 });
+
+        let mut check = |ingress: u8, expect_iface: u8, body: &[u8]| {
+            r.receive(pkt(&pool, 25, 20, body), ingress);
+            let Bridged::Forward { iface, packet } = r.bridge_work(&pool, 1, 2, 0) else {
+                panic!("a frame on side {ingress} must be forwarded");
+            };
+            assert_eq!(iface, expect_iface);
+            let p = pool.from_index(packet).expect("the caller owns the packet");
+            assert!(
+                p.with_frame(|f| f.ends_with(body)),
+                "and it must still carry what arrived"
+            );
+        };
+        check(1, 2, b"a to b");
+        check(2, 1, b"b to a");
     }
 
     #[test]
@@ -2539,7 +2566,11 @@ mod tests {
         let pool = P::new();
         let mut r = R::new(ME, Version::V1);
         r.receive(pkt(&pool, 25, 20, b"looping"), 1);
-        assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
+        let Bridged::Forward { iface, packet } = r.bridge_work(&pool, 1, 2, 0) else {
+            panic!("the first copy is forwarded");
+        };
+        assert_eq!(iface, 2);
+        drop(pool.from_index(packet).expect("the caller owns it"));
         r.receive(pkt(&pool, 25, 20, b"looping"), 1);
         assert_eq!(
             r.bridge_work(&pool, 1, 2, 5),

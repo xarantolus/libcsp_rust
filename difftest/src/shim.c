@@ -864,3 +864,53 @@ uint32_t csp_memfree_hook(void) { return shim_memfree; }
 unsigned int csp_ps_hook(csp_packet_t *packet) { (void)packet; return shim_ps_entries; }
 void csp_reboot_hook(void) { shim_rebooted = 1; }
 void csp_shutdown_hook(void) { shim_shut_down = 1; }
+
+/* --- the bridge ----------------------------------------------------------- */
+
+/*
+ * `csp_bridge_work` is not the router with a different destination: it is a separate
+ * forwarding path that consults no routing table, applies no split horizon, rewrites no
+ * address, and deduplicates *unconditionally* -- `csp_bridge.c:45` calls
+ * `csp_dedup_is_duplicate` without consulting `csp_conf.dedup`, because a bridge is exactly
+ * where a frame can loop.
+ *
+ * `csp_bridge.c` was in neither this build nor `ctest`'s, so none of that had ever been
+ * observed; it was all read.
+ */
+static csp_iface_t *shim_iface_by_index(int i) {
+	return i == 0 ? &shim_node_iface
+	     : i == 1 ? &shim_node_iface_b
+	              : &shim_node_iface_c;
+}
+
+void shim_bridge_set(int a, int b) {
+	csp_bridge_set_interfaces(shim_iface_by_index(a), shim_iface_by_index(b));
+}
+
+/* Hand a frame to the node as if it had arrived on interface `iface`. */
+int shim_node_inject_on(int iface, const uint8_t *frame, uint32_t len) {
+	csp_packet_t *packet = csp_buffer_get(0);
+	if (packet == NULL) { return -1; }
+	csp_id_setup_rx(packet);
+	if (len > (uint32_t)(sizeof(packet->data) + 8)) { csp_buffer_free(packet); return -1; }
+	memcpy(packet->frame_begin, frame, len);
+	packet->frame_length = (uint16_t)len;
+	if (csp_id_strip(packet) != 0) { csp_buffer_free(packet); return -2; }
+	csp_qfifo_write(packet, shim_iface_by_index(iface), NULL);
+	return 0;
+}
+
+/*
+ * One turn of the bridge crank -- exactly one, which is how the C's own loop calls it.
+ *
+ * Deliberately no `csp_qfifo_wake_up()` here, unlike `shim_node_pump`. That posts a NULL
+ * sentinel so `csp_route_work` returns on an empty queue; `csp_bridge_work` reads the
+ * sentinel as its packet, prints "Packet of router queue item is NULL" and consumes the
+ * turn. With it in, every result in this harness was shifted one step behind the frame
+ * that caused it -- and the first case still looked right, which is what made it
+ * convincing. The caller injects exactly one frame per step, so the queue is never empty
+ * and `csp_qfifo_read` returns without blocking.
+ */
+void shim_bridge_work(void) {
+	csp_bridge_work();
+}

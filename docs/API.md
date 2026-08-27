@@ -272,9 +272,13 @@ without synchronisation.
 slots are the scarcest resource on a node (8 by default, 16 in flight). It is also where
 RDP's timers will be advanced, since the state machine reads no clock on purpose.
 
-`Router::bridge_work(pool, a, b, now)` is the transparent bridge. A frame arriving on an
-interface that is neither side is **refused**; the C's `if/else` has no third branch and
-injects it into side A.
+`Router::bridge_work(pool, a, b, now)` is the transparent bridge. `Bridged::Forward` carries
+the pool slot as well as the interface — the same obligation as `Routed::Forwarded`: take it
+with `take_forwarded` and hand it to the interface. It deduplicates whatever `dedup_mode`
+says, because a bridge is where a frame loops, and it never delivers locally: a frame for the
+bridge's own interface address is forwarded like any other. A frame arriving on an interface
+that is neither side is **refused**; the C's `if/else` has no third branch and injects it
+into side A.
 
 ## Routing: a packet has destinations, plural
 
@@ -387,7 +391,7 @@ It was carried in two documents. A coverage figure nobody can reproduce is the e
 of the claim that hid a third of the library. Run `just numbers` before changing any figure
 below.
 
-- **520 tests** across the crates, in 24 binaries, with `--all-features`.
+- **525 tests** across the crates, in 25 binaries, with `--all-features`.
 - **510 golden vector lines** in `vectors/v{1,2}.tsv`, captured from the running C library
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
@@ -398,7 +402,7 @@ below.
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.
-- **53 differential tests** in `difftest/`, millions of random inputs per run, linking the
+- **58 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
   lookups, and the real `csp_kiss_rx` state machine.

@@ -122,6 +122,9 @@ unsafe extern "C" {
     fn shim_service_hooks_reset();
     fn shim_set_memfree(bytes: u32);
     fn shim_set_ps_entries(n: u32);
+    fn shim_bridge_set(a: c_int, b: c_int);
+    fn shim_bridge_work();
+    fn shim_node_inject_on(iface: c_int, frame: *const u8, len: u32) -> c_int;
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -433,6 +436,43 @@ pub fn c_set_memfree(bytes: u32) {
 pub fn c_set_ps_entries(n: u32) {
     // SAFETY: writes one static. Callers hold `LOCK`.
     unsafe { shim_set_ps_entries(n) }
+}
+
+/// Point the C's bridge at two of the node's interfaces. 0=INGRESS, 1=EGRESS, 2=ROUTED.
+pub fn c_bridge_set(a: i32, b: i32) {
+    // SAFETY: the shim maps each index onto one of its three static interfaces.
+    unsafe { shim_bridge_set(a, b) }
+}
+
+/// Inject `frame` as if it arrived on `iface`, run one bridge step, and return what left.
+///
+/// `csp_bridge_work` is a forwarding path of its own: no routing table, no split horizon,
+/// no address rewrite, and dedup applied whatever `csp_conf.dedup` says. Each returned entry
+/// is (interface name, framed bytes) — which wire the frame reached and what was on it.
+pub fn c_bridge_step(iface: i32, frame: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    // SAFETY: `frame` is valid for the call; the shim bounds-checks it against a packet
+    // buffer and the capture array is fixed-size. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        if shim_node_inject_on(iface, frame.as_ptr(), frame.len() as u32) != 0 {
+            return out;
+        }
+        shim_bridge_work();
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            let mut name = [0u8; 32];
+            let mut via: u16 = 0;
+            shim_node_tx_iface(i, name.as_mut_ptr(), &mut via);
+            if n > 0 {
+                buf.truncate(n as usize);
+                let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                out.push((String::from_utf8_lossy(&name[..end]).into_owned(), buf));
+            }
+        }
+    }
+    out
 }
 
 /// Accept and close every connection waiting on `port`, draining each; return the count.

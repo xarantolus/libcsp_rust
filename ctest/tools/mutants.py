@@ -149,6 +149,17 @@ MUTANTS = [
   # The built-in services had no comparison against libcsp of any kind until
   # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
   # of its tests and no other.
+  # The bridge named an interface and dropped the packet -- the forwarding bug again, in
+  # a path the C had never even been compiled for. The first of these reproduces it.
+  ("bridge: a forwarded frame is handed to the caller", "csp/src/router.rs",
+   "        Bridged::Forward {\n            iface: out,\n            packet: packet.into_index(),\n        }",
+   "        Bridged::Forward {\n            iface: out,\n            packet: u16::MAX,\n        }"),
+  ("bridge: each side goes out the other", "csp/src/router.rs",
+   "        let out = if iface == a {\n            b\n        } else if iface == b {\n            a",
+   "        let out = if iface == a {\n            b\n        } else if iface == b {\n            b"),
+  ("bridge: dedup is unconditional, not gated on the mode", "csp/src/router.rs",
+   "        if packet.with_frame(|f| self.dedup.is_duplicate(f, now_ms)) {\n            self.counters.duplicates += 1;\n            return Bridged::Dropped(DropReason::Duplicate);\n        }",
+   "        if self.dedup_mode != crate::dedup::DedupMode::Off\n            && packet.with_frame(|f| self.dedup.is_duplicate(f, now_ms))\n        {\n            self.counters.duplicates += 1;\n            return Bridged::Dropped(DropReason::Duplicate);\n        }"),
   ("service: a ping is echoed whole", "csp/src/service.rs",
    "            out[..request_payload.len()].copy_from_slice(request_payload);\n            Ok(Some(request_payload.len()))",
    "            out[..request_payload.len()].copy_from_slice(request_payload);\n            Ok(Some(request_payload.len().saturating_sub(1)))"),
