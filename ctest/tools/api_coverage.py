@@ -18,6 +18,7 @@ and this script checks five things that together make the map hard to lie with:
   3. every `ported` row names a Rust item that exists    -- catches a mapping to nothing
   4. every `ported` row names a *function*               -- catches a row that stops short
   5. that function is defined in the module the row names -- catches a row that only spells
+  6. every declared cargo feature gates something -- catches a feature that is only a name
 
 Checks 4 and 5 are what keep the first three honest, and both were added late. With only 1-3,
 152 `ported` rows resolved to 28 distinct Rust names, because a row could name the type that
@@ -78,6 +79,34 @@ def rust_functions():
                 text = text[:i]
             names.update(fn.findall(text))
     return names
+
+
+def unused_features():
+    """Declared cargo features that gate no code in either crate.
+
+    `if-i2c` was on by default in both crates and gated **zero** lines, while `api_map.tsv`
+    claimed its three C functions were ported to the generic `Interface` methods. A feature
+    that is only a name in `Cargo.toml` is a claim with nothing behind it, and the map's own
+    checks cannot see it: the rows named real functions, just not the interface's.
+
+    A `csp` feature that only forwards to `csp-core` (`hmac = ["csp-core/hmac"]`) is fine, so
+    a feature counts as used if *either* crate gates on it.
+    """
+    import tomllib
+
+    used = set()
+    for d in RUST_DIRS:
+        for f in d.rglob("*.rs"):
+            for m in re.finditer(r'feature\s*=\s*"([\w-]+)"', f.read_text(errors="ignore")):
+                used.add(m.group(1))
+
+    dead = []
+    for crate in ("csp-core", "csp"):
+        cfg = tomllib.loads((ROOT / crate / "Cargo.toml").read_text())
+        for name in cfg.get("features", {}):
+            if name != "default" and name not in used and name not in dead:
+                dead.append(name)
+    return dead
 
 
 def defines(path):
@@ -181,6 +210,13 @@ def main():
                         f"module this path names -- the row would survive its real target "
                         f"being deleted"
                     )
+
+    for name in unused_features():
+        problems.append(
+            f"cargo feature `{name}` gates no code in either crate -- it is a name in "
+            f"Cargo.toml and nothing else. Implement it, or remove it: a feature that "
+            f"gates nothing reads as a capability the crate does not have"
+        )
 
     counts = {}
     for status, _ in rows.values():

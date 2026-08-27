@@ -86,7 +86,6 @@ These become const generics on `CspStorage`, not compile-time constants:
 | `if-kiss` | `csp_if_kiss.c` | framing, incl. the legacy KISS CRC |
 | `if-i2c` | `csp_if_i2c.c` | |
 | `if-eth` | `csp_if_eth.c`, `csp_if_eth_pbuf.c` | incl. the ARP table |
-| `if-udp` *(std)* | `csp_if_udp.c` | needs sockets, gated on `std` |
 | `if-tun` | `csp_if_tun.c` | carries the two `csp_crypto_*` hooks |
 | `alloc` *(off)* | — | enables `read_to_vec` and friends. The crate works fully without it |
 | `std` *(off)* | — | host conveniences only |
@@ -149,6 +148,7 @@ right rather than a number to assert here.
 | `csp_bind_callback` | Binds a bare `fn` to a port, bypassing the connection layer. Every consumer surveyed used `bind(CSP_ANY)` + `accept` + a dispatch table instead, and a callback that cannot own a connection cannot answer a stream |
 | `yaml` | libyaml is not installed in this environment, so there is no C oracle to check a Rust parser against. Feature-gated and stubbed rather than written blind |
 | `if-tun` | Needs the two `csp_crypto_*` hooks, which exist as `Hooks::encrypt`/`decrypt`; the interface itself is a Linux TUN device and belongs with the platform drivers that are out of scope |
+| `if-udp` | Measured rather than assumed: `csp_if_udp.c` is `socket`, `bind`, `sendto`, `recvfrom`, `inet_aton` and a detached `pthread`. Its only CSP lines are the `csp_id_prepend`/`csp_id_strip` every interface does, and `csp_if_udp_tx` ignores `via` outright. There is no protocol behaviour to port — unlike `if-i2c`, which looked equally thin and turned out to have a seven-bit address mask and a receive guard |
 
 ### Implemented
 
@@ -3113,3 +3113,36 @@ next hop set, expecting the next hop to be used; the C never reached the driver.
 test is on `id.dst` and runs *before* the next hop is consulted, so a packet addressed to
 ourselves is looped back even when a route says to send it elsewhere. That is now its own
 assertion rather than a broken row.
+
+### The same shape once more, and a guard so it cannot recur
+
+2026-08-27, immediately after the `if-i2c` finding, applying its own lesson: **which other
+declared features gate nothing, and which other scope-table rows have nothing behind them?**
+
+Measured across both crates. In `csp`, `hmac` and the three remaining `if-*` features gate
+zero lines of `csp/src` — but each forwards to a `csp-core` feature that does gate a module
+(`hmac = ["csp-core/hmac"]`), which is legitimate. `if-i2c` was the only one that gated zero
+in **both**, and it no longer does.
+
+The scope table had one more claim with nothing behind it. **`if-udp` was listed as in scope,
+"gated on `std`" — and there is no `std` feature in either crate**, while `api_map.tsv` said
+`csp_if_udp_init` was ported to `csp::iface::Interface::new`: the generic constructor again,
+standing in for an interface that does not exist.
+
+**The resolution is the opposite of `if-i2c`'s, and the difference is the point.** `if-i2c`
+looked like a driver shim and turned out to carry two pieces of real protocol behaviour — a
+seven-bit address mask and a receive guard — so it was implemented. `csp_if_udp.c` was read
+the same way and is genuinely nothing but I/O: `socket`, `bind`, `sendto`, `recvfrom`,
+`inet_aton`, a detached `pthread`, and the `csp_id_prepend`/`csp_id_strip` pair every
+interface performs. `csp_if_udp_tx` ignores `via` outright. There is no protocol decision to
+port, so it is now `out-of-scope` with that reason and the scope-table row is gone.
+**199 = 147 ported + 47 out-of-scope + 5 deferred.**
+
+Two files that look alike from a distance, opposite answers, and the only way to tell was to
+read what each actually does rather than what its name suggests.
+
+**Check 6** now fails `just api` on any cargo feature that gates no code in either crate.
+Confirmed both ways: adding an `if-ghost = []` fails, and removing the `#[cfg]` from
+`csp-core::i2c` fails naming `if-i2c`. A feature that gates nothing reads as a capability the
+crate does not have, and the map's other five checks cannot see it — the rows named real
+functions, just not the interface's.
