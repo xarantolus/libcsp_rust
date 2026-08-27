@@ -519,6 +519,46 @@ int shim_node_bind_any(void) {
 	return 0;
 }
 
+/*
+ * A connection-less socket -- `csp_bind` on a socket carrying `CSP_SO_CONN_LESS`.
+ *
+ * `csp_route_deliver_conn_less` (`csp_route.c:132`) puts the **packet** straight on the
+ * socket's queue and creates no connection at all, which is the whole difference: a
+ * conn-less server consumes nothing from the connection pool no matter how many peers
+ * write to it. `csp_accept` refuses such a socket; `csp_recvfrom` is the only way in.
+ */
+static csp_socket_t shim_cl_socket;
+static int          shim_cl_bound;
+
+int shim_node_bind_conn_less(uint8_t port) {
+	if (shim_cl_bound) { return 0; }
+	memset(&shim_cl_socket, 0, sizeof(shim_cl_socket));
+	shim_cl_socket.opts = CSP_SO_CONN_LESS;
+	int rb = csp_bind(&shim_cl_socket, port);
+	int rl = csp_listen(&shim_cl_socket, 4);
+	if (rb != CSP_ERR_NONE) { return -10 + rb; }
+	if (rl != CSP_ERR_NONE) { return -20 + rl; }
+	shim_cl_bound = 1;
+	return 0;
+}
+
+/* Take one packet off the conn-less socket. Returns 1 on a packet, 0 if none is waiting. */
+int shim_node_recvfrom(uint16_t *src, uint16_t *dst, uint8_t *dport, uint8_t *sport,
+                       uint8_t *out, int *out_len) {
+	if (!shim_cl_bound) { return 0; }
+	csp_packet_t *packet = csp_recvfrom(&shim_cl_socket, 0);
+	if (packet == NULL) { return 0; }
+	*src   = packet->id.src;
+	*dst   = packet->id.dst;
+	*dport = packet->id.dport;
+	*sport = packet->id.sport;
+	int n = (int)packet->length;
+	memcpy(out, packet->data, (size_t)n);
+	*out_len = n;
+	csp_buffer_free(packet);
+	return 1;
+}
+
 /* Close the catch-all socket, which is how libcsp releases a bind (`csp_port.c:135`). */
 int shim_node_unbind_any(void) {
 	if (!shim_any_bound) { return 0; }

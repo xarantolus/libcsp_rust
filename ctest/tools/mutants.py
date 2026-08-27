@@ -149,6 +149,18 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # `CSP_SO_CONN_LESS`: the packet goes to the socket, not to a connection, so a server on
+  # such a port takes peers it has no connections for. Nothing had ever named the option.
+  ("conn_less: the socket is the endpoint", "csp/src/router.rs",
+   "        if self.is_conn_less(id.dport) {", "        if false {"),
+  # "an ordinary port is not connection-less" is deliberately NOT a mutation here. Making
+  # every bound port connection-less takes down the corpus binary itself -- every
+  # connection-oriented record loses its endpoint at once -- and the run reports REPLAY
+  # PANICKED, which says nothing about coverage. The property is covered, and verified as a
+  # control, by the ordinary-port half of `difftest/tests/node_conn_less.rs`.
+  ("conn_less: recvfrom reads that queue", "csp/src/node.rs",
+   "        Ok(self\n            .router\n            .take_conn_less()\n            .and_then(|idx| self.pool().from_index(idx)))",
+   "        Ok(None)"),
   # The catch-all, `csp_bind(socket, CSP_ANY)`, which the port had no way to express at all.
   # Four rules: it delivers, the port ceiling still bounds it, releasing it stops delivery,
   # and releasing it hands the buffers back.

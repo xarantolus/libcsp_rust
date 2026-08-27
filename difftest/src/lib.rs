@@ -168,6 +168,15 @@ unsafe extern "C" {
         out: *mut u8,
         out_len: *mut c_int,
     ) -> c_int;
+    fn shim_node_bind_conn_less(port: u8) -> c_int;
+    fn shim_node_recvfrom(
+        src: *mut u16,
+        dst: *mut u16,
+        dport: *mut u8,
+        sport: *mut u8,
+        out: *mut u8,
+        out_len: *mut c_int,
+    ) -> c_int;
     fn shim_node_bind_any() -> c_int;
     fn shim_node_unbind_any() -> c_int;
     fn shim_node_recv_any(
@@ -273,6 +282,49 @@ pub fn c_node_bind(port: u8) -> i32 {
 pub fn c_node_bind_any() -> i32 {
     // SAFETY: no arguments; idempotent behind a flag on the C side. Callers hold `LOCK`.
     unsafe { shim_node_bind_any() }
+}
+
+/// Bind `port` on the C node as a **connection-less** socket (`CSP_SO_CONN_LESS`).
+pub fn c_node_bind_conn_less(port: u8) -> i32 {
+    // SAFETY: one static socket on the C side, bound at most once. Callers hold `LOCK`.
+    unsafe { shim_node_bind_conn_less(port) }
+}
+
+/// Take everything waiting on the connection-less socket, after pumping the router.
+pub fn c_node_recvfrom() -> Vec<Delivered> {
+    let mut out = Vec::new();
+    // SAFETY: the payload buffer is sized for the largest packet the C can deliver, and the
+    // shim writes at most `length` bytes into it. Callers hold `LOCK`.
+    unsafe {
+        shim_node_pump();
+        loop {
+            let (mut src, mut dst) = (0u16, 0u16);
+            let (mut dport, mut sport) = (0u8, 0u8);
+            let mut payload = vec![0u8; 512];
+            let mut n: c_int = 0;
+            if shim_node_recvfrom(
+                &mut src,
+                &mut dst,
+                &mut dport,
+                &mut sport,
+                payload.as_mut_ptr(),
+                &mut n,
+            ) == 0
+            {
+                break;
+            }
+            payload.truncate(n as usize);
+            out.push(Delivered {
+                port: dport,
+                src,
+                dst,
+                dport,
+                sport,
+                payload,
+            });
+        }
+    }
+    out
 }
 
 /// Release the C node's catch-all with `csp_socket_close`. Returns `csp_dbg_errno`.

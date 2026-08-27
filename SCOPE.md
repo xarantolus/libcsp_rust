@@ -3318,3 +3318,50 @@ Each is now anchored on the line after it, and the site each was shadowing becam
 of its own: `rdp: an out-of-window packet is re-acknowledged`, `rdp: the trailer goes after
 the payload`, `rdp: a held packet is stripped too`, `rdp: the ack timer fires from tick`.
 177 mutations, all applying to exactly one site, all noticed.
+
+### `CSP_SO_CONN_LESS` — the option the port had no counterpart for
+
+2026-08-27, the cycle after the catch-all. Same method, applied to the port's own surface
+rather than the C's: which **public functions of `csp`/`csp-core` are never named by any
+integration test**, so are covered only by unit tests written from the same reading as the
+code. 95 of 240, most of them internals reached transitively — the regex is a lead
+generator, and reading the shortlist is the work. `Node::recvfrom` stood out.
+
+`csp_recvfrom` was mapped `ported` and `Node::recvfrom` was `accept` + `read` + `close`,
+with a doc comment calling it *"`csp_recvfrom`: the connection-less server pattern"*. It is
+not. `csp_recvfrom` returns NULL for any socket without `CSP_SO_CONN_LESS`
+(`csp_io.c:379`), and `csp_route_deliver_conn_less` (`csp_route.c:132`) puts the **packet**
+straight on the socket's queue — no connection created, none consulted. Nothing in the
+corpus, the C suites or the differential tests had ever named the option.
+
+What it costs, measured with a probe before anything was written:
+
+```text
+C:  12 senders -> 12 received     port:  12 senders -> 8 received
+C:  20 senders -> 13 received     port:  20 senders -> 8 received
+```
+
+The port stopped at `CONNS`. The C stopped when its **buffer pool** ran out — 13 with 15
+free — because a connection-less port never takes a connection at all. That is the whole
+reason the option exists: a sink with more peers than the node has connections, which is
+what a spacecraft telemetry port is.
+
+`Router::bind_conn_less` / `is_conn_less` / `take_conn_less`, `Node::bind_conn_less` and a
+`Routed::DeliveredConnLess` outcome now implement it, with the branch where the C puts it —
+after the security check and **before** the connection table, so a connection-less port wins
+even over a connection that already matches (`csp_route.c:296`). `recvfrom` reads that queue
+and only that queue; an ordinary port is still `accept` + `read`. The queue is `RXQ` long
+because the C sizes a socket queue and a connection queue with the same
+`CSP_CONN_RXQUEUE_LEN`.
+
+**What I got wrong.** The control — "an ordinary port runs out of connections" — failed,
+and it was the control that was wrong, not the port: the C took all twelve. The harness
+drains after every packet, so at most one connection is ever open and it is recycled. What
+a connection-less port saves you is the connections held by peers you *have not got to yet*,
+so the experiment only exists if nothing is read until every packet has arrived. Both halves
+now inject all twelve first. It is the same mistake as comparing two numbers measured at
+different operating points, in the shape of a test.
+
+Also: written as two `#[test]`s, the ordinary-port case read eight connections left over
+from the connection-less case as its own result — libcsp's port table is process-global.
+One test, in order, as `node_alias.rs` and `node_bind_any.rs` already had to be.
