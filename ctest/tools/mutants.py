@@ -149,6 +149,20 @@ MUTANTS = [
   # The built-in services had no comparison against libcsp of any kind until
   # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
   # of its tests and no other.
+  # csp_if_can.c had never been compiled, here or in ctest, so every CFP comparison was of
+  # the identifier's bit layout with shim.c expanding the header macros itself.
+  ("can: the fragmenter names its sender", "csp-core/src/cfp.rs",
+   "            | ((self.sender as u32 & V2_SENDER_MASK) << V2_SENDER_OFFSET)",
+   "            | ((0u32 & V2_SENDER_MASK) << V2_SENDER_OFFSET)"),
+  ("can: the first frame carries the source address", "csp-core/src/cfp.rs",
+   "        let ext = ((self.id.src as u32 & V2_SRC_MASK) << V2_SRC_OFFSET)",
+   "        let ext = ((0u32 & V2_SRC_MASK) << V2_SRC_OFFSET)"),
+  ("can: the last frame is marked as the end", "csp-core/src/cfp.rs",
+   "            if n == total {\n                id |= 1 << V2_END_OFFSET;\n            }",
+   ""),
+  ("can: the reassembler tracks the fragment counter", "csp-core/src/cfp.rs",
+   "        self.next_fc = (self.next_fc + 1) & V2_FC_MASK;",
+   ""),
   # The bridge named an interface and dropped the packet -- the forwarding bug again, in
   # a path the C had never even been compiled for. The first of these reproduces it.
   ("bridge: a forwarded frame is handed to the caller", "csp/src/router.rs",

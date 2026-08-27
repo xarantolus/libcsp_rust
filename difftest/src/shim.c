@@ -914,3 +914,100 @@ int shim_node_inject_on(int iface, const uint8_t *frame, uint32_t len) {
 void shim_bridge_work(void) {
 	csp_bridge_work();
 }
+
+/* --- CAN: fragmentation and reassembly, by the real csp_if_can.c ----------- */
+
+/*
+ * Until now every CFP comparison expanded the header's macros in this file and compared bit
+ * layouts. That is the identifier; it is not the interface. `csp_can_rx` reassembles into a
+ * pbuf taken from a fixed pool, keyed by sender, and gives up on a pbuf that has gone quiet
+ * -- and `csp_can_tx` decides how a packet is cut into 8-byte frames. None of it had run.
+ */
+static csp_iface_t                shim_can_iface;
+static csp_can_interface_data_t   shim_can_data;
+static int                        shim_can_ready;
+
+#define SHIM_CAN_MAX 64
+static uint32_t shim_can_id[SHIM_CAN_MAX];
+static uint8_t  shim_can_dat[SHIM_CAN_MAX][8];
+static uint8_t  shim_can_dlc[SHIM_CAN_MAX];
+static int      shim_can_n;
+
+/* Capture driver: record the CAN frame instead of putting it on a bus. */
+static int shim_can_tx_fn(void *driver_data, uint32_t id, const uint8_t *data, uint8_t dlc,
+                          const csp_packet_t *packet) {
+	(void)driver_data;
+	/* This fork's `csp_can_driver_tx_t` passes the originating packet as a fifth argument;
+	   upstream's does not. Matching the typedef exactly matters -- an incompatible function
+	   pointer is undefined behaviour, not a warning to wave through. */
+	(void)packet;
+	if (shim_can_n < SHIM_CAN_MAX) {
+		shim_can_id[shim_can_n] = id;
+		shim_can_dlc[shim_can_n] = dlc;
+		memcpy(shim_can_dat[shim_can_n], data, dlc > 8 ? 8 : dlc);
+		shim_can_n++;
+	}
+	return CSP_ERR_NONE;
+}
+
+int shim_can_init(uint16_t address, uint16_t netmask) {
+	if (shim_can_ready) { return 0; }
+	shim_ensure_init();
+	memset(&shim_can_data, 0, sizeof(shim_can_data));
+	shim_can_data.tx_func = shim_can_tx_fn;
+	memset(&shim_can_iface, 0, sizeof(shim_can_iface));
+	shim_can_iface.name = "CAN";
+	shim_can_iface.addr = address;
+	shim_can_iface.netmask = netmask;
+	shim_can_iface.interface_data = &shim_can_data;
+	shim_can_iface.driver_data = NULL;
+	if (csp_can_add_interface(&shim_can_iface) != CSP_ERR_NONE) { return -1; }
+	shim_can_ready = 1;
+	return 0;
+}
+
+void shim_can_clear(void) { shim_can_n = 0; }
+int  shim_can_count(void) { return shim_can_n; }
+
+int shim_can_get(int i, uint32_t *id, uint8_t *data) {
+	if (i < 0 || i >= shim_can_n) { return -1; }
+	*id = shim_can_id[i];
+	memcpy(data, shim_can_dat[i], shim_can_dlc[i]);
+	return shim_can_dlc[i];
+}
+
+/* Fragment a CSP packet the way the C does, into the capture above. */
+int shim_can_send(uint16_t dst, uint8_t dport, uint8_t sport, const uint8_t *body, int len) {
+	csp_packet_t *packet = csp_buffer_get(0);
+	if (packet == NULL) { return -1; }
+	if (len > (int)sizeof(packet->data)) { csp_buffer_free(packet); return -1; }
+	memset(&packet->id, 0, sizeof(packet->id));
+	packet->id.pri = 2;
+	packet->id.src = shim_can_iface.addr;
+	packet->id.dst = dst;
+	packet->id.dport = dport;
+	packet->id.sport = sport;
+	memcpy(packet->data, body, (size_t)len);
+	packet->length = (uint16_t)len;
+	csp_id_prepend(packet);
+	/* Through `nexthop`, which is what the router calls. `csp_can_tx` is declared in
+	   `csp_if_can.h` and defined nowhere in this fork: `csp_can_add_interface` installs
+	   the static `csp_can1_tx` or `csp_can2_tx` depending on the wire version, so calling
+	   the documented entry point does not link. */
+	return shim_can_iface.nexthop(&shim_can_iface, CSP_NO_VIA_ADDRESS, packet, 1);
+}
+
+/*
+ * Feed one CAN frame to `csp_can_rx` and return what the C reported.
+ *
+ * Whether a packet came out of it is not asked here: the caller pumps the router and reads
+ * the bound port, so the answer is "what the application received" rather than anything
+ * about a queue.
+ *
+ * `timestamp_rx` is 0 throughout -- the pbuf's last-used stamp comes from `csp_get_ms()`,
+ * which this shim controls, so the reassembly timeout is reachable by assignment rather
+ * than by waiting.
+ */
+int shim_can_rx(uint32_t id, const uint8_t *data, uint8_t dlc) {
+	return csp_can_rx(&shim_can_iface, id, data, dlc, 0, NULL);
+}

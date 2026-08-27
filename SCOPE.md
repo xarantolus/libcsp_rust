@@ -2562,3 +2562,58 @@ Two smaller things this turned up:
   its packet* — so every result was one step behind the frame that caused it. The first case
   still looked correct, which is what made the rest convincing. The fix is not to wake the
   queue: the caller injects exactly one frame per step.
+
+### The CAN interface had never been compiled either
+
+2026-08-27, immediately after the bridge, and found by asking the same question the bridge
+answered: *which libcsp source files is neither harness building?* Measured — 68 `.c` files
+under `libcsp/src`, 37 in difftest's list. Setting aside the arch shims, drivers, Python
+bindings and the documented exclusions (`csp_yaml.c`, `csp_if_tun.c`, `csp_if_zmqhub.c`,
+`arch/posix/csp_time.c`, `arch/posix/csp_system.c`), what was left was
+**`csp_if_can.c` and `csp_if_can_pbuf.c`** — in neither difftest's build nor `ctest`'s.
+
+CFP looked well covered: four differential tests, `cfp1_identifier_packing_agrees`,
+`cfp1_identifier_parsing_agrees_for_arbitrary_identifiers`,
+`cfp2_identifiers_from_the_fragmenter_agree_with_the_c` and `cfp2_packing_agrees_bit_for_bit`.
+Every one of them compares the **CAN identifier's bit layout**, and every one is measured
+against `shim.c` expanding the macros from `csp_if_can.h` *itself*. Not one line of the
+interface had run: not `csp_can_rx`, not the pbuf pool it reassembles into, not the
+fragmenter that decides how a packet becomes eight-byte frames. CAN is the bus this port is
+meant to fly on.
+
+**Measured: the port was right.** `difftest/tests/node_can.rs` drives both directions at
+payload lengths that straddle every framing boundary (1, 4, 5, 12, 13, 200 — the first frame
+carries a four-byte header extension plus at most four payload bytes, every later frame
+eight): the port fragments and a real `csp_can_rx` reassembles into the C application's bound
+port; a real `csp_can2_tx` fragments and the port's `V2Reassembler` puts it back together with
+the same header and payload.
+
+**A test that was weaker than its name.** The third case interleaves two senders, and its
+point is that `csp_if_can_pbuf.c` keys a reassembly buffer by sender. It first gave the two
+transfers different sender *counts* as well — and with that, zeroing the fragmenter's whole
+sender field still passed. `CFP2_ID_CONN_MASK` is `dst | sender | prio | sc`, so the count
+was doing the work and the sender field was never under test. Holding the count equal makes
+the control bite. The lesson is the same one as the `api_map` granularity finding: a test
+that varies two things at once measures neither.
+
+Two observations about the fork, both from the probe rather than from reading:
+
+- **`csp_can_tx` is declared in `csp_if_can.h` and defined nowhere.**
+  `csp_can_add_interface` installs the static `csp_can1_tx` or `csp_can2_tx` according to the
+  wire version, so calling the documented entry point does not link. The shim goes through
+  `iface->nexthop`, which is what the router uses.
+- **`csp_can2_tx` never frames a packet addressed to its own interface**: it calls
+  `csp_qfifo_write` and returns. The two nodes in the test therefore address each other.
+- The fork's `csp_can_driver_tx_t` takes a fifth argument (the originating packet) that
+  upstream's does not. The first capture driver here matched upstream's signature and the
+  compiler warned; an incompatible function pointer is undefined behaviour, not a warning to
+  wave through.
+
+#### `Bridged::Respond` could never happen
+
+Bycatch from the same sweep. `bridge_work` returns `Idle`, `Dropped` or `Forward` — nothing
+else, and it is the only producer of a `Bridged`. `Bridged::Respond` was never constructed
+and never matched anywhere in the workspace, and its documentation was `Routed::Respond`'s,
+describing RDP handshakes arriving "this way". A transparent bridge terminates nothing and so
+originates nothing. Removed, rather than left as a public variant whose doc invites an
+application to write a dead arm.

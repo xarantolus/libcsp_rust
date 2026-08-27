@@ -45,22 +45,6 @@ pub enum Bridged {
         /// interface.
         packet: u16,
     },
-    /// A control frame this node produced and the caller must send.
-    ///
-    /// The same obligation as [`Routed::Forwarded`] -- take the pool slot and hand it to
-    /// the interface -- but it originates here rather than passing through, so an
-    /// application can count and log the two apart. RDP's handshake and acknowledgements
-    /// arrive this way; without it the router had no outcome that could put a frame on the
-    /// wire on its own behalf, so a `SYN` reached a node and nothing came back.
-    #[cfg(feature = "rdp")]
-    Respond {
-        /// Interface index.
-        iface: u8,
-        /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
-        via: u16,
-        /// Pool slot holding the packet. The caller owns it.
-        packet: u16,
-    },
     /// The packet went no further.
     Dropped(DropReason),
 }

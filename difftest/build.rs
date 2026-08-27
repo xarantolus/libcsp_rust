@@ -82,6 +82,13 @@ fn main() {
         "src/csp_rdp_queue.c",
         "src/csp_hex_dump.c",
         "src/interfaces/csp_if_lo.c",
+        // The CAN interface, and the reassembly pool behind it. Neither was in this build
+        // nor in `ctest`'s, so every comparison of CFP so far has been of the *identifier*
+        // bit layout, with `shim.c` expanding the header's macros itself -- not one line of
+        // `csp_if_can.c` ran. CAN is the flight bus, and its reassembly is the part that
+        // has to survive a lost or reordered frame.
+        "src/interfaces/csp_if_can.c",
+        "src/interfaces/csp_if_can_pbuf.c",
         // csp_buffer.c uses the OS queue shim.
         "src/arch/posix/csp_queue.c",
         "src/arch/posix/pthread_queue.c",
