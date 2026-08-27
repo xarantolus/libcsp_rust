@@ -3466,3 +3466,45 @@ scoreboard writes thousands with a space and `[0-9]+` stops at the gap. The seco
 for the implementation cell, because `16 954 (**1.45× the C**)` puts a bolded ratio to the
 left of the bolded figure and the extractor took the first. Every one of the five new checks
 was then made to fail on a one-off edit before being believed.
+
+### Two live connections could share an ephemeral source port
+
+2026-08-27. `csp_conn_find_existing` matches a **client** connection on the incoming
+destination port alone, and says why: *"Outgoing connections are uniquely defined by the
+source port, so only the incoming destination port must match"* (`csp_conn.c:110`).
+`Table::find` does the same. That is sound in the C because the source port is a property of
+the **slot** — `csp_conn_init` sets `conn->sport_outgoing = CSP_PORT_MAX_BIND + 1 + i` once
+(`csp_conn.c:58`) and `csp_connect` copies it out — so two connections open at the same time
+are different slots and cannot share one.
+
+`Node::connect` used a rotating counter. That gives the guarantee only until it wraps.
+Measured, one connection held open and the rest opened and closed:
+
+```text
+C, eight open at once:      [18, 19, 20, 21, 22, 23, 24, 17]   one per slot
+C, slots 1/3/5 reopened:    [19, 21, 23]                       the same ports again
+port, held connection:      17
+port: connection 46 got sport 17, the same as the still-open one
+```
+
+Two live client connections then share a source port and `find` returns whichever the scan
+reaches first — a reply to one request handed to the code that made a different one. The
+port now derives the source port from the connection slot, which is what the C does and what
+the matching rule requires.
+
+**Why it survived this long.** Eight connections opened in a row are all distinct under
+either scheme, so the obvious test — open `CONNS` at once, check the ports differ — passes on
+the broken code. It takes a full lap of the ephemeral range (47 connects at v2) with one
+connection held open. The control confirms it: restoring the rotating counter leaves
+`no_two_open_connections_share_a_source_port` **green** and fails only the lap test.
+
+**Two things I got wrong.** The first probe read `Node::conn_sport`, which is the C's
+`csp_conn_sport` and returns `idin.sport` — the *remote* port. It reported the service port,
+10, for every connection, and "the held connection's port is 10" looked like a finding until
+the constant matched the service port I had chosen. The source port is now read off the
+frame the node emits, which is the only place a peer can see it.
+
+And the reply half of the test passed with `find`'s port match replaced by `true`: `held` was
+allocated first, so a scan that ignored the port entirely still returned it. One reply now
+goes to each connection, and the one addressed to the *later* connection is the half that can
+only arrive by matching.

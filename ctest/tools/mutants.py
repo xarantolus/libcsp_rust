@@ -149,6 +149,12 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # The ephemeral source port must be a function of the connection slot, as it is in the C
+  # (`csp_conn.c:58`), because `find` matches a client connection on that port alone. It was
+  # a rotating counter, which held only until it wrapped.
+  ("sport: derived from the slot, not a counter", "csp/src/node.rs",
+   "        EPHEMERAL_FIRST + (idx % span) as u8",
+   "        let _ = idx;\n        EPHEMERAL_FIRST"),
   # `csp_send_prio` writes the priority into the *connection*; the port applies it to the
   # packet. A deliberate divergence (SCOPE.md 32) that nothing had ever measured -- the C
   # side of it was a doc comment.

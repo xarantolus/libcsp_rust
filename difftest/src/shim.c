@@ -864,6 +864,51 @@ int shim_node_client_send(uint16_t dst, uint8_t dport, const uint8_t *body, int 
 }
 
 /*
+ * Several client connections at once, so the source ports libcsp hands out are observable.
+ *
+ * `csp_conn_init` sets `conn->sport_outgoing = CSP_PORT_MAX_BIND + 1 + i` **once**, per
+ * slot (`csp_conn.c:58`), and `csp_connect` copies it into `idout.sport`. So an outgoing
+ * source port is a property of the slot, not of a counter: two connections that are open at
+ * the same time can never share one. `csp_conn_find_existing` leans on exactly that --
+ * "Outgoing connections are uniquely defined by the source port", so for a client
+ * connection it matches on the incoming dport alone.
+ *
+ * Each call sends one byte so the port that reaches the wire is what gets reported, rather
+ * than a field read out of the connection struct.
+ */
+#define SHIM_CONNS 8
+static csp_conn_t * shim_conns[SHIM_CONNS];
+
+/* Open a client connection in `slot` and send one byte. Returns the sport on the wire. */
+int shim_conn_open(int slot, uint16_t dst, uint8_t dport) {
+	if (slot < 0 || slot >= SHIM_CONNS) { return -1; }
+	if (shim_conns[slot] != NULL) { return -2; }
+	shim_conns[slot] = csp_connect(2, dst, dport, 0, 0);
+	if (shim_conns[slot] == NULL) { return -3; }
+
+	csp_packet_t *out = csp_buffer_get(0);
+	if (out == NULL) { return -4; }
+	out->data[0] = 0x2a;
+	out->length = 1;
+	shim_node_clear_tx();
+	csp_send(shim_conns[slot], out);
+	shim_node_pump();
+	if (shim_tx_n < 1) { return -5; }
+
+	/* The sport is read back off the captured frame, not off the connection. */
+	csp_id_t id = csp_id_extract(shim_tx_buf[0]);
+	return (int)id.sport;
+}
+
+void shim_conn_close(int slot) {
+	if (slot < 0 || slot >= SHIM_CONNS) { return; }
+	if (shim_conns[slot] != NULL) {
+		csp_close(shim_conns[slot]);
+		shim_conns[slot] = NULL;
+	}
+}
+
+/*
  * `csp_send_prio` on the same held connection, so what it leaves behind is observable.
  *
  * `csp_io.c:322` is two lines: `conn->idout.pri = prio; csp_send(conn, packet);`. The write

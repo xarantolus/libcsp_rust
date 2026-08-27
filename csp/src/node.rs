@@ -178,8 +178,6 @@ pub struct Node<
     hostname: &'a str,
     model: &'a str,
     revision: &'a str,
-    /// Next ephemeral source port. Wraps within the dynamic range.
-    sport_next: u8,
 }
 
 /// Ephemeral source ports start above the well-known service ports.
@@ -208,7 +206,6 @@ impl<
             hostname: config.hostname,
             model: config.model,
             revision: config.revision,
-            sport_next: EPHEMERAL_FIRST,
         }
     }
 
@@ -480,15 +477,30 @@ impl<
 
     // --- client side ---
 
-    fn next_sport(&mut self) -> u8 {
-        let s = self.sport_next;
-        // Stay inside the dynamic range and never collide with a service port.
-        self.sport_next = if self.sport_next >= self.version.max_port() {
-            EPHEMERAL_FIRST
-        } else {
-            self.sport_next + 1
-        };
-        s
+    /// The ephemeral source port for the connection in slot `idx`.
+    ///
+    /// A function of the slot, exactly as in the C: `csp_conn_init` sets
+    /// `conn->sport_outgoing = CSP_PORT_MAX_BIND + 1 + i` **once**, per slot
+    /// (`csp_conn.c:58`), and `csp_connect` copies it into the outgoing header. So two
+    /// connections that are open at the same time cannot share a source port -- they are
+    /// different slots.
+    ///
+    /// That uniqueness is load-bearing, and both stacks lean on it in the same place:
+    /// `Table::find` matches a *client* connection on the incoming destination port alone,
+    /// as `csp_conn_find_existing` does, with the C's own comment saying it may because
+    /// "outgoing connections are uniquely defined by the source port".
+    ///
+    /// This was a rotating counter, which gives that guarantee only until it wraps.
+    /// Measured against a real node: with one connection still open on port 17, the 47th
+    /// subsequent `connect` handed out 17 again, and a reply for either then went to
+    /// whichever the scan reached first. See `difftest/tests/node_sport.rs`.
+    ///
+    /// If a node is configured with more connections than there are ephemeral ports the
+    /// span repeats, which no allocation scheme can avoid; the C cannot serve that
+    /// configuration either.
+    fn sport_for(&self, idx: u16) -> u8 {
+        let span = (self.version.max_port() - EPHEMERAL_FIRST) as u16 + 1;
+        EPHEMERAL_FIRST + (idx % span) as u8
     }
 
     /// Open a connection to `dst`.
@@ -513,14 +525,15 @@ impl<
         now_ms: u32,
     ) -> Result<Handle> {
         let flags = Self::conn_flags(opts)?;
-        let sport = self.next_sport();
-        let idout = Id {
+        let mut idout = Id {
             pri,
             flags,
             src: self.address,
             dst,
             dport,
-            sport,
+            // A placeholder in range. The real one is a function of the slot, which is not
+            // known until the connection is allocated.
+            sport: EPHEMERAL_FIRST,
         };
         // Validate before consuming a connection slot, so a bad address does not cost one
         // of the node's scarcest resources.
@@ -531,6 +544,9 @@ impl<
             .router
             .conns
             .alloc_kind(idout, opts, now_ms, crate::conn::Kind::Client)?;
+        let sport = self.sport_for(h.index());
+        idout.sport = sport;
+        self.router.conns.set_id_out(h, idout)?;
         // The reply we expect: their source is our destination and vice versa. The C sets
         // the same flags on both ids, so a reply that drops the protection no longer
         // matches the connection.

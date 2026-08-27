@@ -107,6 +107,8 @@ unsafe extern "C" {
     fn shim_node_set_dedup(mode: c_int);
     fn shim_node_sfp_recv(port: u8, out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_node_client_send(dst: u16, dport: u8, body: *const u8, len: c_int) -> c_int;
+    fn shim_conn_open(slot: c_int, dst: u16, dport: u8) -> c_int;
+    fn shim_conn_close(slot: c_int);
     fn shim_node_client_send_prio(
         prio: u8,
         dst: u16,
@@ -504,6 +506,19 @@ pub fn c_node_client_send(dst: u16, dport: u8, body: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     frames
+}
+
+/// Open a client connection on the C node in `slot`, send one byte, and report the source
+/// port that reached the wire. Negative on failure.
+pub fn c_conn_open(slot: i32, dst: u16, dport: u8) -> i32 {
+    // SAFETY: the shim bounds-checks `slot` against its own array. Callers hold `LOCK`.
+    unsafe { shim_conn_open(slot, dst, dport) }
+}
+
+/// Close the connection in `slot`.
+pub fn c_conn_close(slot: i32) {
+    // SAFETY: same bound, and closing an empty slot is a no-op. Callers hold `LOCK`.
+    unsafe { shim_conn_close(slot) }
 }
 
 /// The same, but through `csp_send_prio` with `prio`.
