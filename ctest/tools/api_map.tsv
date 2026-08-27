@@ -188,8 +188,8 @@ csp_kiss_add_interface	ported	csp_core::kiss::new
 csp_kiss_rx	ported	csp_core::kiss::push
 csp_kiss_tx	ported	csp_core::kiss::encode
 csp_i2c_add_interface	ported	csp::iface::Interface::new
-csp_i2c_rx	ported	csp::iface::Interface::note_rx
-csp_i2c_tx	ported	csp::iface::Interface::send
+csp_i2c_rx	ported	csp_core::i2c::accepts
+csp_i2c_tx	ported	csp_core::i2c::physical_addr
 csp_eth_rx	ported	csp_core::eth::push
 csp_eth_tx	ported	csp_core::eth::encode
 csp_eth_pack_header	ported	csp_core::eth::encode

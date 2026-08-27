@@ -133,6 +133,14 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # `if-i2c` was a default-on feature gating zero lines, with its three C functions mapped
+  # to the *generic* Interface methods. These three are the behaviour that is not generic.
+  ("i2c: the bus address is seven bits", "csp-core/src/i2c.rs",
+   "    (addr & ADDR_MASK) as u8", "    (addr & 0xFF) as u8"),
+  ("i2c: a next hop wins over the destination", "csp-core/src/i2c.rs",
+   "    let addr = if via != NO_VIA { via } else { dst };", "    let addr = dst;"),
+  ("i2c: the receive guard is four bytes, not a header", "csp-core/src/i2c.rs",
+   "pub const MIN_FRAME_LEN: usize = 4;", "pub const MIN_FRAME_LEN: usize = 6;"),
   # The tap's payload, not its count or its destination. node_promisc.rs compared only
   # those two until the bytes were added, and a tap that copied the wrong packet or
   # truncated it reports the same count and the same destination.
