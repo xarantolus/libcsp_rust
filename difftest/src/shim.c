@@ -1133,3 +1133,32 @@ int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, i
 	csp_close(conn);
 	return ret;
 }
+
+/* --- address aliases: a second address the node answers to ------------------ */
+
+/*
+ * `csp_route.c:236` folds `csp_addr_is_alias(packet->id.dst)` into the is-it-for-me
+ * decision, alongside "any interface's address" and "the ingress interface's broadcast".
+ * The port folds aliases into `IfList::find_by_addr` instead, and nothing had ever compared
+ * the two: no harness named an alias, no corpus record, no differential test. It was a
+ * reading of `csp_iflist.c` deciding whether a command addressed to a node's second address
+ * is delivered or forwarded back out.
+ *
+ * The list is global in the C and the entries must outlive the call, so they are static here.
+ */
+#define SHIM_ALIAS_MAX 4
+static csp_alias_t shim_aliases[SHIM_ALIAS_MAX];
+static int shim_alias_n;
+
+int shim_node_add_alias(uint16_t addr, int iface) {
+	if (shim_alias_n >= SHIM_ALIAS_MAX) { return -1; }
+	csp_alias_t *a = &shim_aliases[shim_alias_n];
+	memset(a, 0, sizeof(*a));
+	a->addr = addr;
+	a->iface = shim_iface_by_index(iface);
+	if (csp_alias_add(a) != 0) { return -2; }
+	shim_alias_n++;
+	return 0;
+}
+
+int shim_node_is_alias(uint16_t addr) { return csp_addr_is_alias(addr); }

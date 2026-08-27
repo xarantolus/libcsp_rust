@@ -137,6 +137,8 @@ unsafe extern "C" {
         out: *mut u8,
         out_len: *mut c_int,
     ) -> c_int;
+    fn shim_node_add_alias(addr: u16, iface: c_int) -> c_int;
+    fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
@@ -515,6 +517,22 @@ pub fn c_client_transaction(dst: u16, dport: u8, reply: &[u8], inlen: i32) -> (i
     };
     out.truncate(n as usize);
     (ret, out)
+}
+
+/// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.
+///
+/// The alias list is global in libcsp and its entries must outlive the call, so the shim
+/// owns them. Idempotent only in the sense that adding the same address twice adds two
+/// entries — as it does in the C.
+pub fn c_node_add_alias(addr: u16, iface: i32) -> bool {
+    // SAFETY: the shim owns the static alias entries for the life of the process.
+    unsafe { shim_node_add_alias(addr, iface) == 0 }
+}
+
+/// Whether libcsp considers `addr` one of this node's aliases.
+pub fn c_node_is_alias(addr: u16) -> bool {
+    // SAFETY: one list walk, no arguments beyond the address.
+    unsafe { shim_node_is_alias(addr) != 0 }
 }
 
 /// Which member of `csp_services.c`'s client to drive.

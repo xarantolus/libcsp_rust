@@ -2960,3 +2960,31 @@ so the failure had to be in the addressing, not the delivery.
 
 A 4-byte reply succeeding is what makes the other rows mean anything. Without that row the
 test would have passed against a harness that never delivered a thing.
+
+### Address aliases: a delivery decision nothing had named
+
+2026-08-27. Measured: **no `ctest` suite, no corpus record and no differential test mentions
+an alias.** `csp_route.c:236` nevertheless folds `csp_addr_is_alias(packet->id.dst)` into the
+is-it-for-me test, beside "any interface's address" and "the ingress interface's broadcast",
+and `router.rs:473` says the port does the same through `IfList::find_by_addr`. That was a
+reading of `csp_iflist.c` deciding whether a command sent to a node's second address is
+**delivered or forwarded back out** — the same either/or the forwarding bug got wrong.
+
+**Measured: the port agrees with the C.** With `ALIAS_ADDR` unregistered both forward the
+frame and deliver nothing; with it registered on an interface both deliver to the bound port
+and put nothing on the wire; and an unrelated address is still forwarded by both afterwards.
+The address is deliberately in neither interface's subnet, so nothing but the alias can make
+it local — otherwise the subnet rule decides and the alias is never consulted.
+
+Two controls: disabling the alias arm of `find_by_addr` fails the alias case alone;
+short-circuiting `for_us` to `true` fails both, including the not-an-alias case.
+
+**The test file was order-dependent, and passing three runs in a row is what nearly hid it.**
+The C's alias list is global and has no remove, so once `ALIAS_ADDR` is registered in a
+process it stays. A separate test that registered it would break the before/after test's
+"before" half — depending only on which acquired the lock first. Cargo runs a file's tests on
+parallel threads and `lock()` serialises them without ordering them, so this was scheduling
+luck rather than correctness. Merged into one test: the before/after pair is one experiment
+and belongs in one. The lesson is narrower than "avoid shared state" — it is that **a global
+with no remove turns test independence into an ordering assumption**, and the C is full of
+them.
