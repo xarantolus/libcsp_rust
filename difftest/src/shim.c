@@ -1060,8 +1060,76 @@ int shim_client_request(int kind, uint16_t dst, unsigned int size, uint8_t opts)
 		case 2: csp_buf_free(dst, 0); break;
 		case 3: csp_uptime(dst, 0); break;
 		case 4: csp_ps(dst, 0); break;
+		case 5: csp_ping_noreply(dst); break;
+		case 6: {
+			/* `csp_cmp` writes its reply back over the request buffer, so the caller hands
+			   it one sized for the reply. IDENT is the largest of the fixed-size codes. */
+			struct csp_cmp_ident_msg msg;
+			memset(&msg, 0, sizeof(msg));
+			(void)csp_cmp(dst, 0, CSP_CMP_IDENT, (int)sizeof(msg), &msg);
+			break;
+		}
 		default: return -1;
 	}
 	shim_node_pump();
 	return shim_tx_n;
+}
+
+/*
+ * Drive `csp_transaction_persistent` with a reply already waiting, so its reply-length rule
+ * is observable.
+ *
+ * The `csp_get_*` clients all funnel through this and none of them was reachable before: with
+ * no reply on the queue the transaction times out and never reaches the length check. Here
+ * the connection is opened first, a reply addressed to its own source port is injected and
+ * routed onto it, and only then does the transaction run -- so the `csp_read` inside it
+ * returns immediately.
+ *
+ * Returns what the transaction returned: the reply length, or 0 for "refused".
+ */
+int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, int reply_len,
+                            int inlen, uint8_t *out, int *out_len) {
+	csp_conn_t *conn = csp_connect(CSP_PRIO_NORM, dst, dport, 0, 0);
+	if (conn == NULL) { return -1; }
+
+	/* A reply comes back with the ports swapped, from the node we addressed. */
+	csp_packet_t *p = csp_buffer_get(0);
+	if (p == NULL) { csp_close(conn); return -1; }
+	memset(&p->id, 0, sizeof(p->id));
+	p->id.pri = CSP_PRIO_NORM;
+	p->id.src = dst;
+	p->id.dst = shim_node_iface.addr;
+	/* The connection's *incoming* destination port is the ephemeral one `csp_connect`
+	   allocated (`conn->idin.dport = conn->sport_outgoing`). `csp_conn_sport` returns
+	   `idin.sport`, which is the remote port we dialled -- addressing the reply there routes
+	   it to a port nothing is listening on, and the transaction times out looking like a
+	   length refusal. */
+	p->id.dport = conn->idin.dport;
+	p->id.sport = dport;
+	if (reply_len > (int)sizeof(p->data)) { csp_buffer_free(p); csp_close(conn); return -1; }
+	memcpy(p->data, reply, (size_t)reply_len);
+	p->length = (uint16_t)reply_len;
+	csp_id_prepend(p);
+
+	uint8_t frame[SHIM_FRAME_MAX];
+	int n = p->frame_length > SHIM_FRAME_MAX ? SHIM_FRAME_MAX : p->frame_length;
+	memcpy(frame, p->frame_begin, (size_t)n);
+	csp_buffer_free(p);
+
+	shim_node_clear_tx();
+	shim_node_inject(frame, (uint32_t)n);
+	shim_node_pump();
+
+	uint8_t buf[256];
+	memset(buf, 0, sizeof(buf));
+	int ret = csp_transaction_persistent(conn, 0, NULL, 0, buf, inlen);
+	if (ret > 0) {
+		int m = ret > 256 ? 256 : ret;
+		memcpy(out, buf, (size_t)m);
+		*out_len = m;
+	} else {
+		*out_len = 0;
+	}
+	csp_close(conn);
+	return ret;
 }

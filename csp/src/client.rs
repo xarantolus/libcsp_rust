@@ -119,7 +119,13 @@ pub const fn ps() -> Request<'static> {
 
 /// Decode a `u32` reply — memfree, buf_free and uptime all use this shape.
 pub fn decode_u32(reply: &[u8]) -> Result<u32> {
-    if reply.len() < 4 {
+    // Exactly four, not "at least four". `csp_transaction_persistent` refuses a reply whose
+    // length is not the one asked for (`csp_io.c:352`, `csp_dbg_inval_reply++`) and hands
+    // the caller nothing, so `csp_get_memfree` on a five-byte reply reports failure. This
+    // returned the first four bytes of whatever arrived — a number the peer never sent,
+    // indistinguishable to an operator from one it did. Measured against the C: a 5- and an
+    // 8-byte reply are both refused there and were both accepted here.
+    if reply.len() != 4 {
         return Err(Error::Truncated);
     }
     Ok(u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]))
