@@ -65,7 +65,12 @@ fn main() {
         "src/cmp/csp_cmp_mem.c",
         "src/cmp/csp_cmp_peek_poke.c",
         "src/cmp/csp_cmp_clock.c",
-        "src/arch/posix/csp_system.c",
+        // `arch/posix/csp_system.c` is deliberately absent, like `csp_time.c` below.
+        // Its `csp_reboot_hook` is `sync(); reboot(LINUX_REBOOT_CMD_RESTART)` on Linux, so
+        // a test that sent port 4 with the right magic word would reboot the machine
+        // running it. `shim.c` supplies recording hooks instead -- which is also what makes
+        // MEMFREE comparable at all, the real one being however much RAM the host has free
+        // at that instant. `ctest/hooks.c` already did this; difftest had not.
         "src/arch/posix/csp_clock.c",
         "src/csp_sfp.c",
         "src/csp_rdp.c",

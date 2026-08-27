@@ -146,6 +146,18 @@ MUTANTS = [
   ("cmp: the ident reply is the size the c struct expects", "csp-core/src/cmp.rs",
    "    pub const LEN: usize =\n        Header::LEN + len::HOSTNAME + len::MODEL + len::REVISION + len::DATE + len::TIME;",
    "    pub const LEN: usize =\n        Header::LEN + len::HOSTNAME + len::MODEL + len::REVISION + len::DATE + len::TIME - 1;"),
+  # The built-in services had no comparison against libcsp of any kind until
+  # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
+  # of its tests and no other.
+  ("service: a ping is echoed whole", "csp/src/service.rs",
+   "            out[..request_payload.len()].copy_from_slice(request_payload);\n            Ok(Some(request_payload.len()))",
+   "            out[..request_payload.len()].copy_from_slice(request_payload);\n            Ok(Some(request_payload.len().saturating_sub(1)))"),
+  ("service: counter replies are big-endian", "csp/src/service.rs",
+   "pub fn encode_u32_reply(value: u32, out: &mut [u8]) -> Result<usize> {",
+   "pub fn encode_u32_reply(value: u32, out: &mut [u8]) -> Result<usize> {\n    let value = value.swap_bytes();"),
+  ("service: the magic word gates the reboot", "csp/src/service.rs",
+   "                    _ => Err(Error::BadChecksum),",
+   "                    _ => Ok(Request::Reboot),"),
   ("cmp: reply type is flipped", "csp/src/service.rs",
    "kind: cmp::REPLY,", "kind: cmp::REQUEST,"),
   ("cmp: ident carries the hostname", "csp/src/service.rs",
