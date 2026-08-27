@@ -232,6 +232,25 @@ exposes none.
 | `rdp` | Reliable delivery as `fn step(&mut self, event, now) -> Action` |
 | `eth` | Ethernet + EFP segmentation |
 
+**Reassembling more than one transfer at a time.** `cfp::Reassembler` and `eth::Reassembler`
+each track exactly one; a bus or a segment carries several. `cfp::Pbufs<R, N>` is the pool for
+either — it is what `csp_if_can_pbuf.c` and `csp_if_eth_pbuf.c` are — keyed by the identifier
+bits that name a transfer:
+
+```rust
+let mut pool: Pbufs<eth::Reassembler, 4> = Pbufs::new();
+let r = pool.get_or_create_with(header.reassembly_key(), now,
+                                || eth::Reassembler::with_min_len(header_size))?;
+if r.push(&header, payload, &mut out[slot])? { pool.release(key); }
+pool.expire(now, 1000);   // a sender that stops must not hold a slot forever
+```
+
+`get_or_create_with` rather than `get_or_create` for `eth`: `Default` leaves `min_len` at
+zero, which silently drops the guard refusing a packet too short to hold a CSP header.
+
+Two nodes talking to one at the same time is the ordinary case, not an edge case — with a
+single reassembler the second sender's every segment is refused.
+
 `crc32::Coverage` is explicit because the C's verifier tries header-and-payload, then
 silently falls back to payload-only — so a receiver can accept a frame whose checksum
 covers different bytes than it believes. (For the record, `CSP_21` is defined by no build
@@ -396,8 +415,8 @@ below.
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
   decodes`, `36 sfp transfers, 184 fragments`, and so on).
-- **149 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
-  performed under `ctest/`'s **162 checks**, replayed against the port. `just mutants`
+- **151 corpus records** in `corpus/ctest.jsonl`, each one an exchange a real libcsp node
+  performed under `ctest/`'s **164 checks**, replayed against the port. `just mutants`
   reports how many of them some deliberate breakage can actually move — 117 at the time of
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
