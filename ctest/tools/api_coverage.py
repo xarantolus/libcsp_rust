@@ -11,11 +11,19 @@ So `api_map.tsv` maps every `csp_*` function declared in `libcsp/include/csp/**.
     out-of-scope <reason>       SCOPE.md excludes it (arch shims, drivers, zmqhub, ...)
     deferred     <reason>       in scope, deliberately not done yet, named in SCOPE.md
 
-and this script checks three things that together make the map hard to lie with:
+and this script checks five things that together make the map hard to lie with:
 
   1. every declared C function appears in the map        -- catches silent omission
   2. every map entry names a function that still exists  -- catches stale rows after a bump
   3. every `ported` row names a Rust item that exists    -- catches a mapping to nothing
+  4. every `ported` row names a *function*               -- catches a row that stops short
+  5. that function is defined in the module the row names -- catches a row that only spells
+
+Checks 4 and 5 are what keep the first three honest, and both were added late. With only 1-3,
+152 `ported` rows resolved to 28 distinct Rust names, because a row could name the type that
+holds the method and pass for as long as the struct existed. With 4 but not 5, 57 of the rows
+named a function that exists in several modules -- `new` in nineteen of them -- so a row would
+still survive its real target being deleted. See `rust_functions` and `defines` below.
 
 **What this does NOT establish.** That a Rust item exists under a name is not evidence it
 behaves like the C. A grep proves spelling. Behavioural equivalence is what the corpus
@@ -48,6 +56,54 @@ def declared():
         for m in DECL.finditer(text):
             out.setdefault(m.group(2), str(h.relative_to(HEADERS)))
     return out
+
+
+def rust_functions():
+    """Function names defined anywhere in the shipped crates, tests excluded.
+
+    Separate from `rust_symbols` because a `ported` row that resolves to a *type* proves
+    almost nothing: `csp_iflist_get_by_broadcast` -> `csp::iflist::IfList` passes as long as
+    the struct exists, whatever became of the method. Measured 2026-08-27: 152 `ported` rows
+    resolved to 28 distinct names, 148 of them shared with another row. That is module
+    granularity wearing a function-shaped map -- the exact failure this file was written to
+    stop, re-formed inside it.
+    """
+    fn = re.compile(r"\bfn\s+(\w+)")
+    names = set()
+    for d in RUST_DIRS:
+        for f in d.rglob("*.rs"):
+            text = f.read_text(errors="ignore")
+            i = text.find("\n#[cfg(test)]")
+            if i != -1:
+                text = text[:i]
+            names.update(fn.findall(text))
+    return names
+
+
+def defines(path):
+    """Does the module named by a `ported` path define the function the path ends in?
+
+    Name-only lookup is looser than it reads: 57 of the 148 `ported` rows name a function
+    that exists in more than one module, and `new` is defined in 19. So a row could keep
+    passing after its real target was deleted, on the strength of an unrelated same-named
+    `fn` elsewhere -- the same failure as naming a type, one level down again. Resolving the
+    path makes a row a pointer rather than a name.
+
+    Returns None if the path names no module file, which is itself a failure worth reporting.
+    """
+    segs = path.replace("()", "").split("::")
+    src = ROOT / ("csp" if segs[0] == "csp" else "csp-core") / "src"
+    item = segs[-1]
+    # Longest module prefix that is a file; a crate-root path lands on lib.rs.
+    for k in range(len(segs) - 1, 1, -1):
+        f = src.joinpath(*segs[1:k]).with_suffix(".rs")
+        if f.exists():
+            break
+    else:
+        f = src / "lib.rs"
+    if not f.exists():
+        return None
+    return bool(re.search(r"\bfn\s+" + re.escape(item) + r"\b", f.read_text(errors="ignore")))
 
 
 def rust_symbols():
@@ -90,6 +146,7 @@ def main():
     c_funcs = declared()
     rows = load_map()
     syms = rust_symbols()
+    fns = rust_functions()
     problems = []
 
     for fn, hdr in sorted(c_funcs.items()):
@@ -108,6 +165,22 @@ def main():
             item = detail.replace("()", "").split("::")[-1].strip()
             if item and item not in syms:
                 problems.append(f"{fn} -> {detail}: no Rust item named `{item}` exists")
+            elif item and item not in fns:
+                problems.append(
+                    f"{fn} -> {detail}: `{item}` is not a function. A row that stops at a "
+                    f"type or module cannot notice the function going away, which is the "
+                    f"failure this map exists to catch -- name the item that does the work"
+                )
+            elif item:
+                found = defines(detail)
+                if found is None:
+                    problems.append(f"{fn} -> {detail}: names no module that exists")
+                elif not found:
+                    problems.append(
+                        f"{fn} -> {detail}: `{item}` is a function somewhere, but not in the "
+                        f"module this path names -- the row would survive its real target "
+                        f"being deleted"
+                    )
 
     counts = {}
     for status, _ in rows.values():
