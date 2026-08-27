@@ -149,6 +149,15 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # The idle sweep is for connections a *peer* opened and nobody accepted. Taking a client
+  # connection as well drops the reply the application is waiting for; taking nothing leaves
+  # the table exhaustible by one packet per slot. libcsp expires neither.
+  ("idle sweep: not a connection we opened", "csp/src/conn.rs",
+   "            if c.state != State::Open || c.kind != Kind::Server {",
+   "            if c.state != State::Open {"),
+  ("idle sweep: but it does sweep", "csp/src/conn.rs",
+   "            if c.state != State::Open || c.kind != Kind::Server {",
+   "            if true {"),
   # The ephemeral source port must be a function of the connection slot, as it is in the C
   # (`csp_conn.c:58`), because `find` matches a client connection on that port alone. It was
   # a rotating counter, which held only until it wrapped.
