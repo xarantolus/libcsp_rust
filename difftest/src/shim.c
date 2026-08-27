@@ -15,6 +15,7 @@
 #include <csp/crypto/csp_hmac.h>
 #include <csp/csp_sfp.h>
 #include <csp/csp_cmp.h>
+#include <csp/interfaces/csp_if_i2c.h>
 
 /* csp_id_* dispatch on the global csp_conf.version. */
 void shim_set_version(int v) {
@@ -1205,4 +1206,79 @@ int shim_sfp_send(uint16_t dst, uint8_t dport, const uint8_t *body, int len, uin
 	csp_close(conn);
 	if (ret != CSP_ERR_NONE) { return -100 + ret; }
 	return shim_tx_n;
+}
+
+/* --- I2C: the bus address csp_i2c_tx picks --------------------------------- */
+
+/*
+ * `csp_if_i2c.c` was in neither build. Its loopback and its `csp_id_prepend` are what every
+ * interface does and the port's generic `Interface` already matched; two things are specific
+ * to I2C and the port had neither: the physical address is masked to seven bits, and a frame
+ * under four bytes is refused before `csp_id_strip` runs.
+ *
+ * The driver callback records `packet->cfpid`, which is where `csp_i2c_tx` puts the address
+ * it chose. Returns that address, or -1 if the packet never reached the driver (loopback).
+ */
+static int shim_i2c_addr = -1;
+
+static int shim_i2c_tx_fn(void *driver_data, csp_packet_t *frame) {
+	(void)driver_data;
+	shim_i2c_addr = (int)frame->cfpid;
+	csp_buffer_free(frame);
+	return CSP_ERR_NONE;
+}
+
+static csp_iface_t              shim_i2c_iface;
+static csp_i2c_interface_data_t shim_i2c_data;
+static int                      shim_i2c_ready;
+
+int shim_i2c_init(uint16_t address) {
+	if (shim_i2c_ready) { return 0; }
+	shim_ensure_init();
+	memset(&shim_i2c_data, 0, sizeof(shim_i2c_data));
+	shim_i2c_data.tx_func = shim_i2c_tx_fn;
+	memset(&shim_i2c_iface, 0, sizeof(shim_i2c_iface));
+	shim_i2c_iface.name = "I2C";
+	shim_i2c_iface.addr = address;
+	shim_i2c_iface.netmask = 14;
+	shim_i2c_iface.interface_data = &shim_i2c_data;
+	if (csp_i2c_add_interface(&shim_i2c_iface) != CSP_ERR_NONE) { return -1; }
+	shim_i2c_ready = 1;
+	return 0;
+}
+
+/* Send one packet through `csp_i2c_tx`; returns the bus address it used, or -1. */
+int shim_i2c_tx(uint16_t dst, uint16_t via) {
+	csp_packet_t *p = csp_buffer_get(0);
+	if (p == NULL) { return -2; }
+	memset(&p->id, 0, sizeof(p->id));
+	p->id.pri = 2;
+	p->id.src = shim_i2c_iface.addr;
+	p->id.dst = dst;
+	p->id.dport = 10;
+	p->id.sport = 40;
+	memcpy(p->data, "i2c", 3);
+	p->length = 3;
+
+	shim_i2c_addr = -1;
+	if (shim_i2c_iface.nexthop(&shim_i2c_iface, via, p, 1) != CSP_ERR_NONE) { return -3; }
+	return shim_i2c_addr;
+}
+
+/* Hand `len` bytes to `csp_i2c_rx`; returns 1 if it routed the frame, 0 if it refused. */
+int shim_i2c_rx(const uint8_t *frame, uint32_t len) {
+	csp_packet_t *p = csp_buffer_get(0);
+	if (p == NULL) { return -1; }
+	csp_id_setup_rx(p);
+	if (len > sizeof(p->data)) { csp_buffer_free(p); return -1; }
+	memcpy(p->frame_begin, frame, len);
+	p->frame_length = (uint16_t)len;
+
+	uint32_t before = shim_i2c_iface.frame;
+	csp_i2c_rx(&shim_i2c_iface, p, NULL);
+	if (shim_i2c_iface.frame > before) { return 0; }
+	/* It was routed: drain so the buffer comes back. */
+	csp_qfifo_wake_up();
+	while (csp_route_work() == CSP_ERR_NONE) { }
+	return 1;
 }

@@ -87,6 +87,10 @@ fn main() {
         // bit layout, with `shim.c` expanding the header's macros itself -- not one line of
         // `csp_if_can.c` ran. CAN is the flight bus, and its reassembly is the part that
         // has to survive a lost or reordered frame.
+        // `csp_if_i2c.c` was in neither build, and the api_map claimed its three functions
+        // were ported to the *generic* `Interface` methods. Two of the things it does are
+        // not generic: the seven-bit bus address and the four-byte receive guard.
+        "src/interfaces/csp_if_i2c.c",
         "src/interfaces/csp_if_can.c",
         "src/interfaces/csp_if_can_pbuf.c",
         // csp_buffer.c uses the OS queue shim.

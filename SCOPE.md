@@ -3064,3 +3064,52 @@ Three things worth writing down from getting there:
 - `with_payload_mut`'s slice is the **buffer's capacity**, not the current payload — the
   shortening control produced `"mine"` followed by a screen of zeroes rather than `"min"`.
   That is why `send_fragment` reads `with_payload(<[u8]>::len)` before writing.
+
+### `if-i2c` was a default-on feature that gated nothing
+
+2026-08-27. Target 3, and the sharpest instance of it so far: not a stale number but a
+**claim the code did not support**.
+
+Measured. `if-i2c` is declared in both crates and is on by default; `grep -c 'feature =
+"if-i2c"'` across both source trees returns **0**, where `if-can`, `if-kiss` and `if-eth`
+each gate a module. `csp_if_i2c.c` was in neither harness's build. And `api_map.tsv` said:
+
+```
+csp_i2c_add_interface  ported  csp::iface::Interface::new
+csp_i2c_rx             ported  csp::iface::Interface::note_rx
+csp_i2c_tx             ported  csp::iface::Interface::send
+```
+
+Three generic interface methods, standing in for an interface that did not exist. This is
+the granularity failure `api_coverage`'s check 5 was built to catch, and it survived because
+the named functions genuinely are functions in the module the path names — they are simply
+not I2C.
+
+**Most of `csp_if_i2c.c` really is generic**, and saying so is the honest half: loopback when
+the destination is our own address, `csp_id_prepend` outbound, `csp_id_strip` inbound.
+`Interface::send` already did all three, and the `csp_i2c_add_interface` row is fair. Two
+things are not generic, and the port had neither:
+
+- **The bus address is seven bits.** `csp_if_i2c.c:22` computes `(via != CSP_NO_VIA_ADDRESS)
+  ? via : id.dst` and then masks with `0x7F`. A CSP address of 200 is addressed on the bus as
+  72 — so two nodes 128 apart share a device address and nothing anywhere reports it. There
+  was no `0x7F` anywhere in either crate.
+- **A frame under four bytes is refused** and counted as a framing error before
+  `csp_id_strip` runs. `note_rx` only counted.
+
+`csp_core::i2c` now has both, as pure functions of the header, and `node_i2c.rs` compares
+them against the real `csp_i2c_tx`/`csp_i2c_rx` at nine address pairs and seven frame
+lengths. Three controls, each failing one test: dropping the mask, preferring the destination
+over the next hop, and moving the guard to a header length.
+
+**The guard is reproduced as the C wrote it, not as it presumably meant it.** Four bytes is
+`sizeof(uint32_t)`, and a v2 header is six — so a five-byte frame passes and is handed to
+`csp_id_strip`. Refusing more here would drop frames a real libcsp peer accepts; this module's
+job is to agree with the bus. `Id::decode` refuses the short header afterwards, which is where
+the port declines to read past the buffer.
+
+**A test case I wrote wrong turned out to be worth keeping.** I used `dst == NODE_ADDR` with a
+next hop set, expecting the next hop to be used; the C never reached the driver. The loopback
+test is on `id.dst` and runs *before* the next hop is consulted, so a packet addressed to
+ourselves is looped back even when a route says to send it elsewhere. That is now its own
+assertion rather than a broken row.
