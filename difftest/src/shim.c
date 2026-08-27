@@ -739,7 +739,7 @@ int shim_node_recvfrom(uint16_t *src, uint16_t *dst, uint8_t *dport, uint8_t *sp
 	return 1;
 }
 
-/* Close the catch-all socket, which is how libcsp releases a bind (`csp_port.c:135`). */
+/* Close the catch-all socket, which is how libcsp releases a bind (`csp_port.c:138`). */
 int shim_node_unbind_any(void) {
 	if (!shim_any_bound) { return 0; }
 	csp_dbg_errno = 0;

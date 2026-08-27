@@ -257,7 +257,7 @@ fn the_catch_all_delivers_exactly_what_a_real_node_delivers() {
     // DIVERGENCE (SCOPE.md 31): the port returns the buffer, the C does not.
     //
     // `csp_socket_close` looks like it drains what the socket was holding: it dequeues
-    // `socket->rx_queue` into a `csp_packet_t *` and frees each one (`csp_port.c:150`).
+    // `socket->rx_queue` into a `csp_packet_t *` and frees each one (`csp_port.c:158`).
     // But for a connection-oriented socket that queue holds `csp_conn_t *` — that is what
     // `csp_route.c:194` enqueues and what `csp_accept` dequeues. So it hands a *connection*
     // to `csp_buffer_free`, whose `CONTAINER_OF` steps backwards off the front of the

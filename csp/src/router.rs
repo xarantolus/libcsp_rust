@@ -353,7 +353,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// Bind the catch-all — libcsp's `csp_bind(socket, CSP_ANY)`.
     ///
     /// Every port in range with no bind of its own is then delivered rather than dropped.
-    /// `csp_port_get_socket` (`csp_port.c:54`) does this by keeping the catch-all in a slot
+    /// `csp_port_get_socket` (`csp_port.c:70`) does this by keeping the catch-all in a slot
     /// past the port array and reaching it only when the packet's own port has no socket,
     /// so an explicit bind still wins.
     ///
@@ -396,7 +396,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     /// out connections for a port nothing is serving any more.
     ///
     /// The C also stops after unbinding the **first** port that names the socket
-    /// (`csp_port.c:145`, `break`), even though `csp_bind` happily binds one socket to
+    /// (`csp_port.c:149`, `break`), even though `csp_bind` happily binds one socket to
     /// several ports — it only checks that the *port* is free. So closing a socket bound
     /// to ports 10 and 11 leaves port 11 pointing at a socket whose queue has just been
     /// drained. Here a port is unbound by number, so the situation cannot arise.
