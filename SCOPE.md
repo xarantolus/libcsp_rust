@@ -3550,3 +3550,51 @@ untestable in `difftest/` (whose libcsp has a real one): `csp_conn_check_timeout
 close a plain connection however often it runs, because it never looks at one. Running it a
 thousand times is the strongest form of that statement the harness can make, and it is
 stronger than any single advance of a virtual clock would have been.
+
+### `csp_rtable_save` was mapped to a function that saves one route
+
+2026-08-27. Third pass of the coverage sweep, from the other side: for each C function the
+map calls `ported`, is it ever **called** by either harness? 61 of 147 are not, and most of
+those are reached transitively — `csp_crc32_update` through `csp_crc32_memory`,
+`csp_cmp_ident` through the CMP dispatch, `csp_can_tx` through an interface `nexthop`. The
+regex is a lead generator; reading the shortlist is the work. `csp_rtable_save` had no
+plausible indirect caller.
+
+It was mapped to `Table::format_route`, which renders **one** route. Nothing joined routes
+into a table, `format_route` had no caller outside its own unit tests, and `csp_rtable_save`
+was called by neither harness. So the text a ground tool reads back off a node had never been
+put beside the C's.
+
+**Measured, both versions:**
+
+```text
+v1 (5 host bits):   load "8/5 CAN"     -> save "8 CAN"
+                    load "31/5 CAN 7"  -> save "31 CAN 7"
+                    load "8/3 CAN"     -> save "8/3 CAN"
+v2 (14 host bits):  load "8/14 CAN"    -> save "8 CAN"
+                    load "8/5 CAN"     -> save "8/5 CAN"
+both:               load "0/0 CAN"     -> save "0/0 CAN"
+four routes:        save "8 CAN,20 KISS 3,0/0 CAN,31/3 KISS"
+```
+
+`csp_rtable_save_route` omits the netmask when it equals the host-bit width
+(`csp_rtable_stdio.c:91`) — that is a host route and the parser defaults to it — and joins
+entries with a bare comma. The port always printed the mask. Both forms parse back to the
+same table, so this is not a routing bug; it is what a node says about itself, and an
+operator diffing it against the text they uploaded would see a difference that is not one.
+
+`format_route` now takes the `Version` (the same mask is a host route at one version and a
+subnet route at the other, which is why it could not do this before), and `Table::save`
+writes the whole table. Where the C `snprintf`s into a fixed buffer and stops — leaving a
+prefix that parses perfectly and is **not** the node's table — `save` returns
+`BufferTooSmall`. That divergence is asserted as one.
+
+**Two unit tests had to be corrected alongside the code, and they were wrong about the C.**
+`a_route_renders_in_the_format_the_parser_accepts` asserted `"8/5 CAN"` at v1; the C writes
+`"8 CAN"`, because 5 *is* v1's host width. `format_and_parse_round_trip` compared the parsed
+`netmask` field rather than its effective value, so an omitted mask read as a failed round
+trip when the round trip is exact. Both encoded a reading of the port's own formatter. That
+is the fourth time here — and, as before, the tests were what would have blocked the fix.
+
+The three controls each fail on a different row: printing every mask fails the host route,
+printing none fails the subnet route, and a space separator fails only the whole-table case.

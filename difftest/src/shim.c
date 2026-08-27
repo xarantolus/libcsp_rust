@@ -149,6 +149,22 @@ int shim_rtable_load(const char *text) {
 	return csp_rtable_load(text);
 }
 
+/*
+ * `csp_rtable_save` on whatever `shim_rtable_load` last installed.
+ *
+ * The text a ground tool reads back off a node. `csp_rtable_save_route`
+ * (`csp_rtable_stdio.c:80`) omits the netmask when it equals the host-bit width, omits the
+ * via when there is none, skips the loopback interface, and joins entries with a comma --
+ * none of which the port's per-route formatter had ever been compared against.
+ *
+ * Returns the length written, or a negative libcsp error.
+ */
+int shim_rtable_save(char *out, int maxlen) {
+	int rc = csp_rtable_save(out, (size_t)maxlen);
+	if (rc != CSP_ERR_NONE) { return rc; }
+	return (int)strlen(out);
+}
+
 /* Validate without installing. */
 int shim_rtable_check(const char *text) {
 	return csp_rtable_check(text);

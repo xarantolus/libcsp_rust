@@ -87,6 +87,7 @@ unsafe extern "C" {
     );
     fn shim_rtable_load(text: *const u8) -> c_int;
     fn shim_rtable_check(text: *const u8) -> c_int;
+    fn shim_rtable_save(out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_rtable_lookup(addr: u16, name: *mut u8, via: *mut u16) -> c_int;
     fn shim_add_iface(name: *const u8, addr: u16, netmask: u16) -> c_int;
     fn shim_iface_registered(name: *const u8) -> c_int;
@@ -1192,6 +1193,21 @@ pub fn c_rtable_load(text: &str) -> Option<c_int> {
     // SAFETY: `c` is NUL-terminated and outlives the call. Callers hold `LOCK`, since the
     // routing table is a C global.
     Some(unsafe { shim_rtable_load(c.as_ptr() as *const u8) })
+}
+
+/// What `csp_rtable_save` writes for the table `c_rtable_load` last installed.
+///
+/// The text a ground tool reads back off a node. `None` if libcsp reported an error.
+pub fn c_rtable_save() -> Option<String> {
+    let mut buf = vec![0u8; 512];
+    // SAFETY: the shim writes at most `maxlen` bytes including the terminator, and reports
+    // the length it wrote. Callers hold `LOCK`, since the routing table is a C global.
+    let n = unsafe { shim_rtable_save(buf.as_mut_ptr(), buf.len() as c_int) };
+    if n < 0 {
+        return None;
+    }
+    buf.truncate(n as usize);
+    String::from_utf8(buf).ok()
 }
 
 /// Validate a route table with the C without installing it.
