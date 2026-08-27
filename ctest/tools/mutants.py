@@ -152,6 +152,22 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # Three more from the unmovable list, each a *positive* rule that no "remove a guard"
+  # mutation can reach: a plain packet is accepted, delivery does not depend on the tap, and
+  # an unknown CMP code is not answered.
+  ("security: a plain packet with no policy is accepted", "csp-core/src/security.rs",
+   "    Ok(body)\n}", "    if endpoint_opts == 0 {\n        return Err(Refusal::Unsupported);\n    }\n    Ok(body)\n}"),
+  # First written against `request_len`'s `_` arm, which only weakens a length gate the
+  # dispatch below refuses anyway -- NOTHING NOTICED, correctly. The rule is in the dispatch.
+  ("cmp: an unknown code is not answered", "csp-core/src/cmp.rs",
+   "        other => Err(Error::LengthExceedsMaximum {\n            got: other as usize,\n            max: code::POKE_V2 as usize,\n        }),",
+   "        _other => Ok(Query::Ident),"),
+  # The mirror of `a finished transfer is reported finished`: a transfer that is *not*
+  # finished must not be reported as one. `eth::an_incomplete_transfer_holds_a_buffer` is
+  # the record that can see it, and nothing else could.
+  ("eth: an unfinished transfer is not reported finished", "csp-core/src/eth.rs",
+   "        self.key.is_some() && self.received >= self.total",
+   "        self.key.is_some()"),
   # Four guards that had no mutation of their own, found by mining the "no mutation could
   # move this record" list. Three more were written beside them and deleted before commit:
   # they duplicated targets already covered further down this file, which the duplicate
