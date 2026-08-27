@@ -15,6 +15,7 @@
 #include <csp/crypto/csp_hmac.h>
 #include <csp/csp_sfp.h>
 #include <csp/csp_cmp.h>
+#include <csp/csp_hooks.h>
 #include <csp/interfaces/csp_if_i2c.h>
 
 /* csp_id_* dispatch on the global csp_conf.version. */
@@ -486,6 +487,76 @@ int shim_node_pump(void) {
 	csp_qfifo_wake_up();
 	while (csp_route_work() == CSP_ERR_NONE) { n++; }
 	return n;
+}
+
+/* --- CMP memory access, bounded ------------------------------------------ */
+
+/*
+ * `csp_cmp_memcpy`, `csp_cmp_memread64` and `csp_cmp_memwrite64` are `__weak` in libcsp
+ * (`csp_cmp_mem.c:21`), and the defaults are bare memcpys from whatever address the request
+ * carries. A peek at a made-up address on a POSIX host segfaults, so the tests would be
+ * testing the harness's luck. These strong definitions bound it to one region, which is what
+ * `ctest/` does for the 32-bit codes and what nothing did for the 64-bit ones.
+ */
+#define SHIM_MEM_LEN 256
+static uint8_t shim_mem[SHIM_MEM_LEN];
+
+/* The address the region answers to, chosen high enough to be obviously not a real one. */
+#define SHIM_MEM_BASE 0x0000BEEF00000000ULL
+
+static int shim_mem_slice(uint64_t addr, size_t size, uint8_t **out) {
+	if (addr < SHIM_MEM_BASE) { return CSP_ERR_INVAL; }
+	uint64_t off = addr - SHIM_MEM_BASE;
+	if (off > SHIM_MEM_LEN || size > SHIM_MEM_LEN - off) { return CSP_ERR_INVAL; }
+	*out = shim_mem + off;
+	return CSP_ERR_NONE;
+}
+
+int csp_cmp_memcpy(csp_memptr_t to, csp_const_memptr_t from, size_t size) {
+	uint8_t *region;
+	/* Exactly one of the two is an address from the request; the other is packet storage. */
+	if (shim_mem_slice((uint64_t)(uintptr_t)from, size, &region) == CSP_ERR_NONE) {
+		memcpy(to, region, size);
+		return CSP_ERR_NONE;
+	}
+	if (shim_mem_slice((uint64_t)(uintptr_t)to, size, &region) == CSP_ERR_NONE) {
+		memcpy(region, (const void *)from, size);
+		return CSP_ERR_NONE;
+	}
+	return CSP_ERR_INVAL;
+}
+
+int csp_cmp_memread64(csp_const_memptr_t to, csp_memptr64_t from, size_t size) {
+	uint8_t *region;
+	int rc = shim_mem_slice(from, size, &region);
+	if (rc != CSP_ERR_NONE) { return rc; }
+	memcpy((void *)(uintptr_t)to, region, size);
+	return CSP_ERR_NONE;
+}
+
+int csp_cmp_memwrite64(csp_memptr64_t to, csp_memptr_t from, size_t size) {
+	uint8_t *region;
+	int rc = shim_mem_slice(to, size, &region);
+	if (rc != CSP_ERR_NONE) { return rc; }
+	memcpy(region, from, size);
+	return CSP_ERR_NONE;
+}
+
+/* The base address the peek/poke region answers to. */
+uint64_t shim_mem_base(void) { return SHIM_MEM_BASE; }
+
+/* Fill the region with `i * step + seed`, so a peek reply names the offset it came from. */
+void shim_mem_fill(uint8_t seed, uint8_t step) {
+	for (int i = 0; i < SHIM_MEM_LEN; i++) {
+		shim_mem[i] = (uint8_t)(seed + (uint8_t)i * step);
+	}
+}
+
+/* Read `len` bytes of the region back out, so a poke is observable. */
+int shim_mem_read(uint32_t off, uint8_t *out, int len) {
+	if (off > SHIM_MEM_LEN || len < 0 || (size_t)len > SHIM_MEM_LEN - off) { return -1; }
+	memcpy(out, shim_mem + off, (size_t)len);
+	return len;
 }
 
 /* --- what the application receives -------------------------------------- */

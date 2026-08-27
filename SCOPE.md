@@ -1893,6 +1893,25 @@ whoever maintains the fork can see what was found and decide for themselves.
     nothing in the call's name says it will. Someone porting C that leans on the stickiness
     has to set the connection's priority themselves. Asserted as a divergence, both sides
     pinned to their value, in `difftest/tests/node_send_prio.rs`.
+33. **A `PEEK_V2` reply echoes the address in the host's byte order.**
+    `csp_cmp_peek_v2_handler` does `cmp->vaddr = htobe64(cmp->vaddr)` **in place**
+    (`csp_cmp_peek_poke.c:65`) to read the request, and never converts it back — so the
+    address field of the reply carries whatever byte order the *node's CPU* uses. Measured
+    on a little-endian host, a peek at `0x0000_beef_0000_0010`:
+
+    | | address field on the wire |
+    |---|---|
+    | C | `10 00 00 00 ef be 00 00` |
+    | port | `00 00 be ef 00 00 00 10` |
+
+    A same-endian client casting the reply struct reads the C's field back correctly and the
+    port's byte-swapped; a client of the other endianness gets the reverse. The field is
+    simply not in network order, and which one is "right" depends on the two peers matching.
+
+    The port echoes the address as it arrived, big-endian, because a sans-io `no_std`
+    library has no way to know a peer's endianness and no business guessing. The data bytes
+    — the part anyone reads — are identical, as is the reply length. Asserted as a
+    divergence in `difftest/tests/node_cmp_peek_v2.rs`, so it cannot change unnoticed.
 
 ---
 
@@ -3598,3 +3617,45 @@ is the fourth time here — and, as before, the tests were what would have block
 
 The three controls each fail on a different row: printing every mask fails the host route,
 printing none fails the subnet route, and a space separator fails only the whole-table case.
+
+### The v2 memory codes: a reply three bytes short, which ground would have refused
+
+2026-08-27, continuing the shortlist of `ported` C functions neither harness calls.
+`csp_cmp_peek_v2`, `csp_cmp_poke_v2`, `csp_cmp_memread64` and `csp_cmp_memwrite64` were on
+it, and unlike most of the 61 they have no plausible indirect caller: the 32-bit `PEEK`/`POKE`
+have seven corpus records and a bounded region in `ctest/`, and no case anywhere names v2.
+
+`CMP_VARIABLE_SIZE` rounds a CMP payload up to a multiple of four. The v2 struct's payload is
+nine bytes — an 8-byte address plus the length — so `CMP_PEEK_V2_SIZE(len)` is `11 + 3 + len`.
+`Peek::encode` implements exactly that rule for the 32-bit codes, with a doc comment giving
+the reason: *"the port emits the same wire length so a C peer sees the size it expects."*
+`PeekV2::encode` did not. Measured, a four-byte peek:
+
+```text
+C:    ff 08 | 10 00 00 00 ef be 00 00 | 04 | 20 21 22 23 | 00 00 00     18 bytes
+port: ff 08 | 00 00 be ef 00 00 00 10 | 04 | 20 21 22 23               15 bytes
+```
+
+`csp_cmp_peek_v2` asks `csp_cmp` for a reply of exactly `CMP_PEEK_V2_SIZE(len)` and
+`csp_transaction_persistent` refuses any other length. So **a ground station could not peek
+a node running this port at all** — the reply arrived and was discarded for being three bytes
+short. That is now asserted through libcsp's own client: it accepts the port's reply whole
+and returns 0 for the length the port used to send.
+
+The same rule, written once and not the other time, with the first site's own comment
+explaining why it mattered. The address echo is deviation 33 above and stays as it is.
+
+**The ambiguity guard earned its keep on the first run after it was added.** `PeekV2` gaining
+a `TAIL_LEN` of its own made the existing `cmp: peek tail zeroed` mutation match two sites,
+and `just mutants` said so instead of silently mutating whichever came first — which is
+precisely the failure that guard was written for, one cycle earlier, on a different pair.
+
+The difftest harness also gained strong definitions of `csp_cmp_memcpy`, `csp_cmp_memread64`
+and `csp_cmp_memwrite64`. They are `__weak` in libcsp and default to bare memcpys from
+whatever address the request carries, which on a POSIX host segfaults — the reason nothing
+had ever driven these codes in `difftest/` at all.
+
+**What I got wrong.** The first comparison gave libcsp a working memory hook and the port
+`NoHooks`, whose `mem_read` defaults to refusing. The port answered nothing, which looked
+like "PEEK_V2 is not implemented" and was really "the two nodes were configured differently".
+Writing down what each side was measured on is what caught it before it became the finding.

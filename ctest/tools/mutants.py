@@ -25,8 +25,11 @@ MUTANTS = [
    "    if data.len() < request_len(h.code) {", "    if false {"),
   ("cmp: POKE carries its data", "csp-core/src/cmp.rs",
    "    if present != declared as usize {", "    if false {"),
+  # Anchored on the line above it: `PeekV2` gained a `TAIL_LEN` of its own, and the bare
+  # constant then matched two sites. The ambiguity guard caught it on the first run.
   ("cmp: peek tail zeroed", "csp-core/src/cmp.rs",
-   "pub const TAIL_LEN: usize = 3;", "pub const TAIL_LEN: usize = 0;"),
+   "    /// **zeroes** the tail in every configuration.\n    pub const TAIL_LEN: usize = 3;",
+   "    /// **zeroes** the tail in every configuration.\n    pub const TAIL_LEN: usize = 0;"),
   ("eth: zero-length segment", "csp-core/src/eth.rs",
    "        if h.seg_size == 0 {", "        if false {"),
   ("eth: running total bound", "csp-core/src/eth.rs",
@@ -149,6 +152,13 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # The v2 peek/poke reply must be CMP_PEEK_V2_SIZE(len) = 11 + 3 + len. Three bytes short
+  # and `csp_transaction_persistent` refuses the whole reply, so ground cannot peek at all.
+  ("cmp v2: the reply carries its tail", "csp-core/src/cmp.rs",
+   "        let body = Self::HEADER_LEN + self.data.len();\n        let needed = if self.data.is_empty() {\n            Self::HEADER_LEN\n        } else {\n            body + Self::TAIL_LEN\n        };\n        if out.len() < needed {\n            return Err(Error::BufferTooSmall { needed });\n        }\n        out[0] = h.kind;\n        out[1] = h.code;\n        out[Header::LEN..Header::LEN + 8].copy_from_slice(&self.vaddr.to_be_bytes());",
+   "        let body = Self::HEADER_LEN + self.data.len();\n        let needed = body;\n        if out.len() < needed {\n            return Err(Error::BufferTooSmall { needed });\n        }\n        out[0] = h.kind;\n        out[1] = h.code;\n        out[Header::LEN..Header::LEN + 8].copy_from_slice(&self.vaddr.to_be_bytes());"),
+  ("cmp v2: the tail is zeroed", "csp-core/src/cmp.rs",
+   "        out[body..needed].fill(0);", "        out[body..needed].fill(0xAA);"),
   # `csp_rtable_save` writes the text a ground tool reads back off a node: the netmask is
   # omitted for a host route, and entries join with a bare comma. Nothing had compared it --
   # `format_route` had no caller outside its own unit tests and there was no whole-table save.

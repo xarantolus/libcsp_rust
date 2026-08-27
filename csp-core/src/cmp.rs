@@ -557,6 +557,20 @@ impl<'a> PeekV2<'a> {
     /// Size of the fixed part.
     pub const HEADER_LEN: usize = Header::LEN + 8 + 1;
 
+    /// The three padding bytes `CMP_PEEK_V2_SIZE` puts after the data.
+    ///
+    /// The same rule as [`Peek::TAIL_LEN`], for the same reason, and it was missing here:
+    /// `CMP_VARIABLE_SIZE` rounds the payload up to a multiple of four, and the v2 struct's
+    /// payload is nine bytes (8-byte address + length), so the tail is three — the same
+    /// width as v1's, arrived at from a different number.
+    ///
+    /// It matters because `csp_cmp_peek_v2` asks `csp_cmp` for a reply of exactly
+    /// `CMP_PEEK_V2_SIZE(len)` and `csp_transaction_persistent` refuses any other length.
+    /// Measured: a real node answers a four-byte peek with **18** bytes and this encoder
+    /// produced **15**, so a stock client could not peek a node running the port at all.
+    /// See `difftest/tests/node_cmp_peek_v2.rs`.
+    pub const TAIL_LEN: usize = 3;
+
     /// Decode.
     pub fn decode(data: &'a [u8]) -> Result<PeekV2<'a>> {
         if data.len() < Self::HEADER_LEN {
@@ -583,23 +597,33 @@ impl<'a> PeekV2<'a> {
         })
     }
 
-    /// Encode.
+    /// Encode, producing the same wire length the C does.
+    ///
+    /// `HEADER_LEN + data + TAIL_LEN` for a message carrying data, matching
+    /// `CMP_PEEK_V2_SIZE`, with the tail zeroed rather than left as stale buffer contents.
+    /// A request carrying no data is emitted at `HEADER_LEN`, as the C's request path does.
     pub fn encode(&self, h: Header, out: &mut [u8]) -> Result<usize> {
-        let needed = Self::HEADER_LEN + self.data.len();
-        if out.len() < needed {
-            return Err(Error::BufferTooSmall { needed });
-        }
         if self.data.len() > len::PEEK_V2_MAX {
             return Err(Error::LengthExceedsMaximum {
                 got: self.data.len(),
                 max: len::PEEK_V2_MAX,
             });
         }
+        let body = Self::HEADER_LEN + self.data.len();
+        let needed = if self.data.is_empty() {
+            Self::HEADER_LEN
+        } else {
+            body + Self::TAIL_LEN
+        };
+        if out.len() < needed {
+            return Err(Error::BufferTooSmall { needed });
+        }
         out[0] = h.kind;
         out[1] = h.code;
         out[Header::LEN..Header::LEN + 8].copy_from_slice(&self.vaddr.to_be_bytes());
         out[Header::LEN + 8] = self.len;
-        out[Self::HEADER_LEN..needed].copy_from_slice(self.data);
+        out[Self::HEADER_LEN..body].copy_from_slice(self.data);
+        out[body..needed].fill(0);
         Ok(needed)
     }
 }
