@@ -127,6 +127,16 @@ unsafe extern "C" {
     fn shim_node_inject_on(iface: c_int, frame: *const u8, len: u32) -> c_int;
     fn shim_client_reboot(dst: u16, shutdown_instead: c_int) -> c_int;
     fn shim_client_request(kind: c_int, dst: u16, size: u32, opts: u8) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_client_transaction(
+        dst: u16,
+        dport: u8,
+        reply: *const u8,
+        reply_len: c_int,
+        inlen: c_int,
+        out: *mut u8,
+        out_len: *mut c_int,
+    ) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
@@ -483,6 +493,30 @@ pub fn c_bridge_step(iface: i32, frame: &[u8]) -> Vec<(String, Vec<u8>)> {
     out
 }
 
+/// Run `csp_transaction_persistent` with `reply` already queued on the connection.
+///
+/// Returns `(ret, bytes)` — what the transaction returned, and what it copied out. `ret == 0`
+/// is the C's "refused"; the `csp_get_*` clients turn that into a failure with no value.
+pub fn c_client_transaction(dst: u16, dport: u8, reply: &[u8], inlen: i32) -> (i32, Vec<u8>) {
+    let mut out = vec![0u8; 256];
+    let mut n: c_int = 0;
+    // SAFETY: `reply` is valid for the call and bounds-checked on the C side; `out` is 256
+    // bytes and the shim copies at most that. Callers hold `LOCK`.
+    let ret = unsafe {
+        shim_client_transaction(
+            dst,
+            dport,
+            reply.as_ptr(),
+            reply.len() as c_int,
+            inlen,
+            out.as_mut_ptr(),
+            &mut n,
+        )
+    };
+    out.truncate(n as usize);
+    (ret, out)
+}
+
 /// Which member of `csp_services.c`'s client to drive.
 #[derive(Debug, Clone, Copy)]
 #[allow(missing_docs)]
@@ -492,6 +526,8 @@ pub enum CClient {
     BufFree = 2,
     Uptime = 3,
     Ps = 4,
+    PingNoReply = 5,
+    Cmp = 6,
 }
 
 /// What one of libcsp's blocking service clients puts on the wire, with a zero timeout.

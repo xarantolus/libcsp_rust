@@ -2918,3 +2918,45 @@ Three controls, all failing only the new test. The first — reverting `ps` to a
 which is the bug — trips the **length** assertion, not the byte comparison: with `n = 0` the
 prefix comparison passes vacuously. Fourth cycle running in which the assertion that catches
 the defect is the one about *how much* arrived rather than *what*.
+
+### `decode_u32` took the first four bytes of anything
+
+2026-08-27. The last of `csp_services.c`'s twelve. `csp_ping_noreply` and `csp_cmp` were
+measured first and both **match** — the C sends `55`+CRC32 on port 1 and the port sends `55`;
+`csp_cmp(IDENT)` builds 93 payload bytes and so does `client::cmp_request`, byte-identical
+prefix. No defect there.
+
+The three `csp_get_*` clients share their request with the plain `csp_*` forms already
+covered, so the only thing left in them is **reply decoding** — and that had never been
+reachable, because with an empty queue the transaction times out long before the length is
+looked at. Opening the connection, injecting a reply addressed to it, and only then running
+`csp_transaction_persistent` makes the check observable. Measured at `inlen = 4`:
+
+| reply | C | port, before |
+|---|---|---|
+| 3 bytes | refused | `Truncated` |
+| 4 bytes | the value | the value |
+| **5 bytes** | **refused, no value** | **the first four** |
+| **8 bytes** | **refused, no value** | **the first four** |
+
+`csp_io.c:352` is `if ((inlen != -1) && ((int)packet->length != inlen))` — refuse, count
+`csp_dbg_inval_reply`, return 0. `decode_u32` checked `len < 4` and decoded the front of
+whatever arrived, handing an operator a number the peer never sent, indistinguishable from one
+it did. Now `!= 4`.
+
+The "never over-reject" rule that governs incoming commands does not apply here and it is
+worth being explicit about why: that rule exists because a command wrongly refused in orbit
+cannot be retried by anyone who can see the refusal. This is a **reply to a request we made**.
+Refusing it costs one retry; accepting it costs a wrong number in a telemetry log.
+
+**How the harness lied first, and what it took to notice.** The first version addressed the
+injected reply to `csp_conn_sport(conn)`. That returns `idin.sport` — the *remote* port
+dialled — while the connection's incoming destination is the ephemeral `idin.dport` that
+`csp_connect` allocated. The reply went to a port nothing was listening on, the transaction
+timed out, and the C returned 0 for **every** length including four. Read as a result, that is
+"the C refuses everything"; it was the harness. The diagnostic that settled it was printing
+the sport alongside the inject and pump return codes — `pumped=1` proved the frame was routed,
+so the failure had to be in the addressing, not the delivery.
+
+A 4-byte reply succeeding is what makes the other rows mean anything. Without that row the
+test would have passed against a harness that never delivered a thing.
