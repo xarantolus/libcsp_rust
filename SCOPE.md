@@ -3146,3 +3146,40 @@ Confirmed both ways: adding an `if-ghost = []` fails, and removing the `#[cfg]` 
 `csp-core::i2c` fails naming `if-i2c`. A feature that gates nothing reads as a capability the
 crate does not have, and the map's other five checks cannot see it — the rows named real
 functions, just not the interface's.
+
+### The KISS decoder had never been run against the C
+
+2026-08-27. Continuing the interface-by-interface read that produced `if-i2c` and `if-udp`:
+KISS was the last in-scope one not gone through line by line.
+
+`csp_kiss_tx` is the framing codec plus the optional CRC, and
+`kiss_frames_we_encode_arrive_intact_at_a_c_node` already compares it port-to-C.
+`csp_kiss_rx` is a state machine with four rules a reading would not obviously agree with:
+
+- the byte straight after `FEND` is discarded **whatever it is**, not only when it is
+  `TNC_DATA`;
+- `FESC` followed by neither `TFESC` nor `TFEND` **drops that byte and stays inside the
+  frame** — it neither aborts the frame nor takes the byte literally;
+- `FEND FEND` yields nothing and counts no error;
+- an overlong frame truncates, counts `rx_error`, and restarts on the next `FEND`.
+
+And `a_corrupted_kiss_frame_never_reaches_the_router_with_the_wrong_payload`, which looks
+like the decoder's test, **only exercises the C** — it asserts a property of libcsp, and the
+port's `Decoder` never appears in it. So the encoder was compared and the decoder was
+compared to nothing: the one-directional gap `node_sfp.rs` and `node_can.rs` each had.
+
+**Measured: they agree**, across 5 000 corrupted frames including a deliberately injected
+invalid escape, on both how many frames survive and what payload each carries. Two controls
+bite: passing an unknown escape through as a literal, and aborting the frame instead of
+dropping the byte.
+
+**The first version of the comparison reported two divergences that were not.** `csp_kiss_rx`
+deframes and *then* runs `csp_id_strip` and `csp_crc32_verify`, counting only what survives
+both; `Decoder::push` is the deframer alone. Comparing them directly compares different
+layers, and it produced exactly the confident-looking table a real finding would: "no
+TNC_DATA byte" and "escaped FEND in the body" each showed C=0 against port=1. Running the
+port's output through the same two checks made all seven rows agree.
+
+That is the "write down what each number was measured on" rule earning its place. The two
+quantities were both called *frames* and were not the same thing, and nothing but naming the
+measurement would have caught it.
