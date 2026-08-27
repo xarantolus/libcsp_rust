@@ -133,6 +133,11 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # A dropped packet must go back to the pool. Both no_path_through_the_node_leaks_a_buffer
+  # tests measured only the C until now, so nothing watched the port's drop paths.
+  ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
+   "            return Routed::Dropped(DropReason::PortNotBound);",
+   "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
   # The KISS decoder's escape rule, against the C. The port's decoder had never been driven
   # against libcsp at all -- only its encoder, port-to-C.
   ("kiss: an unknown escape drops the byte", "csp-core/src/kiss.rs",
