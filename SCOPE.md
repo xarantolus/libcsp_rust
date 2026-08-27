@@ -3928,3 +3928,37 @@ port. Restoring the literal fails exactly that record.
 The general lesson is the one this file keeps arriving at from new directions: a field that
 is constant on both sides is not a comparison. The sweep that found it is a five-line regex
 over the replay constructors, and it is worth re-running whenever a replay is added.
+
+### The security check nothing had ever broken
+
+2026-08-27. Third pass at the unmovable list, and the biggest single result so far.
+
+`security::plain_packet_with_no_policy_is_accepted` could not be moved by anything. It is the
+most load-bearing rule in the whole corpus — a node with no policy configured accepts an
+ordinary packet — and every mutation in the file weakens a *check*, which by construction
+cannot break a path that performs none. Making `security::check` refuse when `endpoint_opts`
+is zero moves **43 records**: nothing else in the file comes close, and nothing had ever
+asked the question.
+
+Two more, from the same reading:
+
+- `cmp: an unknown code is not answered` — the dispatch's `other =>` arm. Moves 1 record.
+- `eth: an unfinished transfer is not reported finished` — the mirror of `a finished transfer
+  is reported finished`, and the only mutation that
+  `eth::an_incomplete_transfer_holds_a_buffer` can see. Moves 6.
+
+137 → **139 of 152** records move under something; unmovable is 13.
+
+**A hypothesis I had and measured to be wrong.** I expected every `diverges` record to be
+unmovable by construction, since that verdict asserts only "the port differs from the C" and
+any value that is not the C's satisfies it. Measured: 8 `diverges` records, **6 of them
+movable** — because each has a mutation designed to close the specific gap, which makes the
+port's answer equal the C's and fails the `assert_ne`. The two that are not
+(`rdp::isn_is_a_function_of_the_clock`, `rdp::unacknowledged_data_is_retransmitted_then_given_up_on`)
+diverge on numbers no natural mutation would land on. The verdict is weaker than
+`must_match`, but not vacuous, and the difference is designed for rather than accidental.
+
+**And a mutation I got wrong.** `cmp: an unknown code is not answered` was first written
+against `request_len`'s `_` arm — which only weakens a length gate that the dispatch refuses
+anyway. It reported NOTHING NOTICED, correctly: the mutation was not about the rule its name
+claimed. The tool told me, which is what it is for.
