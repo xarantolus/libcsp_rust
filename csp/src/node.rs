@@ -279,6 +279,37 @@ impl<
         self.router.bind(port)
     }
 
+    /// Bind the catch-all, so every port with no bind of its own is delivered too.
+    ///
+    /// This is `csp_bind(socket, CSP_ANY)`, which is how both surveyed firmware consumers
+    /// use libcsp: one catch-all, then dispatch on [`Delivered::dport`](crate::Delivered).
+    /// An explicit [`bind`](Self::bind) still takes precedence, and a port at or above
+    /// `PORTS` is dropped either way — both measured against a real node in
+    /// `difftest/tests/node_bind_any.rs`.
+    pub fn bind_any(&mut self) {
+        self.router.bind_any();
+    }
+
+    /// Stop delivering ports that only the catch-all was serving.
+    ///
+    /// Returns how many connections were closed, releasing their queued packets as
+    /// [`unbind`](Self::unbind) does.
+    pub fn unbind_any(&mut self) -> usize {
+        let mut closed = 0usize;
+        loop {
+            let mut drained = [0u16; RXQ];
+            let (c, n) = self.router.unbind_any(&mut drained);
+            for &idx in &drained[..n] {
+                drop(self.pool().from_index(idx));
+            }
+            closed += c;
+            if c == 0 {
+                break;
+            }
+        }
+        closed
+    }
+
     /// Stop accepting on a port, closing every connection still open on it.
     ///
     /// Returns how many connections were closed. Their queued packets are released back
