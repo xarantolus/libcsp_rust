@@ -452,6 +452,21 @@ impl<R: Default + Copy, const N: usize> Pbufs<R, N> {
     /// Returns `None` when the pool is full — every slot is a transfer in progress, and
     /// evicting one to make room would corrupt it.
     pub fn get_or_create(&mut self, key: u32, now_ms: u32) -> Option<&mut R> {
+        self.get_or_create_with(key, now_ms, R::default)
+    }
+
+    /// [`get_or_create`](Self::get_or_create), with the caller building a new reassembler.
+    ///
+    /// `R::default` is not always the right starting state: `eth::Reassembler` needs the
+    /// minimum declared length for its wire version, which the pool has no way to know and
+    /// which `Default` leaves at zero — silently dropping the guard that refuses a packet
+    /// too short to hold a CSP header.
+    pub fn get_or_create_with(
+        &mut self,
+        key: u32,
+        now_ms: u32,
+        make: impl FnOnce() -> R,
+    ) -> Option<&mut R> {
         if let Some(i) = self
             .slots
             .iter()
@@ -462,7 +477,7 @@ impl<R: Default + Copy, const N: usize> Pbufs<R, N> {
             return Some(&mut slot.2);
         }
         let i = self.slots.iter().position(|s| s.is_none())?;
-        self.slots[i] = Some((key, now_ms, R::default()));
+        self.slots[i] = Some((key, now_ms, make()));
         self.slots[i].as_mut().map(|s| &mut s.2)
     }
 

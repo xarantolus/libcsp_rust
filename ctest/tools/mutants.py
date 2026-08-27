@@ -149,6 +149,11 @@ MUTANTS = [
   # The built-in services had no comparison against libcsp of any kind until
   # node_service.rs -- no suite, no record, no vector. Each of these four fails exactly one
   # of its tests and no other.
+  # Ethernet reassembly handled one sender at a time until the two_senders_* records;
+  # all twenty suite_eth cases were one transfer each.
+  ("eth: the reassembly key separates two senders", "csp-core/src/eth.rs",
+   "        ((self.packet_id as u32) << 16) | (self.src_addr as u32)",
+   "        (self.packet_id as u32) << 16"),
   # cfp::Pbufs -- the port's counterpart of csp_if_can_pbuf.c -- had no user anywhere
   # outside cfp.rs until node_can.rs drove it.
   ("can: the pool keys a reassembler per sender", "csp-core/src/cfp.rs",

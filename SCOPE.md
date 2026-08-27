@@ -2700,3 +2700,52 @@ reassembler writes each fragment at its own offset, so every frame landed in a f
 array and only the last survived — the failure printed two payloads of zeroes ending in the
 right two bytes, which reads like a subtle off-by-one in the port rather than a mistake in the
 test. One buffer per sender, not per frame.
+
+### Ethernet reassembly handled one sender at a time
+
+2026-08-27. Following the same thread as the CAN pool: `csp-core::eth` exposes
+`reassembly_key` and `is_complete`, both referenced nowhere outside `eth.rs`. `eth` has a
+`Reassembler` and no pool, where `cfp` has `Pbufs`.
+
+**All twenty `suite_eth.c` cases are one transfer at a time.** Nothing had ever interleaved
+two senders, on either side — so the C's list of reassembly buffers (`csp_if_eth_pbuf.c`) and
+the port's single `Reassembler` had never been compared on the case a shared segment produces
+constantly.
+
+Measured, with two new C cases and payloads seeded differently so a splice would show:
+
+| | C | port (before) |
+|---|---|---|
+| delivered | **2**, both bodies intact | **1** |
+| refused / frame counter | 0 / 0 | **1 / 1** |
+
+The port refused every segment of the second sender and lost its transfer entirely. Two nodes
+transmitting to one is the ordinary case on Ethernet.
+
+**What was actually missing.** The shipped crates could always do this: `Pbufs<R, N>` is
+generic and `eth::Reassembler` is `Default + Copy`. What did not exist was any evidence, any
+documentation pointing at it, and a safe way to build one — `Pbufs::get_or_create` constructs
+through `Default`, which leaves `eth::Reassembler::min_len` at zero and silently drops the
+guard that refuses a packet too short to hold a CSP header, a guard two other `eth` records
+exist to check. So the fix is `Pbufs::get_or_create_with`, taking the constructor, plus the
+replay and docs/API.md using a pool.
+
+**Three things I got wrong on the way, all corrected by measuring rather than re-reading:**
+
+- I predicted the C keys its buffers on the packet id alone, having read
+  `csp_eth_pbuf_find`'s `packet->cfpid == id` and stopped there. `csp_if_eth.c:153` builds
+  that `id` as *the packet id concatenated with the source address* — the same key the port
+  computes. The test named for the collision I predicted never collided, and is now named for
+  what it measures.
+- The first version of both cases gave the two senders identical payloads, because
+  `whole_packet` fills with a fixed `0xD5 ^ i`. Two transfers spliced together would have been
+  byte-identical to two intact ones. A seeded fill is what makes the question answerable.
+- `drain_qfifo` recorded only the **first** delivered body. With two deliveries expected, that
+  is a count with no content behind it — the exact weakness that let a single-`Reassembler`
+  port look plausible. It now concatenates every body in order.
+
+That is the third time in this run of cycles that a test turned out to be weaker than its
+name — `api_map` at type granularity, the CAN interleaving case varying two fields at once,
+and this one comparing indistinguishable payloads. The common shape: **the test could not
+have failed for the reason it was written to catch.** Writing the failing case first, or
+mutating until it fails, is what separates the two.
