@@ -133,6 +133,10 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # The KISS decoder's escape rule, against the C. The port's decoder had never been driven
+  # against libcsp at all -- only its encoder, port-to-C.
+  ("kiss: an unknown escape drops the byte", "csp-core/src/kiss.rs",
+   "                    TFESC => FESC,", "                    TFESC => FESC,\n                    other => other,"),
   # `if-i2c` was a default-on feature gating zero lines, with its three C functions mapped
   # to the *generic* Interface methods. These three are the behaviour that is not generic.
   ("i2c: the bus address is seven bits", "csp-core/src/i2c.rs",

@@ -714,6 +714,130 @@ fn a_corrupted_kiss_frame_never_reaches_the_router_with_the_wrong_payload() {
     );
 }
 
+/// The port's KISS receive path against the C's, on the same corrupted bytes.
+///
+/// The test above asserts a property of **libcsp**: it never delivers a payload that is not
+/// what was sent. The port's decoder is not in it. So the encoder was compared port-to-C by
+/// `kiss_frames_we_encode_arrive_intact_at_a_c_node` and the decoder was compared to nothing
+/// — the same one-directional gap that `node_sfp.rs` and `node_can.rs` had.
+///
+/// `csp_kiss_rx` has four behaviours a reading would not obviously agree with:
+///
+/// - the byte straight after `FEND` is discarded whatever it is, not just when it is
+///   `TNC_DATA`;
+/// - `FESC` followed by neither `TFESC` nor `TFEND` drops that byte and stays inside the
+///   frame, rather than aborting it or taking the byte literally;
+/// - `FEND FEND` yields nothing and counts no error;
+/// - an overlong frame truncates, counts `rx_error` and restarts on the next `FEND`.
+///
+/// **What is compared, and on what.** `csp_kiss_rx` deframes and then runs `csp_id_strip`
+/// and `csp_crc32_verify`, counting only what survives both. `Decoder::push` is the deframer
+/// alone. Comparing those two directly compares different layers — which the first version
+/// of this reported as two divergences that were nothing of the sort. The port side here
+/// therefore does the validation too, so both sides answer "would a packet reach the router,
+/// and with what payload".
+#[test]
+fn the_port_and_the_c_agree_on_every_corrupted_kiss_frame() {
+    let _g = lock();
+    c_set_version(Version::V1);
+    let hdr = c_header_size();
+    let mut rng = Rng(0x4155_0003);
+
+    // The port's whole receive path: deframe, then the two checks `csp_kiss_rx` makes.
+    let port_decode = |bytes: &[u8]| -> Vec<Vec<u8>> {
+        let mut d: csp_core::kiss::Decoder<512> = csp_core::kiss::Decoder::new();
+        let mut out = Vec::new();
+        for &b in bytes {
+            let Some(f) = d.push(b) else { continue };
+            if f.len() < hdr + 4 || Id::decode(Version::V1, f).is_err() {
+                continue;
+            }
+            let body = &f[hdr..];
+            let (payload, tail) = body.split_at(body.len() - 4);
+            let want = u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]);
+            if csp_core::crc32::checksum(payload) == want {
+                out.push(payload.to_vec());
+            }
+        }
+        out
+    };
+
+    let mut agreed_accept = 0u32;
+    let mut agreed_reject = 0u32;
+
+    for _ in 0..5_000 {
+        let id = random_valid_id(&mut rng, Version::V1);
+        let len = 1 + (rng.next() % 30) as usize;
+        let payload: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        let crc = csp_core::crc32::checksum(&payload);
+
+        let mut body = vec![0u8; hdr + payload.len() + 4];
+        id.encode(Version::V1, &mut body).unwrap();
+        body[hdr..hdr + payload.len()].copy_from_slice(&payload);
+        body[hdr + payload.len()..].copy_from_slice(&crc.to_be_bytes());
+
+        let mut framed = vec![0u8; csp_core::kiss::max_encoded_len(body.len())];
+        let n = csp_core::kiss::encode(&body, &mut framed).unwrap();
+        let mut framed = framed[..n].to_vec();
+
+        match rng.next() % 5 {
+            0 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] ^= 1 << (rng.next() % 8);
+            }
+            1 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] = 0xC0; // a FEND where none belongs
+            }
+            2 => {
+                let i = (rng.next() as usize) % framed.len();
+                framed[i] = 0xDB; // a FESC where none belongs
+            }
+            3 => {
+                // An escape followed by a byte that is neither TFESC nor TFEND: the C drops
+                // it and stays in the frame. Injected deliberately rather than left to
+                // chance, because it is the decoder rule least likely to be guessed right.
+                let i = 2 + (rng.next() as usize) % (framed.len() - 2);
+                framed.insert(i, 0xDB);
+                framed.insert(i + 1, (rng.next() as u8) | 0x01);
+            }
+            _ => {
+                framed.truncate(1 + (rng.next() as usize) % framed.len());
+            }
+        }
+
+        let c = c_kiss_decode(&framed);
+        let p = port_decode(&framed);
+
+        assert_eq!(
+            p.len(),
+            c.frames as usize,
+            "the two decoders disagreed on how many frames survived: {framed:02x?}"
+        );
+        if c.frames == 0 {
+            agreed_reject += 1;
+        } else {
+            agreed_accept += 1;
+            assert_eq!(
+                p.last().map(|v| &v[..]),
+                c.last.as_deref(),
+                "both accepted a frame but delivered different payloads: {framed:02x?}"
+            );
+        }
+    }
+
+    // Neither figure is the point on its own; together they say the corruption generator
+    // reaches both answers, so agreement is not "both always reject".
+    assert!(
+        agreed_reject > 1_000,
+        "only {agreed_reject} corruptions were rejected -- the validation is not exercised"
+    );
+    assert!(
+        agreed_accept > 0,
+        "no corruption was survivable -- the generator never hits a byte that does not matter"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Node level: a real C node and a real Rust node, same frames, same questions
 //
