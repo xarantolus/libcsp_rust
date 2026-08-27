@@ -76,7 +76,11 @@ fn main() {
         "src/arch/posix/csp_queue.c",
         "src/arch/posix/pthread_queue.c",
         "src/arch/posix/csp_semaphore.c",
-        "src/arch/posix/csp_time.c",
+        // `arch/posix/csp_time.c` is deliberately absent: `shim.c` supplies `csp_get_ms`
+        // itself, so the C node's own timers -- RDP retransmission, connection expiry --
+        // can be driven from a test instead of waiting on the wall clock. `ctest/` has done
+        // this from the start; without it here, "does libcsp eventually free that?" was a
+        // question the differential harness could not ask.
     ] {
         b.file(libcsp.join(f));
     }
