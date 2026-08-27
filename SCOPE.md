@@ -3728,3 +3728,37 @@ so the total could not drift but its three parts could, and this cycle moved thr
 in one edit. Four new checks compare the sentence against `just api`, each verified to fail
 on a one-off edit. That paragraph is the same one that spent months saying "All 186 are now
 accounted for"; the whole of it is now measured rather than asserted.
+
+### A doc comment that was wrong about the C, and the default nobody sets
+
+2026-08-27. `csp/src/iflist.rs` said of `check_default`: *"`csp_iflist_check_dfl`, called
+from `csp_init`"*, and drew the consequence that a node which never sets `is_default`
+**floods every unroutable packet onto every interface**.
+
+`csp_init` does not call it. The whole libcsp tree has the declaration in `csp_iflist.h`,
+the definition at `csp_iflist.c:148`, an entry in the RST, and **no caller** — and the only
+other places `src/` writes `is_default` are `csp_yaml.c` and the Python bindings, both out
+of scope. It is a convenience an application may invoke after registering its interfaces,
+and neither harness had ever called it either.
+
+Measured against a real node, and the default state is the opposite of what was written:
+
+```text
+as registered (EGRESS default):  unroutable -> 1 frame
+after check_dfl:                 unchanged  -> 1 frame   (early return)
+after clearing every default:    unroutable -> 0 frames
+after check_dfl again:           all but LOOP default -> 2 frames
+```
+
+A stock C node **drops** what it cannot route. Calling the sweep is what turns it into one
+that floods, and even then onto two links and not three: split horizon still removes the one
+the packet arrived on. The port agrees at every stage.
+
+This is the same class as the `csp_rtable_save` mapping and the `fixup_cspv1` rows — a
+statement about libcsp that reads plausibly, was never executed, and shapes what an
+integrator expects. Three cycles running, the thing that was wrong was a claim about the C
+rather than the port's behaviour.
+
+The loopback exemption is worth one line: the C skips `&csp_if_lo` by identity, and the port
+registers no loopback interface at all, so `None` is the ordinary call and there is nothing
+to skip. Both branches now have a mutation.

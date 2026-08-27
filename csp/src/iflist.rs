@@ -237,12 +237,19 @@ impl<const N: usize, const A: usize> IfList<N, A> {
 
     /// If no interface is marked default, mark every one except loopback.
     ///
-    /// `csp_iflist_check_dfl`, called from `csp_init`. It is how a zero-config node is
-    /// meant to work, and it is more aggressive than it looks: combined with the
-    /// default-route fallback in [`Node::resolve`](crate::Node::resolve), a node that never
-    /// set `is_default` and has no routes **floods every unroutable packet onto every
-    /// interface**. Intended behaviour, not a defect — but worth knowing before wondering
-    /// why a packet appeared on a link nothing routed it to.
+    /// `csp_iflist_check_dfl` (`csp_iflist.c:148`). **Nothing in libcsp calls it** — this
+    /// said "called from `csp_init`", which is wrong: `csp_init` registers loopback and
+    /// writes `is_default` on nothing, and the whole tree has no caller. It is a
+    /// convenience an application may invoke after registering its interfaces.
+    ///
+    /// So the default state is the opposite of what that implied. Measured against a real
+    /// node: with no interface marked default, an unroutable packet goes **nowhere** — it
+    /// is dropped, not flooded. Calling this is what turns the node into one that floods,
+    /// and even then only onto default links other than the one the packet arrived on,
+    /// because split horizon still applies. See `difftest/tests/iflist_default.rs`.
+    ///
+    /// `loopback` is the index to exempt, as the C exempts `&csp_if_lo` by identity. The
+    /// port registers no loopback interface of its own, so `None` is the ordinary call.
     ///
     /// Returns how many interfaces were marked.
     pub fn check_default(&mut self, loopback: Option<u8>) -> usize {
