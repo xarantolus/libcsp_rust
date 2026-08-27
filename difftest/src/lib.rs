@@ -137,6 +137,7 @@ unsafe extern "C" {
         out: *mut u8,
         out_len: *mut c_int,
     ) -> c_int;
+    fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_node_add_alias(addr: u16, iface: c_int) -> c_int;
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
@@ -517,6 +518,32 @@ pub fn c_client_transaction(dst: u16, dport: u8, reply: &[u8], inlen: i32) -> (i
     };
     out.truncate(n as usize);
     (ret, out)
+}
+
+/// Fragment `body` with libcsp's own `csp_sfp_send`, and return the frames it emitted.
+///
+/// `Err(code)` carries libcsp's error — `CSP_ERR_MTU` for an `mtu` above what the connection
+/// allows, which is the one refusal this entry point can produce.
+pub fn c_sfp_send(dst: u16, dport: u8, body: &[u8], mtu: u32) -> Result<Vec<Vec<u8>>, i32> {
+    let mut frames = Vec::new();
+    // SAFETY: `body` outlives the call — the shim's read callback only reads it during
+    // `csp_sfp_send`. Callers hold `LOCK`.
+    let n = unsafe { shim_sfp_send(dst, dport, body.as_ptr(), body.len() as c_int, mtu) };
+    if n < 0 {
+        return Err(n);
+    }
+    // SAFETY: the capture array is fixed-size and bounds-checked on the C side.
+    unsafe {
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let k = shim_node_tx_get(i, buf.as_mut_ptr());
+            if k > 0 {
+                buf.truncate(k as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    Ok(frames)
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.
