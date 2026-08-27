@@ -168,6 +168,16 @@ unsafe extern "C" {
         out: *mut u8,
         out_len: *mut c_int,
     ) -> c_int;
+    fn shim_node_bind_any() -> c_int;
+    fn shim_node_unbind_any() -> c_int;
+    fn shim_node_recv_any(
+        src: *mut u16,
+        dst: *mut u16,
+        dport: *mut u8,
+        sport: *mut u8,
+        out: *mut u8,
+        out_len: *mut c_int,
+    ) -> c_int;
     fn shim_node_buf_free() -> c_int;
     fn shim_node_counters(
         rx: *mut u32,
@@ -256,6 +266,59 @@ pub fn c_node_init(
 pub fn c_node_bind(port: u8) -> i32 {
     // SAFETY: bounded by SHIM_PORTS on the C side, which returns -1 rather than indexing.
     unsafe { shim_node_bind(port) }
+}
+
+/// Bind `CSP_ANY` on the C node — libcsp's catch-all, which receives every port that has
+/// no socket of its own. Read what it gets with [`c_node_recv_any`].
+pub fn c_node_bind_any() -> i32 {
+    // SAFETY: no arguments; idempotent behind a flag on the C side. Callers hold `LOCK`.
+    unsafe { shim_node_bind_any() }
+}
+
+/// Release the C node's catch-all with `csp_socket_close`. Returns `csp_dbg_errno`.
+pub fn c_node_unbind_any() -> i32 {
+    // SAFETY: no arguments; a no-op when nothing is bound. Callers hold `LOCK`.
+    unsafe { shim_node_unbind_any() }
+}
+
+/// Take everything waiting on the catch-all socket, after pumping the router.
+///
+/// `dport` on each item is what says which port the packet was addressed to — the catch-all
+/// is one socket for all of them.
+pub fn c_node_recv_any() -> Vec<Delivered> {
+    let mut out = Vec::new();
+    // SAFETY: the payload buffer is sized for the largest packet the C can deliver, and
+    // the shim writes at most `length` bytes into it. Callers hold `LOCK`.
+    unsafe {
+        shim_node_pump();
+        loop {
+            let (mut src, mut dst) = (0u16, 0u16);
+            let (mut dport, mut sport) = (0u8, 0u8);
+            let mut payload = vec![0u8; 512];
+            let mut n: c_int = 0;
+            if shim_node_recv_any(
+                &mut src,
+                &mut dst,
+                &mut dport,
+                &mut sport,
+                payload.as_mut_ptr(),
+                &mut n,
+            ) == 0
+            {
+                break;
+            }
+            payload.truncate(n as usize);
+            out.push(Delivered {
+                port: dport,
+                src,
+                dst,
+                dport,
+                sport,
+                payload,
+            });
+        }
+    }
+    out
 }
 
 /// Feed `frame` to a real C node acting as a *server*, let its built-in service handler

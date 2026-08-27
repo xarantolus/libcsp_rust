@@ -498,16 +498,40 @@ int shim_node_bind(uint8_t port) {
 }
 
 /*
- * Take one delivered message off `port`, if there is one.
+ * The catch-all socket, bound with `csp_bind(sock, CSP_ANY)`.
  *
- * Reports the connection identity the application would see and the payload, which
- * together are the entire observable result of a delivery. Returns 1 on a message,
- * 0 if nothing is waiting.
+ * libcsp keeps it in a slot of its own past the port array (`csp_port.c:30`) and reaches
+ * it only when the packet's own port has no socket, so a specific bind wins. It is a
+ * separate socket here for the same reason it is in libcsp: which socket a delivery
+ * arrives on is the whole question.
  */
-int shim_node_recv(uint8_t port, uint16_t *src, uint16_t *dst, uint8_t *dport,
-                   uint8_t *sport, uint8_t *out, int *out_len) {
-	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
-	csp_conn_t *conn = csp_accept(&shim_sockets[port], 0);
+static csp_socket_t shim_any_socket;
+static int          shim_any_bound;
+
+int shim_node_bind_any(void) {
+	if (shim_any_bound) { return 0; }
+	memset(&shim_any_socket, 0, sizeof(shim_any_socket));
+	int rb = csp_bind(&shim_any_socket, CSP_ANY);
+	int rl = csp_listen(&shim_any_socket, 4);
+	if (rb != CSP_ERR_NONE) { return -10 + rb; }
+	if (rl != CSP_ERR_NONE) { return -20 + rl; }
+	shim_any_bound = 1;
+	return 0;
+}
+
+/* Close the catch-all socket, which is how libcsp releases a bind (`csp_port.c:135`). */
+int shim_node_unbind_any(void) {
+	if (!shim_any_bound) { return 0; }
+	csp_dbg_errno = 0;
+	csp_socket_close(&shim_any_socket);
+	shim_any_bound = 0;
+	return (int)csp_dbg_errno;
+}
+
+/* Shared by the per-port and catch-all readers: one accept, one read, then close. */
+static int shim_take_one(csp_socket_t *sock, uint16_t *src, uint16_t *dst, uint8_t *dport,
+                         uint8_t *sport, uint8_t *out, int *out_len) {
+	csp_conn_t *conn = csp_accept(sock, 0);
 	if (conn == NULL) { return 0; }
 	csp_packet_t *packet = csp_read(conn, 0);
 	if (packet == NULL) { csp_close(conn); return 0; }
@@ -523,6 +547,26 @@ int shim_node_recv(uint8_t port, uint16_t *src, uint16_t *dst, uint8_t *dport,
 	csp_buffer_free(packet);
 	csp_close(conn);
 	return 1;
+}
+
+/*
+ * Take one delivered message off `port`, if there is one.
+ *
+ * Reports the connection identity the application would see and the payload, which
+ * together are the entire observable result of a delivery. Returns 1 on a message,
+ * 0 if nothing is waiting.
+ */
+int shim_node_recv(uint8_t port, uint16_t *src, uint16_t *dst, uint8_t *dport,
+                   uint8_t *sport, uint8_t *out, int *out_len) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	return shim_take_one(&shim_sockets[port], src, dst, dport, sport, out, out_len);
+}
+
+/* The same, off the catch-all. `dport` is what says which port it was addressed to. */
+int shim_node_recv_any(uint16_t *src, uint16_t *dst, uint8_t *dport, uint8_t *sport,
+                       uint8_t *out, int *out_len) {
+	if (!shim_any_bound) { return 0; }
+	return shim_take_one(&shim_any_socket, src, dst, dport, sport, out, out_len);
 }
 
 /*

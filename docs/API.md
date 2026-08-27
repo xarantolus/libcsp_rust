@@ -410,7 +410,7 @@ It was carried in two documents. A coverage figure nobody can reproduce is the e
 of the claim that hid a third of the library. Run `just numbers` before changing any figure
 below.
 
-- **548 tests** across the crates, in 30 binaries, with `--all-features`.
+- **550 tests** across the crates, in 31 binaries, with `--all-features`.
 - **510 golden vector lines** in `vectors/v{1,2}.tsv`, captured from the running C library
   — real wire bytes, after `csp_id_prepend`, after SFP headers, after CFP fragmentation.
   Each line carries several assertions; the tests print what they checked (`140 header
@@ -421,7 +421,7 @@ below.
   writing — and names the rest. A record it cannot move is not automatically a dead record:
   it can equally mean no mutation has yet broken what that record watches, which is what
   both connection-reuse records turned out to be.
-- **78 differential tests** in `difftest/`, millions of random inputs per run, linking the
+- **80 differential tests** in `difftest/`, millions of random inputs per run, linking the
   real C and comparing. Dev-only: the shipped crates contain no C. They cover the header
   codec, CRC32, SHA-1, HMAC, both CFP identifier layouts, the route-table parser and
   lookups, and the real `csp_kiss_rx` state machine.

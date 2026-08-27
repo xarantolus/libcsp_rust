@@ -93,18 +93,29 @@ MUTANTS = [
    ""),
   # The handshake's third leg. Without it a peer sits in SYN_RCVD and gives up -- and the
   # first data packet hides it, because that carries an ACK too.
+  # Both of RDP's bare-ACK sites are the same five lines, so each runs on through the line
+  # after it. Named for the handshake's third leg, this one had been mutating whichever came
+  # first in the file -- see the `hits > 1` guard below.
   ("rdp: the initiator answers SYN|ACK", "csp-core/src/rdp.rs",
-   "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });",
-   "                    return Action::Opened;"),
+   "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });\n                }\n                Action::Nothing",
+   "                    return Action::Opened;\n                }\n                Action::Nothing"),
+  ("rdp: an out-of-window packet is re-acknowledged", "csp-core/src/rdp.rs",
+   "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });\n                }\n                if h.has(ACK) {",
+   "                    return Action::Nothing;\n                }\n                if h.has(ACK) {"),
   # The port could not send a fragment on a connection at all: `send` stamps the
   # connection's id over the caller's, and no connection option sets FRAG. A real C node
   # answered the resulting stream with CSP_ERR_SFP.
   ("sfp: a fragment leaves marked as one", "csp/src/node.rs",
    "        self.send_flagged(conn, packet, csp_core::flags::FRAG, now_ms)",
    "        self.send_flagged(conn, packet, 0, now_ms)"),
+  # SFP appends its trailer in an 8-space closure and RDP in a 12-space one; without the
+  # leading newline the shallower pattern is a substring of the deeper line as well.
   ("sfp: the trailer goes after the payload", "csp/src/node.rs",
-   "            b[len..len + tn].copy_from_slice(&trailer[..tn]);",
-   "            b[..tn].copy_from_slice(&trailer[..tn]);"),
+   "\n            b[len..len + tn].copy_from_slice(&trailer[..tn]);",
+   "\n            b[..tn].copy_from_slice(&trailer[..tn]);"),
+  ("rdp: the trailer goes after the payload", "csp/src/node.rs",
+   "\n                b[len..len + tn].copy_from_slice(&trailer[..tn]);",
+   "\n                b[..tn].copy_from_slice(&trailer[..tn]);"),
   ("sfp: the trailer carries this fragment's offset", "csp/src/node.rs",
    "        let tn = csp_core::sfp::Fragment::encode(offset, total, &[], &mut trailer)?;",
    "        let tn = csp_core::sfp::Fragment::encode(0, total, &[], &mut trailer)?;"),
@@ -138,6 +149,21 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # The catch-all, `csp_bind(socket, CSP_ANY)`, which the port had no way to express at all.
+  # Four rules: it delivers, the port ceiling still bounds it, releasing it stops delivery,
+  # and releasing it hands the buffers back.
+  ("bind_any: the catch-all delivers an unbound port", "csp/src/router.rs",
+   "        (port as usize) < PORTS && (self.bound[port as usize] || self.any_bound)",
+   "        (port as usize) < PORTS && self.bound[port as usize]"),
+  ("bind_any: PORTS still bounds the catch-all", "csp/src/router.rs",
+   "        (port as usize) < PORTS && (self.bound[port as usize] || self.any_bound)",
+   "        self.any_bound || ((port as usize) < PORTS && self.bound[port as usize])"),
+  ("bind_any: releasing it stops delivery", "csp/src/router.rs",
+   "    pub fn unbind_any(&mut self, drained: &mut [u16]) -> (usize, usize) {\n        self.any_bound = false;",
+   "    pub fn unbind_any(&mut self, drained: &mut [u16]) -> (usize, usize) {"),
+  ("bind_any: releasing it returns the buffers", "csp/src/router.rs",
+   "            let (c, k) = self.conns.close_port(port as u8, &mut drained[n..]);\n            closed += c;\n            n += k;",
+   "            let (c, _k) = self.conns.close_port(port as u8, &mut drained[n..]);\n            closed += c;"),
   # The KISS decoder's escape rule, against the C. The port's decoder had never been driven
   # against libcsp at all -- only its encoder, port-to-C.
   ("kiss: an unknown escape drops the byte", "csp-core/src/kiss.rs",
@@ -334,15 +360,26 @@ MUTANTS = [
   ("rdp: data reaches the application", "csp/src/router.rs",
    "            rdp::Action::Deliver => {\n                // Strip the trailer",
    "            rdp::Action::Deliver => {\n                if true { drop(packet); return Routed::Dropped(DropReason::RdpConsumed); }\n                // Strip the trailer"),
+  # Delivered and held packets are stripped by identical lines. This was named for the
+  # delivered path and had been mutating the held one, which comes first in the file.
   ("rdp: the trailer is stripped before delivery", "csp/src/router.rs",
-   "                packet.with_payload_mut(|_| (kept, ()));", "                let _ = kept;"),
+   "                packet.with_payload_mut(|_| (kept, ()));\n                match self.conns.enqueue_rx(handle, packet.into_index()) {",
+   "                let _ = kept;\n                match self.conns.enqueue_rx(handle, packet.into_index()) {"),
+  ("rdp: a held packet is stripped too", "csp/src/router.rs",
+   "                packet.with_payload_mut(|_| (kept, ()));\n                let slot = packet.into_index();",
+   "                let _ = kept;\n                let slot = packet.into_index();"),
   # Re-anchored: the receive-path acknowledgement moved inside `if pending_ack` and gained
   # four spaces of indent, so this pattern silently started matching `ack_after_read`
   # instead -- a different function, with a different test story. A mutation that drifts
   # onto its neighbour reports the neighbour's coverage as this one's.
+  # `poll_ack` is consulted identically from `work` and from `tick`; each pattern runs on
+  # through its own send call so the two cannot be confused for each other.
   ("rdp: the node acknowledges data it delivers", "csp/src/router.rs",
-   "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {",
-   "            if let Some(ack) = None::<csp_core::rdp::Header> {"),
+   "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {\n                let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);",
+   "            if let Some(ack) = None::<csp_core::rdp::Header> {\n                let _ = self.queue_rdp(pool, id, ifaces, ack, &[], false, handle);"),
+  ("rdp: the ack timer fires from tick", "csp/src/router.rs",
+   "            if let Some(ack) = self\n                .conns\n                .rdp_mut(handle)\n                .ok()\n                .and_then(|c| c.poll_ack(now_ms))\n            {\n                let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);",
+   "            if let Some(ack) = None::<csp_core::rdp::Header> {\n                let _ = self.queue_rdp_from_tick(pool, idout, ifaces, ack, &[]);"),
   # An acknowledgement is progress: it resets the give-up counter. Without it a connection
   # on a lossy-but-working link is torn down after N retransmissions across its whole life.
   ("rdp: an acknowledgement is progress", "csp-core/src/rdp.rs",
@@ -443,9 +480,15 @@ MUTANTS = [
   ("sfp: offset and total are not swapped", "csp-core/src/sfp.rs",
    "        let offset = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);\n        let total = u32::from_be_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);",
    "        let total = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);\n        let offset = u32::from_be_bytes([trailer[4], trailer[5], trailer[6], trailer[7]]);"),
+  # Both drain loops open with the same three lines, so each pattern runs through its own
+  # call to stay unambiguous -- see the `hits > 1` guard below for what happened when one
+  # of them did not.
   ("drain: unbind loops and sizes by RXQ", "csp/src/node.rs",
-   "        let mut closed = 0usize;\n        loop {\n            let mut drained = [0u16; RXQ];",
-   "        let mut closed = 0usize;\n        for _ in 0..1 {\n            let mut drained = [0u16; 32];"),
+   "        let mut closed = 0usize;\n        loop {\n            let mut drained = [0u16; RXQ];\n            let (c, n) = self.router.unbind(port, &mut drained);",
+   "        let mut closed = 0usize;\n        for _ in 0..1 {\n            let mut drained = [0u16; 32];\n            let (c, n) = self.router.unbind(port, &mut drained);"),
+  ("drain: unbind_any loops and sizes by RXQ", "csp/src/node.rs",
+   "        let mut closed = 0usize;\n        loop {\n            let mut drained = [0u16; RXQ];\n            let (c, n) = self.router.unbind_any(&mut drained);",
+   "        let mut closed = 0usize;\n        for _ in 0..1 {\n            let mut drained = [0u16; 32];\n            let (c, n) = self.router.unbind_any(&mut drained);"),
   ("drain: close sizes by RXQ", "csp/src/node.rs",
    "        let mut drained = [0u16; RXQ];\n        let n = self.router.conns.close(conn, &mut drained)?;",
    "        let mut drained = [0u16; 32];\n        let n = self.router.conns.close(conn, &mut drained)?;"),
@@ -610,8 +653,17 @@ fired = set()
 for name, path, old, new in MUTANTS:
     p = pathlib.Path(path)
     orig = p.read_text()
-    if old not in orig:
+    hits = orig.count(old)
+    if hits == 0:
         print(f"{name:34s} MUTATION DID NOT APPLY -- pattern gone")
+        continue
+    # A pattern matching twice silently mutates whichever comes first in the file, which is
+    # not necessarily the one the mutation is named after. `drain: unbind loops and sizes by
+    # RXQ` moved from `Node::unbind` to a `Node::unbind_any` written later with the same
+    # three opening lines, and reported NOTHING NOTICED -- the mutation had gone somewhere
+    # nobody was testing, which reads identically to a hole in the tests.
+    if hits > 1:
+        print(f"{name:34s} MUTATION IS AMBIGUOUS -- pattern matches {hits} sites")
         continue
     p.write_text(orig.replace(old, new, 1))
     # The whole csp suite, not just the corpus: a port-only invariant -- one libcsp has no
