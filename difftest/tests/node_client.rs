@@ -273,3 +273,52 @@ fn every_service_request_matches_what_the_cs_client_builds() {
         );
     }
 }
+
+/// A reply of the wrong length is refused by both, and only the right length yields a value.
+///
+/// `csp_get_memfree`, `csp_get_buf_free` and `csp_get_uptime` all funnel through
+/// `csp_transaction_persistent`, which refuses a reply whose length is not the one asked for
+/// (`csp_io.c:352`) and returns nothing. Reaching that check needed a reply already on the
+/// connection, which is why these three had never been driven: with an empty queue the
+/// transaction times out long before the length is looked at.
+///
+/// Measured, `inlen = 4`:
+///
+/// | reply | C | port, before |
+/// |---|---|---|
+/// | 3 bytes | refused | `Truncated` |
+/// | 4 bytes | the value | the value |
+/// | 5 bytes | **refused** | **the first four** |
+/// | 8 bytes | **refused** | **the first four** |
+///
+/// Accepting a longer reply hands an operator a number the peer never sent, which reads
+/// exactly like one it did. The "never over-reject" rule that governs *incoming commands*
+/// does not apply to a reply we asked for.
+#[test]
+fn a_reply_of_the_wrong_length_is_refused_by_both() {
+    let _g = lock();
+    setup();
+
+    for len in [0usize, 3, 4, 5, 8] {
+        let reply: Vec<u8> = (0..len).map(|i| 0xA0 + i as u8).collect();
+        let (ret, got) = c_client_transaction(C_ADDR, csp_core::ports::MEMFREE, &reply, 4);
+        let ours = csp::client::decode_u32(&reply);
+
+        if len == 4 {
+            assert_eq!(ret, 4, "the C accepts a four-byte reply");
+            assert_eq!(got, reply, "and copies it out");
+            assert_eq!(
+                ours,
+                Ok(u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]])),
+                "and so must the port"
+            );
+        } else {
+            assert_eq!(ret, 0, "the C refuses a {len}-byte reply");
+            assert!(
+                ours.is_err(),
+                "the port must refuse it too — a {len}-byte reply decoded as a value is a \
+                 number the peer never sent"
+            );
+        }
+    }
+}
