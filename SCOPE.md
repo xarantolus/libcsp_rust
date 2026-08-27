@@ -2509,3 +2509,56 @@ the C-oracle build; `difftest` had not, because nothing had yet needed the reboo
 `build.rs` now omits that file and `shim.c` supplies recording hooks, the same technique
 already used for `csp_time.c`. It is also what makes MEMFREE comparable at all: the real hook
 reports however much RAM the host happens to have free.
+
+### The bridge named an interface and destroyed the packet
+
+2026-08-27. The forwarding bug, again, in the one forwarding path nothing had ever looked at.
+
+`csp_bridge.c` was in **neither** build — not `difftest/build.rs`'s source list, not
+`ctest/CMakeLists.txt`. The C bridge had never been compiled in this project, let alone run.
+So `Router::bridge_work` was entirely a reading of it, and its only tests were three
+assertions inside `router.rs`:
+
+```rust
+assert_eq!(r.bridge_work(&pool, 1, 2, 0), Bridged::Forward { iface: 2 });
+```
+
+`Bridged::Forward` carried an interface index and **no pool slot**, unlike
+`Routed::Forwarded` which carries `packet: u16` for the caller to take. So `bridge_work`
+popped the packet off the queue, reported where it should go, and dropped it on the way out
+of the function. Measured before changing anything: buffers free 24 → 23 while queued → **24
+after `bridge_work` returned `Forward`**. A node running the port's bridge forwarded nothing
+at all.
+
+This is the same defect, in the same shape, as the `Router::forward` failure that started
+this whole exercise — and it survived for the same reason. A test that compares the
+interface index cannot tell "forwarded" from "reported and destroyed", because both name the
+right interface.
+
+**Fixed** by giving `Bridged::Forward` the pool slot, and by rewriting the unit tests to take
+the packet and read it back rather than compare a variant.
+
+**`difftest/tests/node_bridge.rs`** now compares against a real `csp_bridge_work`, which
+required adding `src/csp_bridge.c` to the build. Five cases, all measured rather than
+inferred: each side reaches the other carrying the same bytes; a repeated frame is dropped by
+both **with `csp_conf.dedup` off**, and a distinct one still crosses; a frame addressed to
+the bridge's own interface address is forwarded rather than delivered, because
+`csp_bridge_work` never asks "is this for me"; a broadcast crosses as one frame with the
+destination unrewritten; and deviation 12 — a frame from neither side — is asserted as a
+*divergence*, the C emitting it on side A and the port refusing.
+
+Three controls. The one that reproduces the bug (`packet: u16::MAX`, so the caller cannot
+resolve the slot) **fails four of the five tests**; the three unit tests it replaced passed
+it. The other two — both sides out the same interface, and dedup gated on the mode — each
+fail exactly one test.
+
+Two smaller things this turned up:
+
+- Adding `csp_bridge.c` puts a **second `__weak csp_input_hook`** in the link, alongside
+  `csp_route.c`'s. It linked without a diagnostic, which is the hazard COMPARISON.md and
+  `hooks.rs` describe: a C linker silently picks one.
+- The harness's first version called `csp_qfifo_wake_up()` before `csp_bridge_work()`, the
+  way `shim_node_pump` does. That posts a NULL sentinel, and `csp_bridge_work` reads it *as
+  its packet* — so every result was one step behind the frame that caused it. The first case
+  still looked correct, which is what made the rest convincing. The fix is not to wake the
+  queue: the caller injects exactly one frame per step.
