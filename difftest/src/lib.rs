@@ -119,6 +119,9 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_client_read(out: *mut u8, out_len: *mut c_int) -> c_int;
     fn shim_node_client_close();
+    fn shim_mem_base() -> u64;
+    fn shim_mem_fill(seed: u8, step: u8);
+    fn shim_mem_read(off: u32, out: *mut u8, len: c_int) -> c_int;
     fn shim_cmp_build_ident_request(out: *mut u8) -> c_int;
     fn shim_cmp_parse_ident_reply(
         buf: *const u8,
@@ -292,6 +295,30 @@ pub fn c_node_bind(port: u8) -> i32 {
 pub fn c_node_bind_any() -> i32 {
     // SAFETY: no arguments; idempotent behind a flag on the C side. Callers hold `LOCK`.
     unsafe { shim_node_bind_any() }
+}
+
+/// The base address libcsp's CMP peek/poke region answers to in this harness.
+pub fn c_mem_base() -> u64 {
+    // SAFETY: returns a constant. Callers hold `LOCK`.
+    unsafe { shim_mem_base() }
+}
+
+/// Fill that region with `seed + i * step`, so a peek reply names the offset it came from.
+pub fn c_mem_fill(seed: u8, step: u8) {
+    // SAFETY: writes only the shim's own static array. Callers hold `LOCK`.
+    unsafe { shim_mem_fill(seed, step) }
+}
+
+/// Read `len` bytes of the region back, so a poke is observable. `None` if out of range.
+pub fn c_mem_read(off: u32, len: usize) -> Option<Vec<u8>> {
+    let mut out = vec![0u8; len];
+    // SAFETY: the shim bounds-checks `off`/`len` against its own array.
+    let n = unsafe { shim_mem_read(off, out.as_mut_ptr(), len as c_int) };
+    if n < 0 {
+        return None;
+    }
+    out.truncate(n as usize);
+    Some(out)
 }
 
 /// Bind `port` on the C node as a **connection-less** socket (`CSP_SO_CONN_LESS`).
