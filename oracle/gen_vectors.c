@@ -463,8 +463,11 @@ static void gen_services(int version) {
  */
 int main(int argc, char ** argv) {
 	int version = (argc > 1) ? atoi(argv[1]) : 1;
-	const char * path = (argc > 2) ? argv[2] : "vectors/vectors.tsv";
-	if (version != 1 && version != 2) {
+	/* No default path. It used to be "vectors/vectors.tsv", and the file that run produced
+	   sat in the tree for months, loaded by nothing -- `csp-core/tests/vectors.rs` reads
+	   v1.tsv and v2.tsv -- while COMPARISON.md counted its 412 lines as evidence. */
+	const char * path = (argc > 2) ? argv[2] : NULL;
+	if ((version != 1 && version != 2) || path == NULL) {
 		fprintf(stderr, "usage: %s <1|2> <outfile>\n", argv[0]);
 		return 2;
 	}

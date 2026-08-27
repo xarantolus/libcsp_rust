@@ -20,8 +20,8 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **8 353 (0.89×)** |
 | Rust LOC (tests) | 0 | 0 | 7 568 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **451** |
-| Differential tests vs the C | 0 | 0 | **19** |
+| Tests passing | 0 | 0 | **533** |
+| Differential tests vs the C | 0 | 0 | **66** |
 | Two nodes in one process | no | no | **yes** |
 
 The implementation figure grew from 5 451 to 8 353 during the audit phase, and that is the
@@ -212,7 +212,7 @@ What the transpile is genuinely worth keeping for:
   which one matches;
 - **evidence** — the three defects it surfaced by refusing to build.
 
-And the golden vectors are worth more than either. 923 vectors captured from the running C
+And the golden vectors are worth more than either. 510 vectors captured from the running C
 mean the port is checked against **observed behaviour**, not against a reading of the
 source — which is how the `CSP_21` question got settled: the KISS frames only match
 byte-for-byte if the CRC covers payload only.

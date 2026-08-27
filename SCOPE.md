@@ -2749,3 +2749,45 @@ name — `api_map` at type granularity, the CAN interleaving case varying two fi
 and this one comparing indistinguishable payloads. The common shape: **the test could not
 have failed for the reason it was written to catch.** Writing the failing case first, or
 mutating until it fails, is what separates the two.
+
+### 412 golden vectors that nothing loaded, counted as evidence
+
+2026-08-27, and a target the done-check names directly: a number asserted rather than
+measured. `just numbers check` has caught docs/API.md drifting in five consecutive cycles —
+and it checks **docs/API.md alone**. Measured across the other three documents with numeric
+claims: SCOPE.md 22, AUDIT.md 12, COMPARISON.md 11, none of them guarded by anything.
+
+Three numbers described the same thing and disagreed:
+
+| where | figure | what it counts |
+|---|---|---|
+| `ctest/tools/numbers.sh`, docs/API.md | **510** | non-comment lines of `vectors/v1.tsv` + `v2.tsv` |
+| `difftest/src/lib.rs` docstring | **922** | those, plus `vectors/vectors.tsv` |
+| COMPARISON.md | **923** | the same, off by one |
+
+`510 + 412 = 922` located the difference. **`vectors/vectors.tsv` is the original
+single-file format** from the first oracle commit (*"506 vectors from the real C API"*),
+superseded by the per-version split — its `id_v1` rows still describe inputs as `len=0`
+where the current ones use `payload=`. `csp-core/tests/vectors.rs` loads `v1.tsv` and
+`v2.tsv` and nothing else, so **412 of the 923 vectors COMPARISON.md offers as evidence that
+"the port is checked against observed behaviour" are loaded by no test at all**. That is
+worse than a stale count: it inflates the claimed evidence by 80%.
+
+It survived because `oracle/gen_vectors.c` defaulted its output path to
+`vectors/vectors.tsv`, so the file appeared once and stayed. The default is now removed —
+the path is required, and a run with no path fails rather than writing a file nothing reads.
+
+The same sweep found COMPARISON.md's three-branch table still claiming **451** tests and
+**19** differential tests, against 533 and 66 measured.
+
+`numbers.sh` now checks COMPARISON.md's three live figures too. Getting that right took two
+attempts, and the first one is the more useful half of this entry: a row of that table has
+three cells, and `grep -oE <row> | grep -oE '[0-9]+' | head -1` takes the **first** number on
+the line — c2rust's `0`. It matched, so the check looked wired up, and it compared against the
+wrong cell. Only running it printed `says comparison: tests = 0, measured 533`. Each of the
+three new checks is now confirmed to fail on a deliberately drifted figure.
+
+**The general shape, third instance in this run:** a guard that covers one of four places
+guards the one already being watched. `api_map` checked existence but not granularity; the
+untraced table checked justifications but not their targets; `numbers.sh` checked the
+document whose numbers were already under scrutiny.
