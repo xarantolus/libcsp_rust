@@ -20,8 +20,8 @@ Nothing here is estimated. Full detail: `PHASE1.md` (`port/c2rust`), `PHASE2.md`
 | Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **8 353 (0.89×)** |
 | Rust LOC (tests) | 0 | 0 | 7 568 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **538** |
-| Differential tests vs the C | 0 | 0 | **71** |
+| Tests passing | 0 | 0 | **540** |
+| Differential tests vs the C | 0 | 0 | **73** |
 | Two nodes in one process | no | no | **yes** |
 
 The implementation figure grew from 5 451 to 8 353 during the audit phase, and that is the
