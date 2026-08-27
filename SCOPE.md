@@ -3853,3 +3853,40 @@ The C trace was narrowed at the same time: it recorded `snd_nxt` and `snd_una`, 
 that instant are internal bookkeeping. Only the sequence number the SYN carries is
 comparable, and a record that reports fields one side cannot see is a record that can only
 be `c_only`.
+
+### Mining the unmovable list, and five mutations that were already there
+
+2026-08-27, continuing the previous cycle. The happy-path mutations had taken the
+"no mutation could move this record" list from 27 to 20; the rest are negative-path records,
+each guarded by one condition, and the question was which of those conditions had no
+mutation.
+
+Four did not, and adding them moved three more records: 131 → 134 of 151, unmovable 20 → 17.
+
+- `eth: segments must agree on the total` — the `packet_length != self.total` check on a
+  later segment.
+- `eth: a frame shorter than the header is refused` — `Header::decode`'s length floor.
+- `dedup: off suppresses nothing` — the `DedupMode::Off` arm; `dedup: mode applies` covered
+  only `Forwarded`.
+- `cmp: a reply is not a request` — `parse_request`'s `is_reply` gate.
+
+**What I got wrong, and the check it produced.** I wrote seven, and **five duplicated
+mutations already in this file** — same guard, different name, further down. I had read the
+part of the list I was working from rather than the whole file. The run printed one line
+twice, the count rose by seven, and the coverage it represented rose by four; a reader
+comparing counts across cycles would have read that as progress.
+
+`mutants.py` now refuses two mutations that share a name, or that make the same
+(file, target, replacement) edit. Both halves verified by adding a duplicate and watching it
+fail. The key is deliberately the whole triple and not the target: two mutations breaking one
+condition in *different* ways is a pattern already used on purpose — `bind_any` does it, and
+so does `rtable save`.
+
+The ambiguity guard from two cycles ago could not have caught this. It compares a pattern
+against the **source**, and each of the five matched exactly one site; nothing was comparing
+the patterns against each other.
+
+One of the seven also crashed rather than diverged: removing the `payload.len() < seg_size`
+guard leaves the slice under it out of bounds, so it panicked the corpus binary and reported
+`REPLAY PANICKED` — an answer about the harness where one about coverage was wanted, for the
+third time. A mutation has to leave the program *running and wrong*.
