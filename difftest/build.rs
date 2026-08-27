@@ -93,6 +93,12 @@ fn main() {
         "src/interfaces/csp_if_i2c.c",
         "src/interfaces/csp_if_can.c",
         "src/interfaces/csp_if_can_pbuf.c",
+        // The Ethernet interface, for its ARP table. `ctest` builds this file for the EFP
+        // reassembly suite, but nothing in either harness had ever called
+        // `csp_eth_arp_set_addr` or `csp_eth_arp_get_addr` -- the two functions that decide
+        // which MAC every outgoing frame is addressed to.
+        "src/interfaces/csp_if_eth.c",
+        "src/interfaces/csp_if_eth_pbuf.c",
         // csp_buffer.c uses the OS queue shim.
         "src/arch/posix/csp_queue.c",
         "src/arch/posix/pthread_queue.c",
