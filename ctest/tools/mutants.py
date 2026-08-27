@@ -133,6 +133,11 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  # Aliases decide whether a command for the node's second address is delivered or
+  # forwarded back out. Nothing named one until node_alias.rs.
+  ("iflist: an alias is one of our addresses", "csp/src/iflist.rs",
+   "        self.aliases\n            .iter()\n            .flatten()\n            .find(|a| a.addr == addr)\n            .map(|a| a.iface)\n    }",
+   "        let _ = &self.aliases;\n        None\n    }"),
   ("client: a u32 reply must be exactly four bytes", "csp/src/client.rs",
    "    if reply.len() != 4 {", "    if reply.len() < 4 {"),
   ("client: the ps request carries the C's sentinel", "csp/src/client.rs",
