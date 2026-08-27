@@ -2876,3 +2876,45 @@ refused delivery, which is what separates verifying from truncating.
 Same shape as the last three cycles, and now unmistakable: **a test passes for the reason you
 wrote it only if you have made it fail for that reason.** The fix each time was one more
 assertion on what the application actually received.
+
+### `client::ps` sent an empty request; `csp_ps` sends `0x55`
+
+2026-08-27. The previous entry stopped at `csp_reboot` and `csp_shutdown`, on the grounds that
+the other ten members of `csp_services.c` "block in `csp_transaction_w_opts`". **That was a
+decision, not a measurement, and it was wrong.** The timeout is a parameter: `csp_read` hands
+it to `csp_queue_dequeue`, and `pthread_queue_dequeue` with `0` builds a deadline of *now* and
+returns immediately. At `timeout = 0` the request still goes out and the reply-wait costs
+nothing — which is all that was ever needed to compare the two clients' requests.
+
+Measured, all five that build a request:
+
+| C client | dport | flags | body on the wire | the port built |
+|---|---|---|---|---|
+| `csp_ping(size=8)` | 1 | 0x00 | `0001020304050607` | same |
+| `csp_memfree` | 3 | 0x01 | 0-byte payload + CRC32 | 0-byte |
+| `csp_buf_free` | 5 | 0x01 | 0-byte payload + CRC32 | 0-byte |
+| `csp_uptime` | 6 | 0x01 | 0-byte payload + CRC32 | 0-byte |
+| **`csp_ps`** | 2 | 0x01 | **`55`** + CRC32 | **nothing** |
+
+`csp_services.c:117` sets `packet->data[0] = 0x55; packet->length = 1`. The port sent an empty
+payload.
+
+**Nothing libcsp ships would notice**, and that is worth stating rather than overselling the
+find: every `csp_ps_hook` in the tree — posix, freertos, zephyr — is `(void)packet; return 0`,
+and `csp_service_handler` only checks the length the hook *returns*. So a stock node answers
+both requests identically, which is why the port's own round trip and the server-side
+comparison both passed. A sentinel is nevertheless the only reason that byte exists, and a
+hook that validates it would ignore ours. Matching the C costs nothing and is the safer
+direction for an outgoing request.
+
+The header flags are deliberately **not** compared: `csp_ping` takes `conn_options` from its
+caller and the other four hard-code `CSP_O_CRC32`, while the port's `client::Request` is
+`{port, payload}` and leaves options to whoever sends it. Comparing them would fail on a shape
+difference rather than a payload one, so the test compares the payload against the front of
+the C's body and then checks the body is that payload plus exactly the checksum the flags
+imply.
+
+Three controls, all failing only the new test. The first — reverting `ps` to an empty request,
+which is the bug — trips the **length** assertion, not the byte comparison: with `n = 0` the
+prefix comparison passes vacuously. Fourth cycle running in which the assertion that catches
+the defect is the one about *how much* arrived rather than *what*.

@@ -133,6 +133,9 @@ MUTANTS = [
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if self.promisc_enabled && for_us {"),
+  ("client: the ps request carries the C's sentinel", "csp/src/client.rs",
+   "pub const PS_REQUEST: [u8; 1] = [0x55];",
+   "pub const PS_REQUEST: [u8; 1] = [0x56];"),
   # The two magic words, against the C's own client. A round trip inside the port cannot
   # catch these: client and server both read service::REBOOT_MAGIC.
   ("client: the reboot word is the C's", "csp/src/service.rs",
