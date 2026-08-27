@@ -153,6 +153,12 @@ check: canonical
 fmt:
     cargo fmt --all
 
+# The size figures COMPARISON.md quotes, with the definitions they are counted by.
+# They were quoted for months with no definition recorded anywhere and none of them
+# reproducible -- including a ratio that did not follow from the two numbers beside it.
+loc:
+    python3 ctest/tools/loc.py
+
 # Every number the docs quote, measured. Run this before changing one of them.
 numbers mode="":
     @bash ctest/tools/numbers.sh {{mode}}

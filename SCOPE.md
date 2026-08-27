@@ -3415,3 +3415,54 @@ reported *no tests ran*, which at a glance reads like a control that failed to b
 the second attempt compiled but silently orphaned the doc comment above the function it was
 inserted before, so `-D missing_docs` killed it too. A control is only evidence once it has
 actually run and failed for the stated reason; both of those were neither.
+
+### Four numbers in COMPARISON.md that no definition could reproduce
+
+2026-08-27. Target 3 of the standing prompt, swept properly rather than spot-checked.
+`just numbers` guarded nine figures; the rest of COMPARISON.md's scoreboard was guarded by
+nothing.
+
+**The arithmetic gave it away before any measurement did.** The table printed
+
+```
+| Rust LOC (implementation) | 16 903 (**1.98× the C**) | 16 903 | **8 353 (0.89×)** |
+```
+
+against a stated `8 527 lines of C`. 16 903 / 8 527 = 1.98 ✓. 8 353 / 8 527 = **0.98**, not
+0.89 — the same division, done correctly one cell to the left. A derived number nobody
+recomputes.
+
+Then the measurement. `ctest/tools/loc.py` counts by stated definitions; on this tree it
+reproduces **four of the table's numbers exactly** — `unsafe` 441, `static mut` 90,
+`extern "C"` 486, raw pointers 2 709 — and **none** of the four size figures. Not by any
+directory subset of `libcsp/src`, under plain line counts or code-line counts: nothing gives
+both 50 translation units and 8 527 lines, and nothing gives 8 353 or 7 568. That the same
+method reproduces the other four on the nose is what makes this a measurement failure rather
+than a broken measuring stick.
+
+No script, no commit and no rule had ever been recorded for any of them, so there was no way
+to tell a stale number from a wrong one. Measured, defined in `loc.py`, and now checked:
+
+| | said | measured |
+|---|---|---|
+| C translation units | 50 | **68** |
+| C lines | 8 527 | **11 692** |
+| Rust implementation | 8 353 | **11 095** |
+| ratio | 0.89× | **0.95×** |
+| Rust tests | 7 568 | **14 951** |
+
+Also fixed: COMPARISON.md said **"All 186 are now accounted for"**, in the present tense,
+long after SCOPE.md had recorded that *"this section previously said 186, and that number is
+not reproducible by either method"*. `just api` measures 199. The two documents had
+disagreed about the size of the C API for as long as the correction existed in only one of
+them.
+
+And the tool's own header claimed it checked AUDIT.md. It never has, and it should not:
+AUDIT.md's numbers, and all of SCOPE.md's but one, are dated records of what was true when
+they were written. The header now says so rather than implying a guard that does not exist.
+
+**What I got wrong twice, both formatting.** The first wiring read `692` for `11 692` — the
+scoreboard writes thousands with a space and `[0-9]+` stops at the gap. The second read `1`
+for the implementation cell, because `16 954 (**1.45× the C**)` puts a bolded ratio to the
+left of the bolded figure and the extractor took the first. Every one of the five new checks
+was then made to fail on a one-off edit before being believed.
