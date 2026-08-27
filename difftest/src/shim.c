@@ -833,3 +833,34 @@ int shim_cmp_parse_ident_reply(const uint8_t *buf, int len,
 	memcpy(revision, msg.revision, sizeof(msg.revision));
 	return 1;
 }
+
+/* --- system hooks: recorded, never performed ------------------------------ */
+
+/*
+ * `arch/posix/csp_system.c` is left out of this build (see `build.rs`). Its reboot hook
+ * really reboots, and its memfree hook reports the host's free RAM, which is not a number
+ * two implementations can be compared on.
+ *
+ * Recording instead is what lets a test ask the two questions that matter about the reboot
+ * service: was it reached, and does the magic word actually gate it.
+ */
+static int shim_rebooted;
+static int shim_shut_down;
+static uint32_t shim_memfree = 0x00100000u;
+static unsigned int shim_ps_entries;
+
+int  shim_service_rebooted(void)  { return shim_rebooted; }
+int  shim_service_shut_down(void) { return shim_shut_down; }
+void shim_service_hooks_reset(void) {
+	shim_rebooted = 0;
+	shim_shut_down = 0;
+	shim_memfree = 0x00100000u;
+	shim_ps_entries = 0;
+}
+void shim_set_memfree(uint32_t bytes) { shim_memfree = bytes; }
+void shim_set_ps_entries(unsigned int n) { shim_ps_entries = n; }
+
+uint32_t csp_memfree_hook(void) { return shim_memfree; }
+unsigned int csp_ps_hook(csp_packet_t *packet) { (void)packet; return shim_ps_entries; }
+void csp_reboot_hook(void) { shim_rebooted = 1; }
+void csp_shutdown_hook(void) { shim_shut_down = 1; }
