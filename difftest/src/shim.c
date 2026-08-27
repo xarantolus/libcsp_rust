@@ -658,6 +658,29 @@ int shim_node_accept_count(uint8_t port) {
 	return n;
 }
 
+/* --- the C node's clock ---------------------------------------------------
+ *
+ * `arch/posix/csp_time.c` is left out of the build so these win. libcsp reads the clock for
+ * RDP's retransmission and acknowledgement timers and for connection expiry, and with the
+ * wall clock those are only reachable by sleeping for whole seconds. Driven from a test they
+ * are reachable by assignment, which is what makes "does the C ever free this?" answerable.
+ */
+static uint32_t shim_now_ms = 100000u;
+
+void shim_clock_set(uint32_t ms) { shim_now_ms = ms; }
+void shim_clock_advance(uint32_t ms) { shim_now_ms += ms; }
+uint32_t csp_get_ms(void) { return shim_now_ms; }
+uint32_t csp_get_ms_isr(void) { return shim_now_ms; }
+uint32_t csp_get_s(void) { return shim_now_ms / 1000u; }
+uint32_t csp_get_s_isr(void) { return shim_now_ms / 1000u; }
+
+/* Run libcsp's periodic connection maintenance: RDP timers and idle expiry. */
+void shim_node_check_timeouts(void) {
+	csp_conn_check_timeouts();
+	csp_qfifo_wake_up();
+	while (csp_route_work() == CSP_ERR_NONE) { }
+}
+
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 
