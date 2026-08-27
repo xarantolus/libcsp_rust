@@ -41,6 +41,10 @@ if [ "${1:-}" = "check" ]; then
   expect "C oracle checks" "$(just ctest 2>&1 | grep -oE 'Checks: [0-9]+' | grep -oE '[0-9]+')" '\*\*[0-9]+ checks\*\*'
   expect "golden vector lines" "$(cat vectors/v1.tsv vectors/v2.tsv | grep -vcE '^#|^$')" '\*\*[0-9]+ golden vector lines\*\*'
   expect "difftest tests" "$(grep -hcE '^[[:space:]]*#\[test\]' difftest/tests/*.rs | paste -sd+ - | python3 -c 'import sys; print(eval(sys.stdin.read()))')" '\*\*[0-9]+ differential tests\*\*'
+  # The binary count sat in the same sentence as the test count, printed by this script and
+  # checked by nothing -- so it read 10 against a measured 22 for as long as nobody counted.
+  # Half a sentence being enforced is what let it drift under a paragraph promising it was not.
+  expect "test binaries" "$(echo "$out" | grep -cE '^test result')" 'in [0-9]+ binaries'
   [ "$fail" -eq 0 ] && echo "docs/API.md matches the measurement"
   exit "$fail"
 fi

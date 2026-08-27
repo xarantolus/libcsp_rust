@@ -13,6 +13,7 @@
 #include <csp/csp_crc32.h>
 #include <csp/crypto/csp_sha1.h>
 #include <csp/crypto/csp_hmac.h>
+#include <csp/csp_sfp.h>
 
 /* csp_id_* dispatch on the global csp_conf.version. */
 void shim_set_version(int v) {
@@ -692,3 +693,50 @@ void shim_node_counters(uint32_t *rx, uint32_t *tx, uint32_t *drop, uint32_t *rx
 	*tx_error = shim_node_iface.tx_error; *autherr = shim_node_iface.autherr;
 }
 int shim_node_iface_registered(void) { return csp_iflist_get_by_addr(shim_node_iface.addr) != NULL; }
+
+/* --- SFP: what a real C application makes of a stream the port sent -------- */
+
+/*
+ * Reassemble a stream on `port` with libcsp's own `csp_sfp_recv_fp`.
+ *
+ * This is the piece that turns "the port emits plausible fragments" into "a real C node's
+ * application receives the bytes". Everything the port's SFP path was checked against
+ * before was either its own unit tests or `ctest/suite_sfp.c`, and the latter hands
+ * hand-built packets straight to `csp_sfp_recv_fp` on a hand-opened connection -- no
+ * header on a wire, no routing, no bound port. So nothing established that frames leaving
+ * the port are ones the C would route to an application and reassemble.
+ *
+ * `timeout` is 0 throughout: every fragment is injected and pumped before this is called,
+ * so they are already on the connection's receive queue and `csp_read` returns them
+ * without blocking. A blocking read here would hang the harness, which has no router
+ * thread to fill the queue behind it.
+ *
+ * Returns the reassembled length, or a negative libcsp error.
+ */
+static uint8_t shim_sfp_buf[4096];
+static uint32_t shim_sfp_len;
+
+static int shim_sfp_write(const uint8_t *buffer, uint32_t size, uint32_t offset,
+                          uint32_t totalsz, void *data) {
+	(void)totalsz; (void)data;
+	if ((uint64_t)offset + size > sizeof(shim_sfp_buf)) { return CSP_ERR_NOMEM; }
+	memcpy(&shim_sfp_buf[offset], buffer, size);
+	if (offset + size > shim_sfp_len) { shim_sfp_len = offset + size; }
+	return CSP_ERR_NONE;
+}
+
+int shim_node_sfp_recv(uint8_t port, uint8_t *out, int maxlen) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return -100; }
+	if (shim_held[port] == NULL) {
+		shim_held[port] = csp_accept(&shim_sockets[port], 0);
+	}
+	if (shim_held[port] == NULL) { return -101; }
+
+	shim_sfp_len = 0;
+	const csp_sfp_recv_t rx = { .data = NULL, .write = shim_sfp_write };
+	int ret = csp_sfp_recv_fp(shim_held[port], &rx, 0, NULL);
+	if (ret != CSP_ERR_NONE) { return ret; }
+	if ((int)shim_sfp_len > maxlen) { return -102; }
+	memcpy(out, shim_sfp_buf, shim_sfp_len);
+	return (int)shim_sfp_len;
+}
