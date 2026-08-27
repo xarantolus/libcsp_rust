@@ -42,6 +42,9 @@ pub mod sfp;
 #[cfg(feature = "if-can")]
 pub mod cfp;
 
+#[cfg(feature = "if-i2c")]
+pub mod i2c;
+
 #[cfg(feature = "rtable")]
 pub mod rtable;
 

@@ -138,6 +138,9 @@ unsafe extern "C" {
         out_len: *mut c_int,
     ) -> c_int;
     fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
+    fn shim_i2c_init(address: u16) -> c_int;
+    fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
+    fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
     fn shim_node_add_alias(addr: u16, iface: c_int) -> c_int;
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
@@ -518,6 +521,32 @@ pub fn c_client_transaction(dst: u16, dport: u8, reply: &[u8], inlen: i32) -> (i
     };
     out.truncate(n as usize);
     (ret, out)
+}
+
+/// Bring up a real `csp_if_i2c` interface with a capturing driver.
+pub fn c_i2c_init(address: u16) -> bool {
+    // SAFETY: idempotent; the shim owns the interface and its data block for the process.
+    unsafe { shim_i2c_init(address) == 0 }
+}
+
+/// The bus address `csp_i2c_tx` chose for a packet, or `None` if it never reached the driver.
+///
+/// `csp_i2c_tx` writes it into `packet->cfpid`, so this is the number a real driver would
+/// put on the wire — seven bits of it.
+pub fn c_i2c_bus_addr(dst: u16, via: u16) -> Option<u8> {
+    // SAFETY: no arguments beyond two integers; the shim owns the packet it allocates.
+    let n = unsafe { shim_i2c_tx(dst, via) };
+    if n < 0 {
+        None
+    } else {
+        Some(n as u8)
+    }
+}
+
+/// Whether `csp_i2c_rx` routed a frame of this length, or counted it as a framing error.
+pub fn c_i2c_accepts(frame: &[u8]) -> bool {
+    // SAFETY: `frame` is valid for the call and bounds-checked on the C side.
+    unsafe { shim_i2c_rx(frame.as_ptr(), frame.len() as u32) == 1 }
 }
 
 /// Fragment `body` with libcsp's own `csp_sfp_send`, and return the frames it emitted.
