@@ -152,6 +152,23 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # Four guards that had no mutation of their own, found by mining the "no mutation could
+  # move this record" list. Three more were written beside them and deleted before commit:
+  # they duplicated targets already covered further down this file, which the duplicate
+  # check below now refuses. One of the three also crashed rather than diverged -- removing
+  # the `payload.len() < seg_size` guard leaves the slice under it out of bounds, so it
+  # panicked the corpus binary instead of failing a record.
+  ("eth: segments must agree on the total", "csp-core/src/eth.rs",
+   "                if h.packet_length != self.total {\n                    return Err(Error::InconsistentTotal {",
+   "                if false {\n                    return Err(Error::InconsistentTotal {"),
+  ("eth: a frame shorter than the header is refused", "csp-core/src/eth.rs",
+   "    pub fn decode(data: &[u8]) -> Result<Header> {\n        if data.len() < HEADER_LEN {\n            return Err(Error::Truncated);\n        }",
+   "    pub fn decode(data: &[u8]) -> Result<Header> {\n        if data.len() < HEADER_LEN {\n            return Err(Error::BufferTooSmall { needed: HEADER_LEN });\n        }"),
+  ("dedup: off suppresses nothing", "csp/src/dedup.rs",
+   "            DedupMode::Off => false,", "            DedupMode::Off => true,"),
+  ("cmp: a reply is not a request", "csp-core/src/cmp.rs",
+   "    if h.is_reply() {\n        return Err(Error::NotAReply { got: h.kind });\n    }",
+   "    if false {\n        return Err(Error::NotAReply { got: h.kind });\n    }"),
   # **Happy-path mutations.** Nearly every mutation above weakens a guard, and weakening a
   # guard cannot move a record that never trips it -- which is why 27 records could not be
   # moved by anything and why five new guard mutations moved only two of them. These break
@@ -754,6 +771,25 @@ MUTANTS = [
 # `"buffers_lost": 0` as a literal for months, so its two records were in the second
 # category and looked exactly like the first.
 fired = set()
+
+# No two mutations may share a name, or a (file, target, replacement) triple. A duplicate is
+# dead weight: it inflates the count, prints the same line twice, and -- the reason this
+# exists -- makes a reader think coverage grew when the same guard was simply named again.
+# Five of seven mutations added in one sitting duplicated patterns already in this file, and
+# the ambiguity guard could not see it: that one compares a pattern against the *source*,
+# not against the other patterns.
+#
+# Sharing a target with a *different* replacement is deliberate and common -- `bind_any`
+# breaks one condition two ways, and so does `rtable save` -- so the triple is the key, not
+# the target alone.
+_names, _edits = {}, {}
+for _n, _p, _o, _new in MUTANTS:
+    if _n in _names:
+        raise SystemExit(f"two mutations are named {_n!r}")
+    _names[_n] = True
+    if (_p, _o, _new) in _edits:
+        raise SystemExit(f"{_n!r} makes the same edit as {_edits[(_p, _o, _new)]!r}")
+    _edits[(_p, _o, _new)] = _n
 
 for name, path, old, new in MUTANTS:
     p = pathlib.Path(path)
