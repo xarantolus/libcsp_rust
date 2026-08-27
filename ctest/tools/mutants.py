@@ -149,6 +149,15 @@ MUTANTS = [
   ("router: a drop for an unbound port frees the packet", "csp/src/router.rs",
    "            return Routed::Dropped(DropReason::PortNotBound);",
    "            core::mem::forget(packet);\n            return Routed::Dropped(DropReason::PortNotBound);"),
+  # `csp_rtable_save` writes the text a ground tool reads back off a node: the netmask is
+  # omitted for a host route, and entries join with a bare comma. Nothing had compared it --
+  # `format_route` had no caller outside its own unit tests and there was no whole-table save.
+  ("rtable save: a host route drops its mask", "csp-core/src/rtable.rs",
+   "        if u32::from(route.netmask) != version.host_bits() {", "        if true {"),
+  ("rtable save: a subnet route keeps its mask", "csp-core/src/rtable.rs",
+   "        if u32::from(route.netmask) != version.host_bits() {", "        if false {"),
+  ("rtable save: entries join with a comma", "csp-core/src/rtable.rs",
+   "                out[n] = b',';", "                out[n] = b' ';"),
   # The idle sweep is for connections a *peer* opened and nobody accepted. Taking a client
   # connection as well drops the reply the application is waiting for; taking nothing leaves
   # the table exhaustible by one packet per slot. libcsp expires neither.

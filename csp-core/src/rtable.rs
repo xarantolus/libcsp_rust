@@ -128,12 +128,24 @@ impl<const N: usize> Table<N> {
         Ok(())
     }
 
-    /// Render a route in the text format [`parse`] accepts.
+    /// Render a route in the text format [`parse`] accepts, as `csp_rtable_save` writes it.
     ///
-    /// Round-trips: a table written out and read back is the same table. `csp_rtable_save`
-    /// has no such guarantee — it prints through `snprintf` into a fixed buffer and
-    /// silently truncates, so a large table saves as a *valid but shorter* one.
-    pub fn format_route(route: &Route, iface_name: &str, out: &mut [u8]) -> Result<usize> {
+    /// `version` decides one thing: `csp_rtable_save_route` **omits the netmask** when it
+    /// equals the host-bit width (`csp_rtable_stdio.c:91`), because that is a host route and
+    /// the parser defaults to it. So `8/14 CAN` at v2 saves as `8 CAN`, and at v1 the same
+    /// route is `8/14 CAN` because 14 is not v1's host width. This formatter always printed
+    /// the mask, which parses back to the same table but is not the text a real node
+    /// reports — measured against `csp_rtable_save` in `difftest/tests/rtable_save.rs`.
+    ///
+    /// Round-trips either way. `csp_rtable_save` has no such guarantee: it prints through
+    /// `snprintf` into a fixed buffer and silently truncates, so a large table saves as a
+    /// *valid but shorter* one. [`save`](Self::save) refuses instead.
+    pub fn format_route(
+        route: &Route,
+        iface_name: &str,
+        version: Version,
+        out: &mut [u8],
+    ) -> Result<usize> {
         let mut n = 0usize;
         let put = |b: u8, out: &mut [u8], n: &mut usize| -> Result<()> {
             if *n >= out.len() {
@@ -163,8 +175,10 @@ impl<const N: usize> Table<N> {
         };
 
         put_num(route.address, out, &mut n)?;
-        put(b'/', out, &mut n)?;
-        put_num(route.netmask, out, &mut n)?;
+        if u32::from(route.netmask) != version.host_bits() {
+            put(b'/', out, &mut n)?;
+            put_num(route.netmask, out, &mut n)?;
+        }
         put(b' ', out, &mut n)?;
         for &b in iface_name.as_bytes() {
             put(b, out, &mut n)?;
@@ -172,6 +186,44 @@ impl<const N: usize> Table<N> {
         if route.via != NO_VIA {
             put(b' ', out, &mut n)?;
             put_num(route.via, out, &mut n)?;
+        }
+        Ok(n)
+    }
+
+    /// Write the whole table as `csp_rtable_save` does: every route, comma-separated.
+    ///
+    /// `name_of` supplies the interface name for a route's `iface` index; a route whose
+    /// interface has no name is skipped, which is where `csp_rtable_save_route` skips the
+    /// loopback entry (`csp_rtable_stdio.c:84`) — the port keeps no loopback route, so the
+    /// hook is the general form of the same rule.
+    ///
+    /// Returns the number of bytes written. **Refuses rather than truncates**: the C
+    /// `snprintf`s into a fixed buffer and stops, so a table too large to save comes back
+    /// as a shorter table that parses perfectly and is not the one the node is using. Here
+    /// that is `Error::BufferTooSmall`.
+    ///
+    /// `csp_rtable_save` was mapped to [`format_route`](Self::format_route), which renders
+    /// **one** route. Nothing joined them, so the comma separator and the whole-table
+    /// behaviour had no counterpart at all.
+    pub fn save(
+        &self,
+        version: Version,
+        mut name_of: impl FnMut(u8) -> Option<&'static str>,
+        out: &mut [u8],
+    ) -> Result<usize> {
+        let mut n = 0usize;
+        for route in self.routes() {
+            let Some(name) = name_of(route.iface) else {
+                continue;
+            };
+            if n > 0 {
+                if n >= out.len() {
+                    return Err(Error::BufferTooSmall { needed: n + 1 });
+                }
+                out[n] = b',';
+                n += 1;
+            }
+            n += Self::format_route(route, name, version, &mut out[n..])?;
         }
         Ok(n)
     }
@@ -590,6 +642,13 @@ mod tests {
         assert_eq!(parse("0/0 CAN,x", Version::V1, |_| Ok(())).unwrap(), 1);
     }
 
+    /// A host route drops its netmask, and which masks are "host" depends on the version.
+    ///
+    /// Every expectation here is what `csp_rtable_save` actually wrote for the same route,
+    /// measured at both versions. This test previously asserted `"8/5 CAN"` at v1 — the C
+    /// writes `"8 CAN"`, because 5 *is* v1's host width. It was written from a reading of
+    /// the formatter rather than of the C, and it is the fourth unit test here that had to
+    /// be corrected alongside the code it was guarding.
     #[test]
     fn a_route_renders_in_the_format_the_parser_accepts() {
         let mut out = [0u8; 64];
@@ -599,8 +658,18 @@ mod tests {
             iface: 0,
             via: NO_VIA,
         };
-        let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
-        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "8/5 CAN");
+        let n = Table::<4>::format_route(&r, "CAN", Version::V1, &mut out).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "8 CAN",
+            "a /5 route is a host route at v1"
+        );
+        let n = Table::<4>::format_route(&r, "CAN", Version::V2, &mut out).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "8/5 CAN",
+            "and a subnet route at v2"
+        );
 
         let r2 = Route {
             address: 0,
@@ -608,8 +677,12 @@ mod tests {
             iface: 0,
             via: 12,
         };
-        let n = Table::<4>::format_route(&r2, "KISS", &mut out).unwrap();
-        assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), "0/0 KISS 12");
+        let n = Table::<4>::format_route(&r2, "KISS", Version::V1, &mut out).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&out[..n]).unwrap(),
+            "0/0 KISS 12",
+            "the default route keeps its /0 -- zero is nobody's host width"
+        );
     }
 
     #[test]
@@ -637,7 +710,7 @@ mod tests {
             },
         ] {
             let mut out = [0u8; 64];
-            let n = Table::<4>::format_route(&r, "CAN", &mut out).unwrap();
+            let n = Table::<4>::format_route(&r, "CAN", Version::V1, &mut out).unwrap();
             let text = core::str::from_utf8(&out[..n]).unwrap();
             let mut seen = None;
             parse(text, Version::V1, |p| {
@@ -647,7 +720,11 @@ mod tests {
             .unwrap();
             let p = seen.expect("must parse back");
             assert_eq!(p.address, r.address, "{text}");
-            assert_eq!(p.netmask, Some(r.netmask), "{text}");
+            // An omitted netmask means "host width", which is exactly the mask that was
+            // omitted -- so the round trip is on the *effective* value, not on whether the
+            // text spelled it out.
+            let effective = p.netmask.unwrap_or(Version::V1.host_bits() as u16);
+            assert_eq!(effective, r.netmask, "{text}");
             assert_eq!(p.iface, "CAN");
             assert_eq!(
                 p.via,
@@ -667,7 +744,7 @@ mod tests {
             via: NO_VIA,
         };
         assert!(matches!(
-            Table::<4>::format_route(&r, "CAN", &mut tiny),
+            Table::<4>::format_route(&r, "CAN", Version::V1, &mut tiny),
             Err(Error::BufferTooSmall { .. })
         ));
     }
