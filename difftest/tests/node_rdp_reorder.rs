@@ -166,7 +166,7 @@ fn a_real_peers_frames_are_reordered_before_the_application_sees_them() {
         drop(pkt);
     }
 
-    c_node_release(RDP_PORT);
+    let _ = c_node_release(RDP_PORT);
 
     assert_eq!(
         all.len(),

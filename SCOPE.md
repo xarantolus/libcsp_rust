@@ -411,12 +411,31 @@ Two hazards came with it, both found rather than reasoned about:
   guarantees that much, so it passed with the cap removed. Filling the receive queue first is
   what makes it a test of the shared budget.
 
-**`TxQueue` is still unused.** Same shape, still open: it is defined in `csp-core` with its
-own tests and no caller in `csp/src`, so the port has no send-side data retransmission. That
-is why libcsp PR #3's fourth item -- freeing packets when an RDP queue is flushed -- has no
-counterpart here: there is no live transmit queue to flush. The other three items of that PR
-are in the pinned submodule (`1bc00a0f`, an ancestor of `13a8c841`) and are covered by
-records: the SYN option-block length check, the parameter clamping, and the retransmit limit.
+**`TxQueue` was unused. That is no longer true, and this paragraph said otherwise for
+several cycles.** It has eight call sites in `csp/src/conn.rs` -- `tx_unacked`,
+`hold_unacked`, `poll_unacked`, the shared budget, `rdp_handles` -- and `Router::sweep_unacked`
+drives retransmission from `tick`. `node_rdp_retransmit.rs` shows a lost packet resent in a
+form a real C peer accepts.
+
+The conclusion drawn from the stale claim was wrong with it: libcsp PR #3's fourth item --
+freeing packets when an RDP queue is flushed -- *does* have a counterpart. `Table::close`
+drains `tx_unacked` alongside the receive and reorder queues, and
+`node_rdp_inflight.rs` measures it: three packets in flight, closed underneath, every buffer
+back. Dropping that drain loses exactly three. The other three items of that PR are in the
+pinned submodule (`1bc00a0f`, an ancestor of `13a8c841`) and are covered by records: the SYN
+option-block length check, the parameter clamping, and the retransmit limit.
+
+**A measured difference in *when*, and an open question.** The port releases on close. The C
+does not: `csp_conn_close` returns early while the RDP close handshake is outstanding
+(`csp_conn.c:230`), *before* both `csp_conn_flush_rx_queue` and `csp_rdp_queue_flush`, so
+four buffers stay held immediately after `csp_close`. Its close does reset the peer -- one
+`ACK|RST` frame -- but feeding that to the peer and pumping the reply back did not release
+them within the exchange.
+
+Whether libcsp's connection timeout eventually frees them is **not established here**, and
+is deliberately not asserted either way: driving it needs real time, because this harness
+keeps `arch/posix/csp_time.c` (only `ctest/` omits it for a virtual clock). Recording "the C
+leaks four buffers" would be a number without the condition that decides what it means.
 
 ### One spoofed RST dropped the link — the port had no blind-reset defence
 

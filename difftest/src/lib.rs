@@ -315,10 +315,29 @@ pub fn c_node_set_dedup(mode: i32) {
     unsafe { shim_node_set_dedup(mode) }
 }
 
-/// Close a connection the C node is holding, which resets the peer.
-pub fn c_node_release(port: u8) {
-    // SAFETY: bounds-checked on the C side; callers hold `LOCK`.
-    unsafe { shim_node_release(port) }
+/// Close a connection the C node is holding, and hand back the frames that produced.
+///
+/// On an RDP connection `csp_conn_close` returns early while the close handshake is
+/// outstanding (`csp_conn.c:230`), *before* flushing the receive queue and the
+/// retransmission queue — so buffers stay held until the peer answers. Feed these to the
+/// peer and pump its reply back to let the close finish.
+pub fn c_node_release(port: u8) -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: bounds-checked on the C side; the buffer is larger than any frame the C can
+    // emit. Callers hold `LOCK`.
+    unsafe {
+        shim_node_clear_tx();
+        shim_node_release(port);
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let n = shim_node_tx_get(i, buf.as_mut_ptr());
+            if n > 0 {
+                buf.truncate(n as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
 }
 
 /// Feed `frame` to the C node, run its router to quiescence, and report only what an
