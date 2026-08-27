@@ -1162,3 +1162,47 @@ int shim_node_add_alias(uint16_t addr, int iface) {
 }
 
 int shim_node_is_alias(uint16_t addr) { return csp_addr_is_alias(addr); }
+
+/* --- SFP the other way: fragments a real csp_sfp_send produced --------------- */
+
+/*
+ * Every SFP comparison so far runs one of two ways: the port fragments and
+ * `csp_sfp_recv_fp` reassembles (`node_sfp.rs`), or hand-built `make_packet` fragments go
+ * into the port's reassembler (the `sfp::` corpus records). `csp_sfp_send` itself had never
+ * executed -- it appears in this tree exactly once, in a comment. So the decision a real
+ * libcsp sender makes about *how to cut a message up* had never produced a byte, and the
+ * port's reassembler had never seen its output.
+ *
+ * That is the same asymmetry `node_can.rs` covers in both directions.
+ */
+static const uint8_t *shim_sfp_src;
+static uint32_t shim_sfp_src_len;
+
+static int shim_sfp_read(uint8_t *buffer, uint32_t size, uint32_t offset, void *data) {
+	(void)data;
+	if ((uint64_t)offset + size > shim_sfp_src_len) { return CSP_ERR_INVAL; }
+	memcpy(buffer, shim_sfp_src + offset, size);
+	return CSP_ERR_NONE;
+}
+
+/*
+ * Fragment `body` with libcsp's own `csp_sfp_send` and leave the frames in the tx capture.
+ *
+ * Returns the number of frames, or a negative libcsp error. `mtu` is the payload budget per
+ * fragment; `csp_sfp_send` refuses one above `csp_sfp_conn_max_mtu`.
+ */
+int shim_sfp_send(uint16_t dst, uint8_t dport, const uint8_t *body, int len, uint32_t mtu) {
+	csp_conn_t *conn = csp_connect(CSP_PRIO_NORM, dst, dport, 0, 0);
+	if (conn == NULL) { return -1; }
+
+	shim_sfp_src = body;
+	shim_sfp_src_len = (uint32_t)len;
+	const csp_sfp_read_t reader = { .data = NULL, .read = shim_sfp_read };
+
+	shim_node_clear_tx();
+	int ret = csp_sfp_send(conn, &reader, (uint32_t)len, mtu, 0);
+	shim_node_pump();
+	csp_close(conn);
+	if (ret != CSP_ERR_NONE) { return -100 + ret; }
+	return shim_tx_n;
+}

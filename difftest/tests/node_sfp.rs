@@ -19,6 +19,16 @@
 //! the port sends, which is the direction that failed silently before: `Router::forward`
 //! satisfied every assertion about which interface it picked while destroying the packet.
 //!
+//! # Both directions, eventually
+//!
+//! The first version of this file drove only port-fragments-to-C-reassembles, and said it
+//! covered the cell. It did not: `csp_sfp_send` — the decision a real libcsp sender makes
+//! about how to cut a message up — appeared in this tree exactly once, in a comment in
+//! `suite_rdp.c`, and had never executed. The port's reassembler had only ever seen
+//! fragments the port or a `make_packet` helper built. `node_can.rs` covers CAN both ways;
+//! this file did not, and the omission was invisible because the one direction present was
+//! the harder-looking one.
+//!
 //! # Process isolation
 //!
 //! `csp_conf.version` is init-only (SCOPE.md 18), and this file's C node binds a port and
@@ -132,5 +142,107 @@ fn every_fragment_leaves_the_port_marked_as_one() {
             "fragment {i} left without FRAG set; the C reads it as a datagram \
              and the SFP trailer becomes payload"
         );
+    }
+}
+
+/// The other direction: a real `csp_sfp_send` cuts the message up, the port reassembles.
+///
+/// Driven through the port's whole receive path — router, bound port, `Delivery::classify`,
+/// `Stream::read_to_slice` over a `PacketSource` — so what is compared is what the
+/// application is handed, not what a codec returned.
+///
+/// The MTUs matter: 40 leaves a comfortable payload per frame, 8 is the smallest the C will
+/// take here and produces thirteen frames for a hundred bytes, and both are checked at a
+/// length that divides evenly and one that does not.
+#[test]
+fn the_port_reassembles_what_a_real_csp_sfp_send_fragments() {
+    let _g = lock();
+    setup();
+
+    for (len, mtu) in [(5usize, 40u32), (10, 40), (100, 40), (100, 8), (200, 40)] {
+        let payload: Vec<u8> = (0..len)
+            .map(|i| (i as u8).wrapping_mul(3).wrapping_add(1))
+            .collect();
+        let frames = c_sfp_send(R_ADDR, PORT, &payload, mtu)
+            .unwrap_or_else(|e| panic!("csp_sfp_send refused {len} bytes at mtu {mtu}: {e}"));
+        assert!(!frames.is_empty(), "{len}@{mtu}: the C emitted nothing");
+
+        let storage = CspStorage::<8, 24, 300, 64, 8>::new();
+        let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(R_ADDR));
+        node.ifaces.add("test", R_ADDR, NETMASK, true).unwrap();
+        node.bind(PORT).unwrap();
+
+        // Feed one frame, then read what it produced, and repeat — which is what a sans-io
+        // application does. Pushing all of them in first overruns the connection's receive
+        // queue: at mtu 8 a hundred bytes is thirteen frames and the queue holds eight, and
+        // the reassembly failed with `Truncated` for lack of the fragments that were
+        // dropped. Enlarging the queue would have hidden that this test was not modelling a
+        // receive loop.
+        let mut pending = frames.iter();
+        let mut feed = |node: &mut TestNode| -> bool {
+            let Some(f) = pending.next() else {
+                return false;
+            };
+            let mut p = node.packet().expect("pool");
+            p.set_frame(VERSION, f).expect("a frame the C emitted");
+            node.router.receive(p, 0);
+            while !matches!(node.work(0), Routed::Idle) {}
+            true
+        };
+        feed(&mut node);
+
+        let conn = node
+            .accept()
+            .unwrap_or_else(|| panic!("{len}@{mtu}: nothing was delivered to the bound port"));
+        let first = node
+            .read(conn)
+            .expect("read")
+            .unwrap_or_else(|| panic!("{len}@{mtu}: the connection had no first fragment"));
+
+        struct ConnSource<'s, 'a, F: FnMut(&mut TestNode<'a>) -> bool> {
+            node: &'s mut TestNode<'a>,
+            conn: csp::conn::Handle,
+            feed: F,
+        }
+        impl<'a, F: FnMut(&mut TestNode<'a>) -> bool> csp::delivery::PacketSource<'a, 24, 300>
+            for ConnSource<'_, 'a, F>
+        {
+            fn next_packet(&mut self, _timeout_ms: u32) -> Option<csp::Packet<'a, 24, 300>> {
+                loop {
+                    if let Ok(Some(p)) = self.node.read(self.conn) {
+                        return Some(p);
+                    }
+                    // Nothing waiting: take delivery of the next frame off the wire. A real
+                    // application blocks in its driver here; sans-io, it turns the crank.
+                    if !(self.feed)(self.node) {
+                        return None;
+                    }
+                }
+            }
+        }
+
+        let mut src = ConnSource {
+            node: &mut node,
+            conn,
+            feed,
+        };
+        // Bound, so the `Delivery` is dropped before `storage` at the end of the iteration.
+        let delivery = csp::delivery::Delivery::classify(first, &mut src);
+        match delivery {
+            csp::delivery::Delivery::Stream(mut st) => {
+                let mut buf = [0u8; 512];
+                let got = st
+                    .read_to_slice(1000, &mut buf)
+                    .unwrap_or_else(|e| panic!("{len}@{mtu}: reassembly failed: {e:?}"));
+                assert_eq!(
+                    &buf[..got],
+                    &payload[..],
+                    "{len}@{mtu}: the application must get back what the C sent"
+                );
+            }
+            csp::delivery::Delivery::Datagram(_) => {
+                panic!("{len}@{mtu}: the C's fragments must classify as a stream, not a datagram")
+            }
+        };
     }
 }
