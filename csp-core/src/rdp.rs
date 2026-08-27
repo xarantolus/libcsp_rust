@@ -410,6 +410,18 @@ impl<const N: usize> TxQueue<N> {
                 out[n] = TxAction::Release { token: e.token };
                 n += 1;
                 *slot = None;
+                // The peer acknowledged something, so the attempts spent getting here are
+                // spent, not owed. The C keeps one counter (`conn->rdp.retransmits`), zeroes
+                // it on every acknowledgement, and gives up on "no progress after
+                // CSP_RDP_MAX_RETRANSMITS" — *consecutive* failures. This queue had its own
+                // counter that only ever rose, so a connection on a lossy-but-working link
+                // was torn down after ten retransmissions spread over its whole life, with
+                // every packet delivered. Measured: gave up on the sixth round of
+                // send-retransmit-twice-acknowledge.
+                //
+                // Reset here rather than through a method the caller must remember: the
+                // release is the progress, and nothing else has to know.
+                self.retransmits = 0;
                 continue;
             }
 
@@ -434,11 +446,6 @@ impl<const N: usize> TxQueue<N> {
             }
         }
         n
-    }
-
-    /// Note that the peer made progress, resetting the give-up counter.
-    pub fn note_progress(&mut self) {
-        self.retransmits = 0;
     }
 
     /// Take any queued entry, without caring which.
@@ -1838,6 +1845,11 @@ mod tests {
         assert!(gave_up, "must stop retransmitting eventually");
     }
 
+    /// An acknowledgement resets the give-up counter, through the path that carries it.
+    ///
+    /// This used to call `note_progress()` directly — a method with no caller anywhere,
+    /// proving the reset worked while nothing performed it. Driving the release instead is
+    /// what makes the assertion about the port rather than about the helper.
     #[test]
     fn progress_resets_the_give_up_counter() {
         let mut q: TxQueue<4> = TxQueue::new();
@@ -1846,7 +1858,13 @@ mod tests {
             drain(&mut q, i * 2_000, 1_000, 10);
         }
         assert!(q.retransmits() > 0);
-        q.note_progress();
+
+        // The peer acknowledges seq 10: `snd_una` moves past it and the entry is released.
+        let mut out = [TxAction::GiveUp; 4];
+        let n = q.poll(20_000, 1_000, 11, &mut out);
+        assert!(out[..n]
+            .iter()
+            .any(|a| matches!(a, TxAction::Release { .. })));
         assert_eq!(q.retransmits(), 0, "an ack means the peer is alive");
     }
 
@@ -1951,5 +1969,49 @@ mod tests {
         assert!(d.delayed_acks);
         assert_eq!(d.ack_timeout, 250, "csp_rdp_ack_timeout = 1000 / 4");
         assert_eq!(d.ack_delay_count, 2, "csp_rdp_ack_delay_count = 4 / 2");
+    }
+    /// A peer that acknowledges is never given up on, however long the connection lives.
+    ///
+    /// `MAX_RETRANSMITS` means "no progress after N", and the C makes that true by zeroing
+    /// `conn->rdp.retransmits` on every acknowledgement — so N counts *consecutive*
+    /// failures. This queue kept its own counter that only rose, and tore down a connection
+    /// on a lossy-but-working link after N retransmissions spread across its entire life.
+    ///
+    /// Six rounds of send / retransmit twice / acknowledge is twelve retransmissions against
+    /// a limit of ten, with the peer answering every single time.
+    #[test]
+    fn a_peer_that_acknowledges_is_never_given_up_on() {
+        let mut q: TxQueue<4> = TxQueue::new();
+        let mut out = [TxAction::GiveUp; 4];
+        let mut now = 0u32;
+        let mut una = 0u16;
+        let mut retransmissions = 0;
+
+        for round in 0..6u16 {
+            q.push(round, 100 + round, now).unwrap();
+            for _ in 0..2 {
+                now += 2_000;
+                let n = q.poll(now, 1_000, una, &mut out);
+                retransmissions += out[..n]
+                    .iter()
+                    .filter(|a| matches!(a, TxAction::Retransmit { .. }))
+                    .count();
+                assert!(
+                    !out[..n].iter().any(|a| matches!(a, TxAction::GiveUp)),
+                    "gave up on round {round} — the peer has acknowledged every packet so \
+                     far, so there has been no lack of progress to give up on"
+                );
+            }
+            // The peer acknowledges it.
+            una = round.wrapping_add(1);
+            now += 10;
+            q.poll(now, 1_000, una, &mut out);
+        }
+
+        assert!(
+            retransmissions > MAX_RETRANSMITS as usize,
+            "only {retransmissions} retransmissions, at or under the limit of \
+             {MAX_RETRANSMITS} — the case never passed the threshold it exists to cross"
+        );
     }
 }
