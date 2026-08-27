@@ -2782,6 +2782,68 @@ fn replay_rdp_receive_gate(window_size: u32, delivered: u32) -> serde_json::Valu
 /// The sequence number is absent from both sides on purpose: it is the ISN, and the port
 /// deliberately does not reproduce the C's `rand_r(csp_get_ms())`. See the C test.
 #[cfg(feature = "rdp")]
+/// The initial send sequence number the port puts on a SYN opened at `clock_ms`.
+///
+/// Read off the wire, not out of the connection: the ISN is what a peer sees on the SYN,
+/// and `Router::initial_seq` is private for the same reason.
+///
+/// This record was `c_only` — "the port takes the ISN as a parameter rather than deriving
+/// it from a clock, so there is nothing here for it to match" — long after that stopped
+/// being true. A mutation replacing `initial_seq` with a constant `0` moved **one unit
+/// test** and no corpus record, which is how it was found: the property the record is named
+/// for was verified only by a test the port wrote about itself.
+#[cfg(feature = "rdp")]
+fn replay_rdp_isn(clock_ms: u32) -> serde_json::Value {
+    use csp_core::rdp;
+
+    const NODE: u16 = 10;
+    const PEER: u16 = 11;
+    const PORT: u8 = 12;
+
+    let seq_at = |now: u32| -> u16 {
+        type S = csp::CspStorage<8, 16, 264, 48, 32>;
+        let storage = S::new();
+        let mut n: csp::Node<'_, 8, 16, 264, 48, 32, 4> =
+            csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+        n.ifaces.add("test", NODE, 14, true).unwrap();
+        n.connect(2, PEER, PORT, csp_core::security::opts::RDP_REQ, now)
+            .expect("connect(RDP_REQ) must open a connection");
+        let mut seq = None;
+        loop {
+            match n.work(now) {
+                csp::Routed::Respond { packet, .. } => {
+                    let p = n.take_forwarded(packet).expect("a live slot");
+                    p.with_payload(|b| {
+                        if let Ok(h) = rdp::Header::decode(b) {
+                            seq = Some(h.seq_nr);
+                        }
+                    });
+                    drop(p);
+                }
+                csp::Routed::Idle => break,
+                _ => continue,
+            }
+        }
+        seq.expect("a SYN must reach the wire")
+    };
+
+    // Reported, not asserted. A `diverges` record pins that the two stacks differ; it cannot
+    // pin what *this* one produces, because any value that is not the C's satisfies it. The
+    // property -- same clock, same number; different clock, different number -- belongs in
+    // a test that can assert, and `the_sequence_a_peer_receives_moves_with_the_clock` is it.
+    //
+    // Asserting it here instead made a mutation *panic* the corpus binary rather than fail a
+    // record, and `just mutants` then reported REPLAY PANICKED: an answer about the harness
+    // where a answer about coverage was wanted. Same shape as the conn-less mutation that
+    // had to be dropped for taking the binary down with it.
+    let iss = seq_at(clock_ms);
+
+    serde_json::json!({
+        "clock_ms": clock_ms,
+        "snd_iss": iss,
+    })
+}
+
 fn replay_rdp_client_connect() -> serde_json::Value {
     use csp_core::rdp;
 
@@ -4307,7 +4369,11 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
             replay_rdp_client_connect(),
             "Node::connect(RDP)".to_string(),
         )),
-        "rdp" if rec.case == "isn_is_a_function_of_the_clock" => None,
+        #[cfg(feature = "rdp")]
+        "rdp" if rec.case == "isn_is_a_function_of_the_clock" => Some((
+            replay_rdp_isn(1_234_567),
+            "the ISN on a SYN at a fixed clock".to_string(),
+        )),
         #[cfg(feature = "rdp")]
         "rdp" if rec.case == "a_syn_without_options_is_rejected" => Some((
             replay_rdp_malformed_syn(0),
