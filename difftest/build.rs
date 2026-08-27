@@ -53,6 +53,11 @@ fn main() {
         "src/csp_route.c",
         "src/csp_promisc.c",
         "src/csp_dedup.c",
+        // `csp_bridge_work` is a second forwarding path entirely: no routing table, no
+        // split horizon, no address rewrite, and dedup applied unconditionally. It had
+        // never been compiled in this project, so everything the port's `bridge_work` did
+        // was a reading of it.
+        "src/csp_bridge.c",
         "src/csp_services.c",
         "src/csp_service_handler.c",
         // Pulled in by `csp_service_handler`, which `shim_node_serve` calls so a real C
