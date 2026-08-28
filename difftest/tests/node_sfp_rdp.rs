@@ -7,6 +7,10 @@
 //! order wrong and the C reads four bytes of the SFP offset as an RDP sequence number —
 //! which is not a crash, just a connection that silently discards everything.
 //!
+//! This is the *sending* half only: it proves the port appends the two trailers in the order
+//! a real C receiver expects. `node_sfp_rdp_in.rs` is the other direction — a real
+//! `csp_sfp_send` on an RDP connection, which the port has to strip in reverse.
+//!
 //! `node_sfp.rs` covers the plain half and explains what was and was not measured before.
 //! One scenario per binary, for the reason `node_rdp.rs` documents: an RDP connection leaves
 //! durable state on the C node and libcsp has no per-test reset.

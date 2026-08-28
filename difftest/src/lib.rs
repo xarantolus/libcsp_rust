@@ -165,6 +165,7 @@ unsafe extern "C" {
         out_len: *mut c_int,
     ) -> c_int;
     fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
+    fn shim_node_sfp_send_on(port: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -805,6 +806,36 @@ pub fn c_sfp_send(dst: u16, dport: u8, body: &[u8], mtu: u32) -> Result<Vec<Vec<
     if n < 0 {
         return Err(n);
     }
+    // SAFETY: the capture array is fixed-size and bounds-checked on the C side.
+    unsafe {
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let k = shim_node_tx_get(i, buf.as_mut_ptr());
+            if k > 0 {
+                buf.truncate(k as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    Ok(frames)
+}
+
+/// Fragment `body` with `csp_sfp_send` on the connection the C node already holds for
+/// `port`, and return the frames it emitted.
+///
+/// After an RDP handshake that connection is a real RDP connection, so each fragment leaves
+/// carrying **two** trailers — SFP's, then RDP's. `c_sfp_send` opens a plain connection and
+/// therefore only ever produces one.
+///
+/// `Err(code)` carries libcsp's error; `Err(0)` means there was no connection to send on.
+pub fn c_node_sfp_send_on(port: u8, body: &[u8], mtu: u32) -> Result<Vec<Vec<u8>>, i32> {
+    // SAFETY: `body` outlives the call — the shim's read callback only reads it during
+    // `csp_sfp_send`. Callers hold `LOCK`.
+    let n = unsafe { shim_node_sfp_send_on(port, body.as_ptr(), body.len() as c_int, mtu) };
+    if n <= 0 {
+        return Err(n);
+    }
+    let mut frames = Vec::new();
     // SAFETY: the capture array is fixed-size and bounds-checked on the C side.
     unsafe {
         for i in 0..shim_node_tx_count() {

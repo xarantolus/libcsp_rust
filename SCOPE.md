@@ -4072,3 +4072,45 @@ failure that the first record alone cannot see. All three are in `mutants.py`.
 before this cycle: it calls `route_policy::destinations`, which is the `find_all` fan-out
 plus the default-interface fallback, shared with `Node::resolve`. `Table::find` survives
 only as `route_from`'s single-destination convenience.
+
+### The RDP-SFP cell had node-level evidence in one direction only
+
+2026-08-28. Last cycle's answer was that all four cells of `{plain, SFP} x {no RDP, RDP}`
+have node-level evidence against a real C node. Measured properly, one of them had it in a
+single direction:
+
+| direction | plain | SFP |
+|---|---|---|
+| port sends, C receives | `diff.rs`, `node_v2.rs` | `node_sfp.rs`, `node_sfp_rdp.rs` |
+| C sends, port receives | `diff.rs`, `node_rdp_peer.rs` | `node_sfp.rs` — **over a plain connection** |
+
+`node_sfp.rs::the_port_reassembles_what_a_real_csp_sfp_send_fragments` does drive the real
+`csp_sfp_send`, but through `shim_sfp_send`, which opens its connection with
+`csp_connect(..., 0)`. No RDP. So every fragment the port's reassembler had ever been given
+by a real libcsp sender carried exactly **one** trailer.
+
+That is not a symmetry complaint. `csp_rdp_send` appends its header at `data[length]` after
+`csp_sfp_header_add` has appended its own, so a fragment on an RDP connection is
+`[body][sfp trailer][rdp trailer]` and the receiver must strip them in reverse.
+`node_sfp_rdp.rs` proves the port **appends** them correctly — a C node strips them and gets
+the message. Stripping is an unrelated path: the router unwraps RDP, `Delivery::classify`
+reads the flags, and `Stream` reads the SFP trailer off what is left. Nothing had driven it
+with two trailers on the wire, and getting the order wrong is silent — the connection
+acknowledges every frame and delivers nothing. In orbit that is a link the telemetry calls
+healthy while no file ever arrives.
+
+`difftest/tests/node_sfp_rdp_in.rs` closes it, with a new `shim_node_sfp_send_on` that runs
+`csp_sfp_send` on the connection the C node is already holding — the RDP one a peer opened
+to it — rather than opening a fresh plain one. The port agreed with libcsp, so this pins
+rather than fixes. Three controls, all of which bite:
+
+| control | result |
+|---|---|
+| the router stops stripping the RDP trailer | `BufferTooSmall { needed: 3 809 891 292 }` — the SFP offset read out of the RDP header |
+| it strips one byte too few | `OffsetBeyondTotal { offset: 1 677 721 600, total: 0 }` |
+| the C sends the stream on a *plain* connection instead | flags `0x10`, and the in-test guard fires |
+
+The third is the one that matters most, and it is a permanent assertion rather than a
+one-off: every fragment must carry `FRAG | RDP` (measured `0x12`). Without it this file is
+`node_sfp.rs` again with a longer name — which is exactly the shape of the miscount it was
+written to correct.
