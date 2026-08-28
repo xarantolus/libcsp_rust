@@ -4297,3 +4297,57 @@ where the file has four, so it matched nothing and the "control" ran against unm
 Applied properly it fails with `-3`. That is the same lesson as the split control in the
 previous entry, one step earlier: **a control is only evidence once it has actually changed
 the program**, and the cheap way to know is to grep for the mutated text before running.
+
+### `CLOCK` had no real client, and the whole corpus is v2
+
+2026-08-28, third cycle of the same sweep. Measured across the CMP codes the port serves:
+`IDENT` had a real C client (`node_cmp_server.rs`, hand-rolled), `PEEK`/`POKE` v2 had one,
+`IF_STATS` gained libcsp's actual client last commit. **`CLOCK` had none**, and it is the code
+where being wrong costs the most: a lost packet is retried, but a satellite whose clock was
+set wrong timestamps every later telemetry record, schedules every window and propagates every
+ephemeris from a bad epoch, and nothing on the ground says so.
+
+`csp_cmp_clock_handler` sets only when `tv_sec` is non-zero, reads back regardless, and then
+returns the **set** result — so a refused set builds a reply and `csp_service_handler`
+discards it. Three cases, and only a client that waits can tell them apart:
+
+| request | the node | the client sees |
+|---|---|---|
+| `tv_sec != 0`, accepted | sets, then reports its clock | the new time |
+| `tv_sec == 0` | does **not** set, reports its clock | the current time |
+| `tv_sec != 0`, refused | sets nothing, sends nothing | `CSP_ERR_TIMEDOUT` |
+
+`difftest/tests/node_cmp_clock.rs` drives all three through `csp_cmp_clock`. The port came
+out clean; this pins. Controls, each checked to have actually applied before being run:
+
+| control | result |
+|---|---|
+| a `tv_sec` of zero is treated as a set | the read reports `(0, 0)` — a status poll would zero the satellite's clock |
+| a refused set is answered anyway | one reply where there must be none |
+| the reply transposes `tv_sec` and `tv_nsec` | `(16909060, 708529245)` for `(708529245, 16909060)` |
+
+Two of those are new mutations. The third — the refusal — was **already** in `mutants.py` as
+`cmp: a refused clock set is not reported as done`; I checked before adding, which is the
+habit the previous entry's duplicate should have produced and this time did.
+
+### A scope fact nobody had written down: the corpus is entirely v2
+
+Measured the same cycle, because the `CLOCK` work needed a version and I went looking for
+which one the oracle uses. `csp_init` sets `csp_conf.version = 2` (`csp_init.c:18`) and
+**`ctest` never changes it** — the only assignment anywhere in `ctest/` is in
+`suite_promisc.c`, for the CSP1 id-layout test. So all **154 corpus records were produced at
+v2**, and the replays are 54 `Version::V2` against 2 `Version::V1`.
+
+The same asymmetry holds in `difftest`: of the 35 files that pin a version, **two** pin v1 —
+`node_can_v1.rs` and `node_rdp_v1.rs` — plus `diff.rs`, whose node-level tests are all v1.
+
+**This is worth recording and not worth panicking about, and I checked which before writing
+it.** The version-dependent behaviour in the port is concentrated in two places: the header
+codec (`csp-core/src/id.rs`), which `diff.rs` compares exhaustively at *both* versions against
+golden vectors, and subnet/broadcast arithmetic through `host_bits()`, which `diff.rs`'s v1
+node-level tests cover directly. The one version-branched line in `csp/src/service.rs` is
+`Query::RouteSetV1`'s netmask — and at v1 `host_bits()` is 5 out of 5, at v2 14 out of 14, so
+**both are host routes** and the routing outcome is identical; only the number differs, and
+`rtable_save.rs` already pins that number at both versions. I started this cycle intending to
+write a v1 CMP test on the assumption that the netmask difference changed where packets go.
+It does not. Recorded here so the next reader does not repeat the assumption.

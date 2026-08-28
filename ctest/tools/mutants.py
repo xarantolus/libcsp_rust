@@ -454,6 +454,14 @@ MUTANTS = [
   ("cmp: unknown interface gets no if_stats", "csp/src/service.rs",
    "            None => Ok(None),\n        },",
    "            None => Ok(Some(IfStatsMsg { interface, stats: Default::default() }.encode(reply_header(cmp::code::IF_STATS), out)?)),\n        },"),
+  # The other two ways to get CLOCK wrong, both invisible without a client that waits.
+  # (The refusal is the entry immediately below; no third one here for it.)
+  ("cmp: a zero tv_sec is a read, not a set", "csp-core/src/cmp.rs",
+   "                set: if t.is_query() { None } else { Some(t) },",
+   "                set: Some(t),"),
+  ("cmp: a clock reply is seconds then nanoseconds", "csp-core/src/cmp.rs",
+   "        out[Header::LEN..Header::LEN + 4].copy_from_slice(&self.tv_sec.to_be_bytes());\n        out[Header::LEN + 4..Self::LEN].copy_from_slice(&self.tv_nsec.to_be_bytes());",
+   "        out[Header::LEN..Header::LEN + 4].copy_from_slice(&self.tv_nsec.to_be_bytes());\n        out[Header::LEN + 4..Self::LEN].copy_from_slice(&self.tv_sec.to_be_bytes());"),
   ("cmp: a refused clock set is not reported as done", "csp/src/service.rs",
    "                if !hooks.set_clock(t.into()) {\n                    return Ok(None);\n                }",
    "                let _ = hooks.set_clock(t.into());"),
