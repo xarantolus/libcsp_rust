@@ -4351,3 +4351,41 @@ node-level tests cover directly. The one version-branched line in `csp/src/servi
 `rtable_save.rs` already pins that number at both versions. I started this cycle intending to
 write a v1 CMP test on the assumption that the netmask difference changed where packets go.
 It does not. Recorded here so the next reader does not repeat the assumption.
+
+### `ROUTE_SET_V2` and the 32-bit `PEEK`/`POKE` had no client either
+
+2026-08-28, fourth cycle of the sweep. With CLOCK done I counted the remaining CMP codes by
+which client had ever read the port's answer: IDENT a hand-rolled one, IF_STATS and CLOCK
+libcsp's own, PEEK_V2 a real `csp_transaction`. **ROUTE_SET_V2, PEEK and POKE: none.**
+ROUTE_SET is the code by which ground rewrites a satellite's routing table, and the 32-bit
+memory codes are the ones every pre-v2 ground tool speaks.
+
+`difftest/tests/node_cmp_route_set.rs` and `node_cmp_peek_v1.rs` drive all three through
+libcsp's own inline clients (`csp_cmp_route_set_v2`, `csp_cmp_peek`, `csp_cmp_poke`), each
+of which sends with `CSP_O_CRC32` and demands a reply of exactly the size it computes. The
+port came out clean on all three; this pins. Controls, grepped for before running:
+
+| control | result |
+|---|---|
+| the route_set echo transposes `dest_node` and `next_hop_via` | the client reads `(via, dest)` |
+| the route_set echo blanks the interface name | `""` for `"0123456789"` |
+| the 32-bit peek address goes out little-endian | the echo is byte-reversed |
+| the v1 peek tail is dropped (existing mutation) | an 11-byte reply where the client demands 14 |
+
+Three new mutations. The fourth was already `cmp: peek tail zeroed`, which the corpus
+moved; now a real client moves it too.
+
+**One thing I got wrong, caught by the test not by reading.** The first run of both files
+"passed" the refusal case and failed the others with an empty reply: the join copied nothing
+back. I had sized the Rust buffer as the sum of `struct csp_cmp_message`'s fields, 207, and
+`sizeof` is **210** — the union's members are *not* packed (only `if_stats` is), so
+`peek_v2`'s `uint64_t` pads the union to a multiple of eight. The shim's `maxlen >= n` guard
+then silently copied nothing. Had the refusal test been the only one, the file would have
+passed with a client that never read a byte. The shim now copies what fits and the buffer
+is 256; the packed-outer-unpacked-inner layout is noted at the constant.
+
+**Measured, and worth writing down: the address echo differs, deliberately, in both peek
+forms.** `csp_cmp_peek_handler` byte-swaps `addr` in place and never swaps it back, so a C
+node's reply carries the address in *host* order. The port echoes what arrived. The v2 test
+already records this; the v1 test now asserts the port's side of it, so the divergence is
+pinned in both forms rather than assumed to match.

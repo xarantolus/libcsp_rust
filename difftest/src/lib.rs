@@ -176,6 +176,16 @@ unsafe extern "C" {
     fn shim_service_join(value: *mut u32) -> c_int;
     fn shim_cmp_clock_start(node: u16, tv_sec: u32, tv_nsec: u32) -> c_int;
     fn shim_cmp_clock_join(tv_sec: *mut u32, tv_nsec: *mut u32) -> c_int;
+    fn shim_cmp_route_set_v2_start(
+        node: u16,
+        dest: u16,
+        netmask: u16,
+        via: u16,
+        ifname: *const u8,
+    ) -> c_int;
+    fn shim_cmp_peek_start(node: u16, addr: u32, len: u8) -> c_int;
+    fn shim_cmp_poke_start(node: u16, addr: u32, data: *const u8, len: u8) -> c_int;
+    fn shim_cmp_raw_join(out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -1043,6 +1053,87 @@ pub fn c_cmp_clock_join() -> Result<(u32, u32), i32> {
         return Err(status);
     }
     Ok((s, ns))
+}
+
+/// What libcsp's `struct csp_cmp_route_set_v2_msg` carries back, host-order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CRouteSet {
+    pub dest: u16,
+    pub netmask: u16,
+    pub via: u16,
+    pub interface: String,
+}
+
+/// Begin a real `csp_cmp_route_set_v2` against `node` and return the request it put on the
+/// wire. `csp_read` blocks, so the client runs on its own thread; finish with
+/// [`c_cmp_route_set_v2_join`].
+pub fn c_cmp_route_set_v2_start(
+    node: u16,
+    dest: u16,
+    netmask: u16,
+    via: u16,
+    ifname: &str,
+) -> Vec<Vec<u8>> {
+    let name = std::ffi::CString::new(ifname).expect("no interior nul");
+    // SAFETY: `name` outlives the call; the shim copies it before returning.
+    let n = unsafe { shim_cmp_route_set_v2_start(node, dest, netmask, via, name.as_ptr().cast()) };
+    assert!(
+        n >= 0,
+        "the C client could not start a CMP route_set request: {n}"
+    );
+    captured_frames()
+}
+
+/// Larger than `sizeof(struct csp_cmp_message)`, which is 210 -- the union's unpacked
+/// members pad it past the 207 its fields sum to. The shim copies what fits.
+const C_CMP_MESSAGE_LEN: usize = 256;
+
+fn c_cmp_raw_join() -> Result<[u8; C_CMP_MESSAGE_LEN], i32> {
+    let mut buf = [0u8; C_CMP_MESSAGE_LEN];
+    // SAFETY: `buf` is exactly the struct's size; the shim bounds-checks against `maxlen`.
+    let status = unsafe { shim_cmp_raw_join(buf.as_mut_ptr(), buf.len() as c_int) };
+    if status != 0 {
+        return Err(status);
+    }
+    Ok(buf)
+}
+
+/// libcsp's verdict on the port's ROUTE_SET_V2 reply and the fields it decoded.
+pub fn c_cmp_route_set_v2_join() -> Result<CRouteSet, i32> {
+    let b = c_cmp_raw_join()?;
+    let name_end = b[8..8 + 11].iter().position(|&x| x == 0).unwrap_or(11);
+    Ok(CRouteSet {
+        dest: u16::from_be_bytes([b[2], b[3]]),
+        via: u16::from_be_bytes([b[4], b[5]]),
+        netmask: u16::from_be_bytes([b[6], b[7]]),
+        interface: String::from_utf8_lossy(&b[8..8 + name_end]).into_owned(),
+    })
+}
+
+/// Begin a real `csp_cmp_peek` (32-bit address) and return the request it put on the wire.
+pub fn c_cmp_peek_start(node: u16, addr: u32, len: u8) -> Vec<Vec<u8>> {
+    // SAFETY: the shim owns the thread and the message for the life of the exchange.
+    let n = unsafe { shim_cmp_peek_start(node, addr, len) };
+    assert!(n >= 0, "the C client could not start a CMP peek: {n}");
+    captured_frames()
+}
+
+/// Begin a real `csp_cmp_poke` (32-bit address) and return the request it put on the wire.
+pub fn c_cmp_poke_start(node: u16, addr: u32, data: &[u8]) -> Vec<Vec<u8>> {
+    let len = u8::try_from(data.len()).expect("a poke is at most 200 bytes");
+    // SAFETY: the shim copies `data` before returning.
+    let n = unsafe { shim_cmp_poke_start(node, addr, data.as_ptr(), len) };
+    assert!(n >= 0, "the C client could not start a CMP poke: {n}");
+    captured_frames()
+}
+
+/// libcsp's verdict on a PEEK/POKE reply: the address bytes **as they sit in the struct**
+/// (a C node hands them back host-order, the port big-endian -- see `node_cmp_peek_v2.rs`)
+/// and the `len` data bytes.
+pub fn c_cmp_peek_join() -> Result<([u8; 4], Vec<u8>), i32> {
+    let b = c_cmp_raw_join()?;
+    let len = b[6] as usize;
+    Ok(([b[2], b[3], b[4], b[5]], b[7..7 + len].to_vec()))
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.
