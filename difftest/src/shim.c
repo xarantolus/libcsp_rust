@@ -935,6 +935,31 @@ int shim_node_promisc_read(uint8_t * out, uint16_t * dst) {
  * but how many peers the application can still serve, and whether refusing the rest costs
  * anything permanent.
  */
+/* Accept and read everything waiting on `port`, then close: returns packets read. */
+/* Read everything waiting on the connection `shim_node_send_on` holds for `port` --
+   accepting one if none is held -- WITHOUT closing it. Returns packets read. */
+int shim_node_read_held(uint8_t port) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	if (shim_held[port] == NULL) { shim_held[port] = csp_accept(&shim_sockets[port], 0); }
+	if (shim_held[port] == NULL) { return 0; }
+	int n = 0;
+	csp_packet_t * p;
+	while ((p = csp_read(shim_held[port], 0)) != NULL) { csp_buffer_free(p); n++; }
+	return n;
+}
+
+int shim_node_read_count(uint8_t port) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	int n = 0;
+	csp_conn_t * conn;
+	while ((conn = csp_accept(&shim_sockets[port], 0)) != NULL) {
+		csp_packet_t * p;
+		while ((p = csp_read(conn, 0)) != NULL) { csp_buffer_free(p); n++; }
+		csp_close(conn);
+	}
+	return n;
+}
+
 int shim_node_accept_count(uint8_t port) {
 	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
 	int n = 0;

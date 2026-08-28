@@ -4714,3 +4714,48 @@ back through the real client's byte-by-byte check; the port to the C's ping serv
 back; and a different secret on one side, refused by both (`autherr` on the port, silence
 from the C). **All three came out clean** — the first full cycle since the fourth that
 pinned rather than fixed. One mutation, on the derivation.
+
+### The edges of the RDP state machine, row by row against the C
+
+2026-08-28, fourteenth cycle. After four consecutive RDP defects I read
+`csp_rdp_new_packet`'s "BIG FAT switch" (`csp_rdp.c:527`) decision by decision against
+`on_packet`, then put every edge to a real C server and to the port as server with
+hand-built frames, one fresh connection per row (`difftest/tests/node_rdp_edges.rs`). Two
+of my own readings were wrong before a line of the port changed, which is why the rows are
+measured and not reasoned: a duplicate SYN in `SYN_RCVD` draws *nothing* (it fails the
+`SYN or !ACK` test with `seq == rcv_irs` and is ignored, before the window check that
+would resend `SYN|ACK`), and out-of-order data inside the window is held *in silence*
+(`csp_rdp_rx_queue_add` succeeds and the C goes to `accepted_open` without
+`csp_rdp_check_ack`).
+
+| row | C | port before |
+|---|---|---|
+| data with ACK, no handshake | `RST` | silence |
+| second SYN in `SYN_RCVD` | silence | silence |
+| data at `cur+3` (window 4) | held, silence | held, silence |
+| data at `cur+6` — inside `2w = 8`, outside a constant 5 | held, silence | **re-acknowledged and dropped** |
+| data at `cur+20` | silence | **re-acknowledged** |
+| in-order data with `ack_nr` far outside `[snd_una-1-2w, snd_nxt-1]` | **discarded** | **delivered**, `snd_una` moved to the bogus number |
+| in-order data | `ACK`, delivered | `ACK`, delivered |
+| the same packet again | silence | **re-acknowledged** |
+
+Four fixes, all the C's lines: the sequence window is `[rcv_cur+1, rcv_cur+2w]` with `w` the
+**negotiated** window (`csp_rdp.c:653`), not a constant; a packet outside it is discarded in
+silence; the acknowledgement number is range-checked first (`:661`) and a packet failing
+it is discarded, data and all — before this a spoofed or garbled `ack_nr` released the
+port's unacknowledged copies and moved its send window; and anything but a bare SYN
+arriving on a closed connection is answered with `RST` (`:535`). Two unit tests that pinned
+the re-acknowledgements are rewritten to the measured rule; their rationale — "silence
+makes the peer retransmit forever" — was wrong, since the peer gives up after
+`MAX_RETRANSMITS`, which is the C's answer to a lost acknowledgement too. Four mutations.
+
+**Harness lesson, recorded because it cost two rows:** watching a port in `c_node_exchange`
+makes the harness accept, read and `csp_close`, and the C's close is an `ACK|RST` on the
+wire — so the first version of this test read the harness's own reset as the protocol's
+answer in five rows. `c_node_read_held` reads without closing.
+
+One row compares delivery only. After `cur+6` is held and `cur+1..cur+5` arrive, both
+stacks deliver all six in order, but the C acknowledged four of the five fill packets and
+the port five. That is a difference in acknowledgement cadence under reordering, observed
+and not explained here; it does not change what the application receives, and the row's
+purpose — that `cur+6` is inside the C's `2w` window and held — is what it pins.
