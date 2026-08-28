@@ -1235,6 +1235,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             self.counters.malformed += 1;
             return Err(Routed::Dropped(DropReason::Malformed));
         }
+        // RDP control is originated by this node, so it carries the connection's flags and
+        // must carry their trailers too -- `csp_rdp_send_cmp` goes through
+        // `csp_send_direct` with `from_me` set like anything else.
+        let out_flags = reply.id().flags;
+        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {
+            self.counters.malformed += 1;
+            return Err(Routed::Dropped(DropReason::Malformed));
+        }
         let dst = reply.id().dst;
         let mut hops = [crate::route_policy::Hop {
             iface: 0,
@@ -1298,6 +1306,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             return Err(Routed::Dropped(DropReason::Malformed));
         };
         if reply.set_payload(&buf[..n]).is_err() {
+            self.counters.malformed += 1;
+            return Err(Routed::Dropped(DropReason::Malformed));
+        }
+        // RDP control is originated by this node, so it carries the connection's flags and
+        // must carry their trailers too -- `csp_rdp_send_cmp` goes through
+        // `csp_send_direct` with `from_me` set like anything else.
+        let out_flags = reply.id().flags;
+        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {
             self.counters.malformed += 1;
             return Err(Routed::Dropped(DropReason::Malformed));
         }

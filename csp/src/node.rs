@@ -967,6 +967,17 @@ impl<
                     out_id.dst = first.dst;
                     packet.set_id(out_id);
                 }
+                // Only traffic this node originates is protected -- `csp_io.c:249`'s
+                // `if (from_me)`, which is `routed_from.is_none()` here. A forwarded packet
+                // already carries whatever its sender put on it, and appending again would
+                // corrupt it.
+                // `csp_send_direct_iface` frees the packet and counts `tx_error` when the
+                // append fails (`csp_io.c:290`); here the caller gets it back to release.
+                if routed_from.is_none()
+                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()
+                {
+                    return Outbound::NoRoute(packet, Unroutable::NoRoute);
+                }
                 Outbound::Transmit {
                     iface: first.iface,
                     via: first.via,
@@ -1564,10 +1575,24 @@ mod tests {
             csp_core::flags::CRC32,
             "CSP_O_CRC32 sets CSP_FCRC32 in csp_connect"
         );
+        // A MAC cannot be appended without a key, and `csp_hmac_append` failing is
+        // `goto tx_err` in the C: the packet is freed and `tx_error` counted, not sent
+        // unauthenticated with the flag set (`csp_io.c:249-256`).
+        let c = n.connect(2, 8, 20, o::HMAC_REQ, 0).unwrap();
+        let p = n.packet().unwrap();
+        assert!(
+            matches!(n.send(c, p, 0), Ok(Outbound::NoRoute(..))),
+            "an HMAC connection on a node with no key must refuse rather than emit an \
+             unprotected packet claiming to be protected"
+        );
+        // The table holds four and each check above opened one.
+        n.close(c).unwrap();
+        n.router.hmac_key = Some(b"0123456789abcdef");
         assert_eq!(
             flags_on_the_wire(&mut n, o::HMAC_REQ),
             csp_core::flags::HMAC
         );
+        n.router.hmac_key = None;
         // csp_conn.c:279 — an explicit prohibition clears the request rather than being a
         // contradiction that stops the connection.
         assert_eq!(flags_on_the_wire(&mut n, o::CRC32_REQ | o::CRC32_PROHIB), 0);
