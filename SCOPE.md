@@ -4432,3 +4432,34 @@ checksum the way `csp_sendto_reply(.., CSP_O_SAME)` would.
 and a node with no policy and no connection asking for one accepts a plain packet exactly as
 before — the 46 records behind `security: a plain packet with no policy is accepted` all still
 move.
+
+### The promiscuous tap took the last buffers on the bus it was watching
+
+2026-08-28, sixth cycle. Found by listing every `if` in the pinned C that no citation in
+this repository points at, file by file, and reading the ones with a rule behind them.
+`csp_promisc.c` had eight decision points and no citation at all.
+
+`csp_promisc_add` (`csp_promisc.c:59`) refuses to clone a packet for the tap when
+`csp_buffer_remaining() <= CSP_PROMISC_BUFFER_RESERVE`, a quarter of the pool
+(`csp_promisc.c:16`). The comment says why: *"Yield to real traffic when the pool runs low."*
+The packet is still delivered; only the copy is skipped, and `csp_dbg_conn_ovf` counts it.
+The port's tap called `deep_copy()`, which is `acquire(0)`: it cloned down to the last
+buffer. A diagnostic that takes the last buffers turns a busy bus into a node that cannot
+receive — and the tap is switched on precisely when someone is already debugging a busy bus.
+
+`difftest/tests/node_promisc_reserve.rs`, both stacks held down to exactly the reserve by
+taking buffers out of the pool (a new `shim_buffers_hold`), then one packet for a bound port:
+
+| | delivered | tap |
+|---|---|---|
+| C, 15 buffers, 3 left | yes | nothing, `csp_dbg_conn_ovf` |
+| port before, 8 slots, 2 left | yes | **a copy** |
+
+Fixed with the C's arithmetic — `pool.available() <= pool.capacity() / 4`, the divisor a
+named constant citing the line — counted in `promisc_missed`. One mutation.
+
+**Worth writing down from the same sweep, none of them defects:** `csp_iflist_add` refuses
+a duplicate name and `csp_iflist_get_by_subnet` skips a zero netmask (both already in
+`IfList`, both tested); `csp_buffer_get`'s reserve is `<=` on both sides;
+`csp_crc32_verify` refuses a body shorter than the checksum on both; `csp_bind` on a bound
+port is an error on both, though the port's is `TableFull` where the C says "in use".

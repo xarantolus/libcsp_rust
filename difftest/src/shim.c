@@ -954,6 +954,28 @@ void shim_node_check_timeouts(void) {
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 
+/*
+ * Hold buffers out of the pool, so a rule gated on `csp_buffer_remaining()` -- the
+ * promiscuous tap's reserve, `csp_promisc.c:59` -- is reachable by allocation rather than by
+ * traffic. Returns how many are held after the call.
+ */
+#define SHIM_HOLD_MAX 32
+static csp_packet_t *shim_held_bufs[SHIM_HOLD_MAX];
+static int           shim_held_n;
+
+int shim_buffers_hold(int n) {
+	while (n-- > 0 && shim_held_n < SHIM_HOLD_MAX) {
+		csp_packet_t *p = csp_buffer_get(0);
+		if (p == NULL) { break; }
+		shim_held_bufs[shim_held_n++] = p;
+	}
+	return shim_held_n;
+}
+
+void shim_buffers_release(void) {
+	while (shim_held_n > 0) { csp_buffer_free(shim_held_bufs[--shim_held_n]); }
+}
+
 /* Counters on the capture interface, so a test can see which path a packet took. */
 void shim_node_counters(uint32_t *rx, uint32_t *tx, uint32_t *drop, uint32_t *rx_error,
                         uint32_t *tx_error, uint32_t *autherr) {

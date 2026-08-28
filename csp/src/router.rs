@@ -112,6 +112,10 @@ pub enum Routed {
     Dropped(DropReason),
 }
 
+/// The promiscuous tap yields when the pool is down to this fraction of its capacity:
+/// `CSP_PROMISC_BUFFER_RESERVE` is `CSP_BUFFER_COUNT / 4` (`csp_promisc.c:16`).
+const PROMISC_RESERVE_DIVISOR: usize = 4;
+
 /// Why a packet was not delivered.
 ///
 /// Distinguishable on purpose: "no route" and "port not bound" and "the receiving
@@ -616,9 +620,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         };
 
         // The promiscuous tap sees a *copy*, so it can never affect delivery. The C's tap
-        // clones too, but drops silently when its queue is full.
+        // clones too, but drops silently when its queue is full -- and yields outright when
+        // the pool is down to its last quarter (`csp_promisc.c:59`, "Yield to real traffic
+        // when the pool runs low"): a diagnostic must not take the last buffers on the bus
+        // it was switched on to watch. Measured in `difftest/tests/node_promisc_reserve.rs`.
         if self.promisc_enabled {
-            if self.promisc_len < self.promisc.len() {
+            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {
+                self.promisc_missed += 1;
+            } else if self.promisc_len < self.promisc.len() {
                 if let Some(copy) = packet.deep_copy() {
                     for slot in self.promisc.iter_mut() {
                         if slot.is_none() {
