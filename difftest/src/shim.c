@@ -1427,9 +1427,19 @@ int shim_client_request(int kind, uint16_t dst, unsigned int size, uint8_t opts)
  *
  * Returns what the transaction returned: the reply length, or 0 for "refused".
  */
-int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, int reply_len,
-                            int inlen, uint8_t *out, int *out_len) {
-	csp_conn_t *conn = csp_connect(CSP_PRIO_NORM, dst, dport, 0, 0);
+/*
+ * The same, with the connection opened under `opts` and the reply carrying `reply_flags`.
+ *
+ * `csp_route.c:288` checks a reply against `conn->opts` -- the options `csp_connect` stored
+ * on *this* connection (`csp_conn.c:320`) -- not against anything node-wide. So a connection
+ * opened with `CSP_O_CRC32` refuses an unchecksummed reply while one opened with `0` takes it,
+ * and only a client that asked for a protection can show the difference. A `reply_flags` of
+ * `CSP_FCRC32` appends the checksum the way `csp_sendto_reply(.., CSP_O_SAME)` would.
+ */
+int shim_client_transaction_opts(uint16_t dst, uint8_t dport, uint32_t opts, uint8_t reply_flags,
+                                 const uint8_t *reply, int reply_len,
+                                 int inlen, uint8_t *out, int *out_len) {
+	csp_conn_t *conn = csp_connect(CSP_PRIO_NORM, dst, dport, 0, opts);
 	if (conn == NULL) { return -1; }
 
 	/* A reply comes back with the ports swapped, from the node we addressed. */
@@ -1449,6 +1459,8 @@ int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, i
 	if (reply_len > (int)sizeof(p->data)) { csp_buffer_free(p); csp_close(conn); return -1; }
 	memcpy(p->data, reply, (size_t)reply_len);
 	p->length = (uint16_t)reply_len;
+	p->id.flags = reply_flags;
+	if (reply_flags & CSP_FCRC32) { csp_crc32_append(p); }
 	csp_id_prepend(p);
 
 	uint8_t frame[SHIM_FRAME_MAX];
@@ -1472,6 +1484,11 @@ int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, i
 	}
 	csp_close(conn);
 	return ret;
+}
+
+int shim_client_transaction(uint16_t dst, uint8_t dport, const uint8_t *reply, int reply_len,
+                            int inlen, uint8_t *out, int *out_len) {
+	return shim_client_transaction_opts(dst, dport, 0, 0, reply, reply_len, inlen, out, out_len);
 }
 
 /* --- address aliases: a second address the node answers to ------------------ */

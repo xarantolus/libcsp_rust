@@ -66,7 +66,7 @@ MUTANTS = [
   # A reply to a connection this node opened lands on an ephemeral port nothing bound.
   # Refusing it made `connect` useless, and every test passed anyway.
   ("conn: a connection is an endpoint too", "csp/src/router.rs",
-   "        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {",
+   "        if !self.is_bound(id.dport) && existing.is_none() {",
    "        if !self.is_bound(id.dport) {"),
   # An unacknowledged packet must be resent, and the resent frame has to be one a real C
   # peer accepts -- only a peer notices a malformed retransmission.
@@ -357,6 +357,14 @@ MUTANTS = [
   ("client: the shutdown word is the C's", "csp/src/service.rs",
    "pub const SHUTDOWN_MAGIC: u32 = 0xD1E5_529A;",
    "pub const SHUTDOWN_MAGIC: u32 = 0xD1E5_529B;"),
+  # csp_route.c:288 -- the endpoint is the connection when one exists. Checked against the
+  # node-wide value alone, a bare reply to a CRC32 connection reached the application.
+  ("security: a reply is held to its own connection's policy", "csp/src/router.rs",
+   "        let policy = existing\n            .and_then(|h| self.conns.opts(h).ok())\n            .unwrap_or(self.endpoint_opts);",
+   "        let policy = self.endpoint_opts;"),
+  ("security: an accepted connection inherits the socket policy", "csp/src/router.rs",
+   "                match self.conns.alloc(reply, self.endpoint_opts, now_ms) {",
+   "                match self.conns.alloc(reply, 0, now_ms) {"),
   ("security: whole policy", "csp-core/src/security.rs",
    "    let mut body = payload;", "    let mut body = payload;\n    if true { return Ok(body); }"),
   # The CMP server. Every refusal below is a `goto discard` in the C: it answers nothing,
