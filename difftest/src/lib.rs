@@ -166,6 +166,10 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_node_sfp_send_on(port: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
+    fn shim_rdp_connect_start(dst: u16, dport: u8) -> c_int;
+    fn shim_rdp_connect_join() -> c_int;
+    fn shim_rdp_initiator_send(body: *const u8, len: c_int) -> c_int;
+    fn shim_rdp_initiator_close();
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -848,6 +852,56 @@ pub fn c_node_sfp_send_on(port: u8, body: &[u8], mtu: u32) -> Result<Vec<Vec<u8>
         }
     }
     Ok(frames)
+}
+
+/// Read whatever the shim last captured on the wire.
+fn captured_frames() -> Vec<Vec<u8>> {
+    let mut frames = Vec::new();
+    // SAFETY: the capture array is fixed-size and bounds-checked on the C side.
+    unsafe {
+        for i in 0..shim_node_tx_count() {
+            let mut buf = vec![0u8; 512];
+            let k = shim_node_tx_get(i, buf.as_mut_ptr());
+            if k > 0 {
+                buf.truncate(k as usize);
+                frames.push(buf);
+            }
+        }
+    }
+    frames
+}
+
+/// Begin a real `csp_connect(..., CSP_SO_RDPREQ)` on the C node and return its SYN.
+///
+/// `csp_rdp_connect` blocks until a router task answers, so the call runs on its own thread
+/// and the caller drives the exchange. Finish with [`c_rdp_connect_join`].
+pub fn c_rdp_connect_start(dst: u16, dport: u8) -> Vec<Vec<u8>> {
+    // SAFETY: the shim owns the thread and the connection for the life of the exchange.
+    let n = unsafe { shim_rdp_connect_start(dst, dport) };
+    assert!(n >= 0, "the C node could not start an RDP connect: {n}");
+    captured_frames()
+}
+
+/// libcsp's own verdict on the handshake: `true` if `csp_connect` returned a connection.
+pub fn c_rdp_connect_join() -> bool {
+    // SAFETY: joins the thread started above; a no-op if none is running.
+    unsafe { shim_rdp_connect_join() == 1 }
+}
+
+/// Send one datagram on the C initiator's connection and return the frames it produced.
+pub fn c_rdp_initiator_send(body: &[u8]) -> Vec<Vec<u8>> {
+    // SAFETY: `body` is only read during the call. Callers hold `LOCK`.
+    let n = unsafe { shim_rdp_initiator_send(body.as_ptr(), body.len() as c_int) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    captured_frames()
+}
+
+/// Close the C initiator's connection.
+pub fn c_rdp_initiator_close() {
+    // SAFETY: idempotent on the C side.
+    unsafe { shim_rdp_initiator_close() }
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.

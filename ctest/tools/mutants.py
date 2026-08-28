@@ -802,6 +802,11 @@ MUTANTS = [
   ("conn: a client connection still checks the port", "csp/src/conn.rs",
    "                Kind::Client => c.idin.dport == id.dport,",
    "                Kind::Client => true,"),
+  # The port as RDP *responder*: a SYN|ACK that is only a SYN. libcsp's SYN_SENT arm
+  # refuses it and csp_connect returns NULL, which node_rdp_responder.rs asserts.
+  ("rdp: the answer to a syn acknowledges it", "csp-core/src/rdp.rs",
+   "                    return Action::SendControl(Header {\n                        flags: SYN | ACK,\n                        seq_nr: self.snd_iss,\n                        ack_nr: self.rcv_irs,",
+   "                    return Action::SendControl(Header {\n                        flags: SYN,\n                        seq_nr: self.snd_iss,\n                        ack_nr: self.rcv_irs,"),
   ("conn: a server connection is per peer", "csp/src/conn.rs",
    "                    c.idin.dport == id.dport && c.idin.sport == id.sport && c.idin.src == id.src",
    "                    c.idin.dport == id.dport && c.idin.sport == id.sport"),
