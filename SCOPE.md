@@ -4245,3 +4245,55 @@ the row is still true; a sweep confirmed every corpus record those 17 rows name 
 `u32`s with no conversion between them, so every integrator retypes the list by hand into the
 `if_stats` hook — in an order where a transposition is invisible. A `From` impl would remove
 the class; it is an API addition, so it is written here rather than done unasked.
+
+### The service clients only ever sent; nothing had read the port's answer
+
+2026-08-28, continuing the previous entry's vein. `difftest`'s `shim_client_request` calls
+each of `csp_services.c`'s clients with a **zero** timeout: the request reaches the wire and
+the client gives up immediately. So `every_service_request_matches_what_the_cs_client_builds`
+compares the request bytes and nothing else, and no libcsp service client had ever received
+and interpreted a reply the port produced.
+
+That is the direction an operator is in, and each client is strict about it:
+
+| client | requires of the reply | how failure reads on the ground |
+|---|---|---|
+| `csp_ping` | the echo, checked byte by byte against `i % 256` (`csp_services.c:45-50`) | returns `-1` |
+| `csp_get_memfree` | exactly 4 bytes, then `be32toh`, and it always sets `CSP_O_CRC32` | `CSP_ERR_TIMEDOUT`, value `0` |
+| `csp_get_buf_free` | the same | the same |
+| `csp_get_uptime` | the same | the same |
+
+Every one of those is indistinguishable from a node that did not answer. A reply of the wrong
+length, the wrong byte order, or without the checksum would have been invisible to every test
+here — the same shape as the CRC32 defect the previous entry records.
+
+`difftest/tests/node_service_client.rs` drives all four on a thread and the port came out
+clean: this pins rather than fixes. The values are chosen so a slip cannot land on the right
+answer — `0x1234_5678` does not survive a byte swap, where `0x01020304` half-way would look
+plausible. Three controls, all biting:
+
+| control | result |
+|---|---|
+| `encode_u32_reply` writes little-endian | `2018915346` where libcsp wanted `305419896` |
+| a ping is answered with zeros | `csp_ping` returns `-1` |
+| the u32 reply claims three bytes | `CSP_ERR_TIMEDOUT` |
+
+Two of the three are now permanent mutations. The byte-order one is **not**: `service:
+counter replies are big-endian` already swaps them, by a different anchor, and I wrote a
+second one anyway. The duplicate guard keys on `(file, target, replacement)` and cannot see
+that two different edits have the same effect — it was caught by reading the run's output,
+which is the only thing that ever catches this class.
+
+**Two things I got wrong, both caught by checking rather than by reading.**
+
+First, I passed `0x04` as `CSP_O_CRC32` to `csp_ping`. It is `CSP_SO_HMACREQ`; `CSP_O_CRC32`
+is `CSP_SO_CRC32REQ`, `0x40` (`csp_types.h:85`). The test failed with "one request, one
+reply: left 0" — the port answered an HMAC-required ping with nothing, which is correct for a
+node holding no key, but it is not the case I meant to write.
+
+Second, the third control appeared **not to bite**, and I nearly wrote it down as a limit of
+the test. The `sed` that was supposed to change `Ok(4)` to `Ok(3)` had eight spaces of indent
+where the file has four, so it matched nothing and the "control" ran against unmodified code.
+Applied properly it fails with `-3`. That is the same lesson as the split control in the
+previous entry, one step earlier: **a control is only evidence once it has actually changed
+the program**, and the cheap way to know is to grep for the mutated text before running.

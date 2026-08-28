@@ -20,7 +20,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use core::ffi::c_int;
+use core::ffi::{c_int, c_uint};
 
 unsafe extern "C" {
     fn shim_set_version(v: c_int);
@@ -172,6 +172,8 @@ unsafe extern "C" {
     fn shim_rdp_initiator_close();
     fn shim_cmp_if_stats_start(node: u16, ifname: *const u8) -> c_int;
     fn shim_cmp_if_stats_join(out: *mut u8, maxlen: c_int) -> c_int;
+    fn shim_service_start(kind: c_int, dst: u16, size: c_uint, opts: u8) -> c_int;
+    fn shim_service_join(value: *mut u32) -> c_int;
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -971,6 +973,49 @@ pub fn c_cmp_if_stats_join() -> Result<CIfStats, i32> {
         rxbytes: be(8),
         irq: be(9),
     })
+}
+
+/// Which of `csp_services.c`'s clients to run, for [`c_service_start`].
+#[derive(Debug, Clone, Copy)]
+pub enum CService {
+    /// `csp_ping`, with a payload size and connection options.
+    Ping { size: u32, opts: u8 },
+    /// `csp_get_memfree`.
+    MemFree,
+    /// `csp_get_buf_free`.
+    BufFree,
+    /// `csp_get_uptime`.
+    Uptime,
+}
+
+/// Begin one of libcsp's own service clients and return the request it put on the wire.
+///
+/// Unlike [`c_client_request`], this one waits for a reply: `csp_ping` checks the echo byte
+/// by byte, and the `csp_get_*` family demands exactly four big-endian bytes. `csp_read`
+/// blocks, so the client runs on its own thread; finish with [`c_service_join`].
+pub fn c_service_start(svc: CService, dst: u16) -> Vec<Vec<u8>> {
+    let (kind, size, opts) = match svc {
+        CService::Ping { size, opts } => (0, size, opts),
+        CService::MemFree => (1, 0, 0),
+        CService::BufFree => (2, 0, 0),
+        CService::Uptime => (3, 0, 0),
+    };
+    // SAFETY: the shim owns the thread for the life of the exchange.
+    let n = unsafe { shim_service_start(kind, dst, size as c_uint, opts) };
+    assert!(n >= 0, "the C client could not start: {n}");
+    captured_frames()
+}
+
+/// libcsp's own verdict: `(status, value)`.
+///
+/// `status` is elapsed milliseconds or `-1` for `csp_ping`, and `CSP_ERR_NONE` (0) or
+/// `CSP_ERR_TIMEDOUT` (-3) for the rest; `value` is the number the `csp_get_*` family
+/// decoded, zero for a ping.
+pub fn c_service_join() -> (i32, u32) {
+    let mut v = 0u32;
+    // SAFETY: joins the thread started above; a no-op if none is running.
+    let status = unsafe { shim_service_join(&mut v) };
+    (status, v)
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.
