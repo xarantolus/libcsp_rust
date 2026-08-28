@@ -143,6 +143,11 @@ MUTANTS = [
   ("route: fan-out to every match", "csp/src/router.rs",
    "                Some(mut c) => {\n                    Self::set_dst(&mut c, h.dst);\n                    self.push_pending(h.iface, h.via, c.into_index());\n                }",
    "                Some(_c) => {}"),
+  # csp_promisc.c:59 -- "Yield to real traffic when the pool runs low". The port cloned down
+  # to zero: the tap took the last buffers on the bus it was switched on to watch.
+  ("promisc: the tap yields to real traffic", "csp/src/router.rs",
+   "            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {\n                self.promisc_missed += 1;\n            } else if self.promisc_len < self.promisc.len() {",
+   "            if self.promisc_len < self.promisc.len() {"),
   ("promisc: tap runs at all", "csp/src/router.rs",
    "        if self.promisc_enabled {", "        if false {"),
   ("promisc: tap sees forwarded", "csp/src/router.rs",
@@ -337,8 +342,8 @@ MUTANTS = [
   # those two until the bytes were added, and a tap that copied the wrong packet or
   # truncated it reports the same count and the same destination.
   ("promisc: the tap copies the whole payload", "csp/src/router.rs",
-   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {\n                if let Some(copy) = packet.deep_copy() {",
-   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {\n                if let Some(mut copy) = packet.deep_copy() {\n                    copy.with_payload_mut(|b| (b.len().saturating_sub(1), true));"),
+   "            } else if self.promisc_len < self.promisc.len() {\n                if let Some(copy) = packet.deep_copy() {",
+   "            } else if self.promisc_len < self.promisc.len() {\n                if let Some(mut copy) = packet.deep_copy() {\n                    copy.with_payload_mut(|b| (b.len().saturating_sub(1), true));"),
   # Aliases decide whether a command for the node's second address is delivered or
   # forwarded back out. Nothing named one until node_alias.rs.
   ("iflist: an alias is one of our addresses", "csp/src/iflist.rs",
@@ -809,11 +814,11 @@ MUTANTS = [
   # The promiscuous tap. Its three records sat in the "no mutation could move" list purely
   # because nothing had ever switched the tap off.
   ("promisc: the tap captures at all", "csp/src/router.rs",
-   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {",
-   "        if false {\n            if self.promisc_len < self.promisc.len() {"),
+   "        if self.promisc_enabled {\n            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {",
+   "        if false {\n            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {"),
   ("promisc: the tap runs before the security check", "csp/src/router.rs",
-   "        if self.promisc_enabled {\n            if self.promisc_len < self.promisc.len() {",
-   "        if self.promisc_enabled && self.endpoint_opts == 0 {\n            if self.promisc_len < self.promisc.len() {"),
+   "        if self.promisc_enabled {\n            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {",
+   "        if self.promisc_enabled && self.endpoint_opts == 0 {\n            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {"),
   ("conn: a second packet finds the open connection", "csp/src/conn.rs",
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        for (i, c) in self.conns.iter().enumerate() {",
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
