@@ -1734,6 +1734,85 @@ int shim_cmp_if_stats_join(uint8_t * out, int maxlen) {
 	return shim_cmp_result;
 }
 
+/* --- libcsp's own service clients, with a real timeout ---------------------- */
+
+/*
+ * `shim_client_request` above calls each of `csp_services.c`'s clients with a **zero**
+ * timeout, so the request reaches the wire and the client gives up immediately. That
+ * compares the request bytes and nothing else: no libcsp service client had ever received
+ * and interpreted a reply the port produced.
+ *
+ * That is the direction an operator is in. `csp_ping` returns the round trip or -1 after
+ * checking the echo byte by byte; `csp_get_memfree`, `csp_get_buf_free` and `csp_get_uptime`
+ * demand a reply of exactly four bytes, run it through `be32toh`, and hand back
+ * `CSP_ERR_TIMEDOUT` for anything else -- so a reply of the wrong length, the wrong byte
+ * order or without the checksum they all request reads on the ground as a node that did not
+ * answer.
+ *
+ * `csp_read` blocks, so the client runs on its own thread and the caller drives the
+ * exchange, as for `shim_rdp_connect_start`.
+ */
+enum { SHIM_SVC_PING = 0, SHIM_SVC_MEMFREE, SHIM_SVC_BUFFREE, SHIM_SVC_UPTIME };
+
+static pthread_t    shim_svc_thread;
+static int          shim_svc_running;
+static int          shim_svc_kind;
+static uint16_t     shim_svc_dst;
+static unsigned int shim_svc_size;
+static uint8_t      shim_svc_opts;
+static volatile int shim_svc_status;
+static uint32_t     shim_svc_value;
+
+static void * shim_svc_thread_fn(void * arg) {
+	(void)arg;
+	uint32_t v = 0;
+	int st;
+	switch (shim_svc_kind) {
+		case SHIM_SVC_PING:    st = csp_ping(shim_svc_dst, 5000, shim_svc_size, shim_svc_opts); break;
+		case SHIM_SVC_MEMFREE: st = csp_get_memfree(shim_svc_dst, 5000, &v); break;
+		case SHIM_SVC_BUFFREE: st = csp_get_buf_free(shim_svc_dst, 5000, &v); break;
+		case SHIM_SVC_UPTIME:  st = csp_get_uptime(shim_svc_dst, 5000, &v); break;
+		default: st = -99; break;
+	}
+	shim_svc_value = v;
+	shim_svc_status = st;
+	return NULL;
+}
+
+/*
+ * Begin one of libcsp's service clients against `dst` and return how many frames its
+ * request put on the wire. `size` and `opts` apply to `csp_ping` only.
+ */
+int shim_service_start(int kind, uint16_t dst, unsigned int size, uint8_t opts) {
+	if (shim_svc_running) { return -2; }
+	shim_svc_kind = kind;
+	shim_svc_dst = dst;
+	shim_svc_size = size;
+	shim_svc_opts = opts;
+	shim_svc_value = 0;
+	shim_svc_status = -1000;
+	shim_node_clear_tx();
+	if (pthread_create(&shim_svc_thread, NULL, shim_svc_thread_fn, NULL) != 0) { return -1; }
+	shim_svc_running = 1;
+	/* The request is on the wire before `csp_read` blocks; bounded so a client that sends
+	   nothing fails the test rather than hanging it. */
+	for (int i = 0; i < 3000 && shim_tx_n == 0 && shim_svc_status == -1000; i++) { usleep(1000); }
+	return shim_tx_n;
+}
+
+/*
+ * Wait for the client to return. The status is libcsp's own -- elapsed milliseconds or -1
+ * for `csp_ping`, `CSP_ERR_NONE`/`CSP_ERR_TIMEDOUT` for the others -- and `*value` carries
+ * the number the `csp_get_*` family decoded.
+ */
+int shim_service_join(uint32_t * value) {
+	if (!shim_svc_running) { return -1000; }
+	pthread_join(shim_svc_thread, NULL);
+	shim_svc_running = 0;
+	if (value != NULL) { *value = shim_svc_value; }
+	return shim_svc_status;
+}
+
 /* --- I2C: the bus address csp_i2c_tx picks --------------------------------- */
 
 /*

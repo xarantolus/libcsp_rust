@@ -792,6 +792,20 @@ MUTANTS = [
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
   ("conn: close releases the slot", "csp/src/conn.rs",
    "        c.reset();\n        Ok(n)\n    }", "        let _ = &c;\n        Ok(n)\n    }"),
+  # What libcsp's own service clients demand of a reply: the echo byte for byte, and four
+  # big-endian bytes for the csp_get_* family. Each failure reads on the ground as a node
+  # that did not answer, so none of them is visible without a real client.
+  #
+  # No byte-order entry here: `counter replies are big-endian` above already swaps them, by
+  # a different anchor. The duplicate guard keys on (file, target, replacement) and cannot
+  # see that two different edits have the same effect -- this one was caught by reading the
+  # run's output, not by the tool.
+  ("service: the u32 reply is four bytes", "csp/src/service.rs",
+   "    out[..4].copy_from_slice(&value.to_be_bytes());\n    Ok(4)",
+   "    out[..4].copy_from_slice(&value.to_be_bytes());\n    Ok(3)"),
+  ("service: a ping is echoed verbatim", "csp/src/service.rs",
+   "            out[..request_payload.len()].copy_from_slice(request_payload);",
+   "            out[..request_payload.len()].fill(0);"),
   # The trailers `csp_send_direct_iface` appends to everything this node originates
   # (csp_io.c:247-271). Setting the flag without the bytes is what made every CMP reply
   # undeliverable to a stock libcsp ground station; each call site is covered separately.
