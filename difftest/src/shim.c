@@ -5,8 +5,10 @@
  * disagreement is a disagreement between the two implementations, not between the
  * implementations and this file.
  */
+#include <pthread.h>
 #include <string.h>
 #include <stdint.h>
+#include <unistd.h>
 
 #include <csp/csp.h>
 #include <csp/csp_id.h>
@@ -1576,6 +1578,93 @@ int shim_node_sfp_send_on(uint8_t port, const uint8_t *body, int len, uint32_t m
 	shim_node_pump();
 	if (ret != CSP_ERR_NONE) { return -100 + ret; }
 	return shim_tx_n;
+}
+
+/* --- the C as the RDP *initiator* ------------------------------------------- */
+
+/*
+ * Every RDP comparison in this harness has the port opening the connection and the C
+ * answering from its router. That leaves the port's *responder* path -- receive a SYN from a
+ * real libcsp, answer SYN|ACK, take the third leg -- never driven by a real initiator. On a
+ * satellite that is the direction that flies: ground opens the connection, the flight node
+ * answers.
+ *
+ * `csp_rdp_connect` sends the SYN and then blocks on `tx_wait` until the router task
+ * releases it (`csp_rdp.c:836`). This harness has no router task, so `csp_connect` runs on a
+ * thread of its own and the caller turns the crank from the main thread -- which is exactly
+ * the division of labour libcsp is written for.
+ *
+ * Only the SYN is emitted from the connect thread, and the main thread does not touch the tx
+ * capture until it has appeared, so the two never write it at once.
+ */
+static pthread_t    shim_rdp_thread;
+static csp_conn_t * shim_rdp_conn;
+static volatile int shim_rdp_result;
+static int          shim_rdp_running;
+static uint16_t     shim_rdp_dst;
+static uint8_t      shim_rdp_dport;
+
+static void * shim_rdp_connect_thread(void * arg) {
+	(void)arg;
+	csp_conn_t * c = csp_connect(CSP_PRIO_NORM, shim_rdp_dst, shim_rdp_dport, 0, CSP_SO_RDPREQ);
+	shim_rdp_conn = c;
+	shim_rdp_result = (c != NULL) ? 1 : 0;
+	return NULL;
+}
+
+/*
+ * Begin a real `csp_connect(..., CSP_SO_RDPREQ)` and return how many frames it put on the
+ * wire -- one SYN, which the caller feeds to the peer. Negative on failure to start.
+ */
+int shim_rdp_connect_start(uint16_t dst, uint8_t dport) {
+	if (shim_rdp_running) { return -2; }
+	shim_rdp_dst = dst;
+	shim_rdp_dport = dport;
+	shim_rdp_conn = NULL;
+	shim_rdp_result = -1;
+	shim_node_clear_tx();
+	if (pthread_create(&shim_rdp_thread, NULL, shim_rdp_connect_thread, NULL) != 0) { return -1; }
+	shim_rdp_running = 1;
+	/* The SYN is on the wire before `csp_rdp_connect` blocks; bounded so a libcsp that
+	   never sends one fails the test rather than hanging it. */
+	for (int i = 0; i < 3000 && shim_tx_n == 0 && shim_rdp_result < 0; i++) { usleep(1000); }
+	return shim_tx_n;
+}
+
+/*
+ * Wait for `csp_connect` to return and report whether libcsp opened the connection.
+ *
+ * 1 = open, 0 = libcsp gave up. This is the assertion the whole exercise is for: a real
+ * initiator's own verdict on the handshake the port answered with.
+ */
+int shim_rdp_connect_join(void) {
+	if (!shim_rdp_running) { return -1; }
+	pthread_join(shim_rdp_thread, NULL);
+	shim_rdp_running = 0;
+	return shim_rdp_result;
+}
+
+/* Send one datagram on that connection, and return the frames it produced. */
+int shim_rdp_initiator_send(const uint8_t * body, int len) {
+	if (shim_rdp_conn == NULL) { return 0; }
+	csp_packet_t * out = csp_buffer_get(0);
+	if (out == NULL) { return 0; }
+	if (len > (int)sizeof(out->data)) { csp_buffer_free(out); return 0; }
+	memcpy(out->data, body, (size_t)len);
+	out->length = (uint16_t)len;
+	shim_node_clear_tx();
+	csp_send(shim_rdp_conn, out);
+	shim_node_pump();
+	return shim_tx_n;
+}
+
+/* Close it, and pump so the teardown reaches the wire. */
+void shim_rdp_initiator_close(void) {
+	if (shim_rdp_conn != NULL) {
+		csp_close(shim_rdp_conn);
+		shim_rdp_conn = NULL;
+	}
+	shim_node_pump();
 }
 
 /* --- I2C: the bus address csp_i2c_tx picks --------------------------------- */

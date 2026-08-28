@@ -563,7 +563,7 @@ justification nobody checks decays into the same hand-wave as no justification a
 | `queue::queue_free_707` | `csp_queue_*` is an arch shim, out of scope in this file's exclusion table and marked `out-of-scope` in `api_map.tsv`. Sans-io: the caller owns the queues. |
 | `rdp::syn_options_are_bounded_above` | Behaviour covered by `a_hostile_syn_cannot_suppress_acknowledgement` (every field at its maximum) and `a_delay_count_beyond_the_window_is_bound_by_it`. The test itself reads `conn->rdp.*`. |
 | `rdp::syn_options_are_bounded_below` | Same as the row above, from the other side of the range. |
-| `rdp::syn_keeps_valid_options` | **Partial.** `window_size`, `delayed_acks` and `ack_delay_count` adoption are covered by the two cadence records; `conn_timeout` and `ack_timeout` adoption are not, and no record varies them. The nearest thing is `packet_timeout`, exercised by the retransmission record. |
+| `rdp::syn_keeps_valid_options` | Every field's adoption now has a record that varies it: `window_size`, `delayed_acks` and `ack_delay_count` by the two cadence records, `packet_timeout` by the retransmission record, `conn_timeout` by `a_proposed_conn_timeout_is_adopted` (3 000 ms proposed, idled 4 000, still answers) and `ack_timeout` by `a_proposed_ack_timeout_is_adopted` (5 000 ms proposed, `waited_ms: 5250`). The test itself reads `conn->rdp.*`. |
 | `rdp::isn_does_not_depend_on_history` | The ISN is a deliberate divergence — the port does not reproduce `rand_r` (entry above). `isn_is_a_function_of_the_clock` records the C's side; the port's is different by design. |
 | `rdp::delayed_acks_is_a_flag` | Covered by `a_nonzero_delayed_acks_is_on_not_a_count`, added the same day. |
 | `rdp::retransmit_count_resets_on_ack` | No observable consequence in the port; see the entry above. Aligned with the C anyway, and said there that no record can catch it. |
@@ -4114,3 +4114,50 @@ The third is the one that matters most, and it is a permanent assertion rather t
 one-off: every fragment must carry `FRAG | RDP` (measured `0x12`). Without it this file is
 `node_sfp.rs` again with a longer name — which is exactly the shape of the miscount it was
 written to correct.
+
+### Every RDP test had the port as the initiator; the satellite is the responder
+
+2026-08-28. Measured across the seven RDP files in `difftest/tests/`: every one has the
+port call `connect` and the C node answer from its router. `CSP_SO_RDPREQ` appears nowhere
+in the harness. So the port's **responder** path — take a SYN off the wire from a real
+libcsp, answer `SYN|ACK`, accept the third leg — had never been driven by a real initiator.
+
+That is the direction that flies. Ground opens the connection; the flight node answers.
+
+What existed: `rdp::a_syn_is_answered_with_syn_ack` compares the port's `SYN|ACK` *fields*
+against libcsp's for the same input — `flags: 12`, `seq_is_own_iss: 1`, `ack: 1000`. Good
+evidence, and it is not the question an operator has, which is whether a stock libcsp
+**accepts** what the port sends and reports the connection open. `csp_connect` returning
+`NULL` after a complete-looking exchange is what an unreachable satellite looks like from
+the ground, and nothing here could have seen it.
+
+`difftest/tests/node_rdp_responder.rs` closes it. `csp_rdp_connect` sends the SYN and then
+blocks on `tx_wait` until a router task releases it (`csp_rdp.c:836`), so the new
+`shim_rdp_connect_start` runs `csp_connect` on its own thread and the test turns the crank —
+the division of labour libcsp is written for. The verdict asserted on join is libcsp's own.
+Measured stable: 25 runs, 25 passes.
+
+Three controls, and the third is the interesting one:
+
+| control | result |
+|---|---|
+| the port answers `SYN` with no `ACK` | libcsp refuses, `csp_connect` returns `NULL` |
+| the router stops stripping the RDP trailer | five stray bytes in the application's buffer |
+| the `SYN\|ACK` acknowledges the **wrong** sequence number | **nothing happens** |
+
+The third is a property of libcsp, not a weak test. `RDP_SYN_SENT` accepts any `SYN|ACK`,
+assigns `snd_una = ack_nr + 1` and opens (`csp_rdp.c:596-606`) without ever comparing
+`ack_nr` to the `snd_iss` it sent — so RFC 908's check on the acknowledgement number is
+absent, and any peer that can guess the connection exists can complete a handshake it never
+saw the ISS of. An end-to-end test therefore cannot pin that field, and this one does not
+pretend to; the corpus record pins it by field comparison instead. Written down because the
+alternative was to add a mutation for it and report it unnoticed.
+
+**A stale claim in this file, found the same way.** The justification row for
+`rdp::syn_keeps_valid_options` read "**Partial.** … `conn_timeout` and `ack_timeout`
+adoption are not [covered], and no record varies them." Two records do:
+`a_proposed_conn_timeout_is_adopted` (3 000 ms proposed, idled 4 000, still answers) and
+`a_proposed_ack_timeout_is_adopted` (5 000 ms proposed, `waited_ms: 5250`). The row was
+written before them and never re-measured. Corrected. `untraced.py` checks that every
+untraced test *has* a justification row; it does not check that the row is still true, and
+a sweep this cycle confirmed every corpus record those rows name does still exist.
