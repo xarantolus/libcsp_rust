@@ -248,6 +248,8 @@ unsafe extern "C" {
         out_len: *mut c_int,
     ) -> c_int;
     fn shim_node_buf_free() -> c_int;
+    fn shim_buffers_hold(n: c_int) -> c_int;
+    fn shim_buffers_release();
     fn shim_node_counters(
         rx: *mut u32,
         tx: *mut u32,
@@ -1501,6 +1503,20 @@ pub fn c_node_exchange(frame: &[u8], watch_ports: &[u8]) -> NodeOutcome {
 pub fn c_node_buf_free() -> i32 {
     // SAFETY: reads one counter.
     unsafe { shim_node_buf_free() }
+}
+
+/// Take `n` buffers out of the C's pool and keep them, so `csp_buffer_remaining()` drops
+/// without any traffic. Returns how many are held in total. Give them back with
+/// [`c_buffers_release`].
+pub fn c_buffers_hold(n: i32) -> i32 {
+    // SAFETY: bounded by SHIM_HOLD_MAX on the C side. Callers hold `LOCK`.
+    unsafe { shim_buffers_hold(n) }
+}
+
+/// Return every buffer [`c_buffers_hold`] took.
+pub fn c_buffers_release() {
+    // SAFETY: frees only what the shim itself allocated. Callers hold `LOCK`.
+    unsafe { shim_buffers_release() }
 }
 
 /// What the C's KISS decoder made of a byte stream.
