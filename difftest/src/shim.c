@@ -5,6 +5,7 @@
  * disagreement is a disagreement between the two implementations, not between the
  * implementations and this file.
  */
+#include <endian.h>
 #include <pthread.h>
 #include <string.h>
 #include <stdint.h>
@@ -1732,6 +1733,62 @@ int shim_cmp_if_stats_join(uint8_t * out, int maxlen) {
 	int n = (int)sizeof(struct csp_cmp_if_stats_msg);
 	if (out != NULL && maxlen >= n) { memcpy(out, &shim_cmp_msg, (size_t)n); }
 	return shim_cmp_result;
+}
+
+/* --- libcsp's own CMP clock client ------------------------------------------ */
+
+/*
+ * `csp_cmp_clock` is the highest-consequence code the port serves and no real client had
+ * ever run it. Setting a satellite's clock wrong is not a lost packet: every timestamp in
+ * the telemetry, every scheduled window and every propagated ephemeris is wrong afterwards,
+ * and nothing on the ground says so.
+ *
+ * `csp_cmp_clock_handler` sets only when `tv_sec` is non-zero, reads back regardless, and
+ * then returns the *set* result -- so a refused set builds a reply and discards it
+ * (`csp_service_handler` drops a non-zero return). A peer that asked to set the clock and
+ * got silence learns the set failed; one that got a timestamp back would read it as
+ * confirmation. That difference is only visible to a client that waits.
+ */
+static pthread_t              shim_clk_thread;
+static int                    shim_clk_running;
+static uint16_t               shim_clk_node;
+static volatile int           shim_clk_status;
+static struct csp_cmp_message shim_clk_msg;
+
+static void * shim_clk_thread_fn(void * arg) {
+	(void)arg;
+	shim_clk_status = csp_cmp_clock(shim_clk_node, 5000, &shim_clk_msg);
+	return NULL;
+}
+
+/*
+ * Begin a real `csp_cmp_clock` against `node`, proposing `tv_sec`/`tv_nsec`.
+ *
+ * A `tv_sec` of zero is how libcsp asks to *read* the clock without setting it.
+ * Returns how many frames the request put on the wire.
+ */
+int shim_cmp_clock_start(uint16_t node, uint32_t tv_sec, uint32_t tv_nsec) {
+	if (shim_clk_running) { return -2; }
+	memset(&shim_clk_msg, 0, sizeof(shim_clk_msg));
+	shim_clk_msg.clock.tv_sec = htobe32(tv_sec);
+	shim_clk_msg.clock.tv_nsec = htobe32(tv_nsec);
+	shim_clk_node = node;
+	shim_clk_status = -1000;
+	shim_node_clear_tx();
+	if (pthread_create(&shim_clk_thread, NULL, shim_clk_thread_fn, NULL) != 0) { return -1; }
+	shim_clk_running = 1;
+	for (int i = 0; i < 3000 && shim_tx_n == 0 && shim_clk_status == -1000; i++) { usleep(1000); }
+	return shim_tx_n;
+}
+
+/* Wait for it, and hand back the timestamp libcsp decoded. */
+int shim_cmp_clock_join(uint32_t * tv_sec, uint32_t * tv_nsec) {
+	if (!shim_clk_running) { return -1000; }
+	pthread_join(shim_clk_thread, NULL);
+	shim_clk_running = 0;
+	if (tv_sec != NULL) { *tv_sec = be32toh(shim_clk_msg.clock.tv_sec); }
+	if (tv_nsec != NULL) { *tv_nsec = be32toh(shim_clk_msg.clock.tv_nsec); }
+	return shim_clk_status;
 }
 
 /* --- libcsp's own service clients, with a real timeout ---------------------- */

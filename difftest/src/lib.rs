@@ -174,6 +174,8 @@ unsafe extern "C" {
     fn shim_cmp_if_stats_join(out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_service_start(kind: c_int, dst: u16, size: c_uint, opts: u8) -> c_int;
     fn shim_service_join(value: *mut u32) -> c_int;
+    fn shim_cmp_clock_start(node: u16, tv_sec: u32, tv_nsec: u32) -> c_int;
+    fn shim_cmp_clock_join(tv_sec: *mut u32, tv_nsec: *mut u32) -> c_int;
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -1016,6 +1018,31 @@ pub fn c_service_join() -> (i32, u32) {
     // SAFETY: joins the thread started above; a no-op if none is running.
     let status = unsafe { shim_service_join(&mut v) };
     (status, v)
+}
+
+/// Begin a real `csp_cmp_clock` against `node` and return the request it put on the wire.
+///
+/// A `tv_sec` of zero is how libcsp asks to read the clock without setting it. `csp_read`
+/// blocks, so the client runs on its own thread; finish with [`c_cmp_clock_join`].
+pub fn c_cmp_clock_start(node: u16, tv_sec: u32, tv_nsec: u32) -> Vec<Vec<u8>> {
+    // SAFETY: the shim owns the thread and the message for the life of the exchange.
+    let n = unsafe { shim_cmp_clock_start(node, tv_sec, tv_nsec) };
+    assert!(
+        n >= 0,
+        "the C client could not start a CMP clock request: {n}"
+    );
+    captured_frames()
+}
+
+/// libcsp's verdict and the timestamp it decoded: `Ok((tv_sec, tv_nsec))` or its error.
+pub fn c_cmp_clock_join() -> Result<(u32, u32), i32> {
+    let (mut s, mut ns) = (0u32, 0u32);
+    // SAFETY: joins the thread started above; a no-op if none is running.
+    let status = unsafe { shim_cmp_clock_join(&mut s, &mut ns) };
+    if status != 0 {
+        return Err(status);
+    }
+    Ok((s, ns))
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.
