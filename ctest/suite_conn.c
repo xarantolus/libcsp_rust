@@ -80,14 +80,14 @@ static void setup_two_subnets(void) {
 	tx_count = 0;
 }
 
-/* One packet from a distinct peer port, so it cannot match an existing connection. */
-static bool deliver_from(uint8_t sport) {
+/* One packet from a given peer, on a given source port. */
+static bool deliver_from_src(uint16_t src, uint8_t sport) {
 	csp_packet_t * packet = csp_buffer_get(0);
 	if (packet == NULL) {
 		return false;
 	}
 	packet->id.pri = 2;
-	packet->id.src = 11;
+	packet->id.src = src;
 	packet->id.dst = LOCAL_ADDR;
 	packet->id.dport = TEST_PORT;
 	packet->id.sport = sport;
@@ -98,6 +98,11 @@ static bool deliver_from(uint8_t sport) {
 	csp_qfifo_write(packet, &ingress_if, NULL);
 	csp_route_work();
 	return true;
+}
+
+/* One packet from a distinct peer port, so it cannot match an existing connection. */
+static bool deliver_from(uint8_t sport) {
+	return deliver_from_src(11, sport);
 }
 
 /* How many connections the application can actually take, draining each. */
@@ -494,12 +499,151 @@ START_TEST(test_a_reply_reaches_the_connection_that_asked_for_it)
 }
 END_TEST
 
+/* The matching rule at `csp_conn.c:112`, which nothing on either side had ever executed.
+ *
+ * An *outgoing* connection is matched on the incoming **dport alone** — not the source
+ * address, not the source port. libcsp says why: "responses to broadcast addresses are
+ * accepted as long as the incoming port matches the unique source port of the connection".
+ *
+ * That is the whole of broadcast request/reply. A ground station that pings 16383 is
+ * answered by a dozen nodes, none of them addressed 16383 and each with its own source
+ * port; a matcher that compared the source as well would drop every one of those answers
+ * and the broadcast would look like silence. The existing reply test replies from the
+ * address the request went to, so the laxness had only ever been read, never observed.
+ */
+START_TEST(test_a_reply_from_a_different_address_reaches_the_client_connection)
+{
+	setup_stack();
+
+	/* Opened to the broadcast address, so no single peer is "the" peer. */
+	csp_conn_t * conn = csp_connect(2, MAX_NODE_ID, 20, 0, 0);
+	ck_assert_ptr_nonnull(conn);
+	const uint8_t ephemeral = (uint8_t)csp_conn_dport(conn);
+	ck_assert_uint_ne(ephemeral, TEST_PORT);
+
+	/* Two answers from two addresses, neither of them the one connected to, and on two
+	   different source ports — the client rule ignores both fields. */
+	const uint16_t answerers[2] = { 11, 12 };
+	for (int i = 0; i < 2; i++) {
+		csp_packet_t * reply = csp_buffer_get(0);
+		ck_assert_ptr_nonnull(reply);
+		reply->id.pri = 2;
+		reply->id.src = answerers[i];
+		reply->id.dst = LOCAL_ADDR;
+		reply->id.dport = ephemeral;
+		reply->id.sport = (uint8_t)(20 + i);
+		reply->id.flags = 0;
+		memcpy(reply->data, "pong", 4);
+		reply->length = 4;
+		csp_qfifo_write(reply, &ingress_if, NULL);
+		csp_route_work();
+	}
+
+	unsigned int delivered = 0;
+	csp_packet_t * p;
+	while ((p = csp_read(conn, 0)) != NULL) {
+		csp_buffer_free(p);
+		delivered++;
+	}
+
+	/* The guard. On a port that is neither bound nor any connection's ephemeral port the
+	   same reply is dropped — without this, "delivered 2" is equally satisfied by a node
+	   that hands every packet to every connection it holds. */
+	const uint8_t stray_port = (uint8_t)(ephemeral - 1);
+	ck_assert_uint_ne(stray_port, TEST_PORT);
+	csp_packet_t * stray = csp_buffer_get(0);
+	ck_assert_ptr_nonnull(stray);
+	stray->id.pri = 2;
+	stray->id.src = 11;
+	stray->id.dst = LOCAL_ADDR;
+	stray->id.dport = stray_port;
+	stray->id.sport = 20;
+	stray->id.flags = 0;
+	memcpy(stray->data, "pong", 4);
+	stray->length = 4;
+	csp_qfifo_write(stray, &ingress_if, NULL);
+	csp_route_work();
+
+	unsigned int stray_delivered = 0;
+	while ((p = csp_read(conn, 0)) != NULL) {
+		csp_buffer_free(p);
+		stray_delivered++;
+	}
+	csp_close(conn);
+
+	ck_assert_uint_eq(delivered, 2);
+	ck_assert_uint_eq(stray_delivered, 0);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "a_reply_from_a_different_address_reaches_the_client_connection",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("connected_to", MAX_NODE_ID);
+		ctest_trace_int("answerers", 2);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("delivered", (int64_t)delivered);
+		ctest_trace_int("stray_port_delivered", (int64_t)stray_delivered);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
+/* The other branch of the same rule, and the control on the one above.
+ *
+ * An *incoming* connection is matched on dport, sport **and** source address, so two peers
+ * that happen to pick the same source port are two connections. Copying the client rule to
+ * both branches would leave the case above passing while two peers shared one connection —
+ * each reading the other's traffic, and the second peer never announced to the application.
+ */
+START_TEST(test_two_peers_on_the_same_ports_get_two_connections)
+{
+	setup_stack();
+
+	deliver_from_src(11, 40);
+	deliver_from_src(12, 40);
+
+	unsigned int conns = 0;
+	unsigned int packets = 0;
+	csp_conn_t * c;
+	while ((c = csp_accept(&sock, 0)) != NULL) {
+		csp_packet_t * p;
+		while ((p = csp_read(c, 0)) != NULL) {
+			csp_buffer_free(p);
+			packets++;
+		}
+		csp_close(c);
+		conns++;
+	}
+
+	ck_assert_uint_eq(conns, 2);
+	ck_assert_uint_eq(packets, 2);
+
+	if (ctest_tracing()) {
+		ctest_trace_begin("conn", "two_peers_on_the_same_ports_get_two_connections",
+						  "must_match");
+		ctest_trace_obj_begin("input");
+		ctest_trace_int("peers", 2);
+		ctest_trace_int("shared_sport", 40);
+		ctest_trace_obj_end();
+		ctest_trace_obj_begin("observed");
+		ctest_trace_int("connections", (int64_t)conns);
+		ctest_trace_int("packets", (int64_t)packets);
+		ctest_trace_obj_end();
+		ctest_trace_end();
+	}
+}
+END_TEST
+
 Suite * conn_suite(void)
 {
 	Suite * s = suite_create("Conn");
 
 	TCase * tc = tcase_create("table");
 	tcase_add_test(tc, test_a_reply_reaches_the_connection_that_asked_for_it);
+	tcase_add_test(tc, test_a_reply_from_a_different_address_reaches_the_client_connection);
+	tcase_add_test(tc, test_two_peers_on_the_same_ports_get_two_connections);
 	tcase_add_test(tc, test_running_out_of_connections_costs_no_buffers);
 	tcase_add_test(tc, test_a_closed_connection_can_be_used_again);
 	tcase_add_test(tc, test_a_second_packet_reuses_the_same_connection);

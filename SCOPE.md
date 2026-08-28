@@ -690,7 +690,7 @@ hand-built window is 4, the same as the C helper's, so they were at the right op
 point and honest; they were simply blind to this.
 
 **The lead is now a tool.** `just untraced` prints, per suite, the C tests that assert
-against a real node and record nothing — 149 of 166 record something today. That measurement
+against a real node and record nothing — 151 of 168 record something today. That measurement
 found the dedup window, the malformed-SYN connection leak, and this. It resolves recording
 helpers, because an earlier hand-rolled version that only looked for a literal
 `ctest_trace_begin` reported two already-covered tests as gaps and would have sent me to
@@ -4032,3 +4032,43 @@ one that reads badly is `ret: -103` on the `Datagram` arm, where the port **succ
 is doing real work (it makes success and failure differ only in `recovered`, and equality
 with the C is the alarm) but it says the opposite of what happened. Left as it is, with the
 reasoning now written where the next reader will find it rather than inferred.
+
+### The connection matcher: broadcast replies had only ever been read about
+
+2026-08-27. `csp_conn_find_existing` (`csp_conn.c:107`) splits on connection kind, and the
+two branches are deliberately asymmetric:
+
+| kind | matched on | libcsp's stated reason |
+|---|---|---|
+| `CONN_CLIENT` | `dport` **alone** | "responses to broadcast addresses are accepted as long as the incoming port matches the unique source port of the connection" (`:112`) |
+| `CONN_SERVER` | `dport` + `sport` + `src` | "incoming connections can never come from a broadcast address" (`:123`) |
+
+The port implements exactly that. Nothing had ever executed either claim.
+
+Both existing reply tests — `conn::a_reply_reaches_the_connection_that_asked_for_it` and
+`difftest`'s `a_reply_from_a_real_c_node_reaches_the_connection_that_asked` — connect to
+address 11 and answer from address 11, so the *laxness* is invisible: they pass identically
+whether or not the source is compared. And `deliver_from` in `suite_conn.c` hardcoded
+`src = 11`, so no test anywhere had put two distinct peers into the table.
+
+That is the whole of broadcast request/reply, which is how a ground station enumerates a
+constellation. A ping to 16383 is answered by nodes addressed 11, 12, 13, each with its own
+source port; a matcher that compared the source too would drop every answer, and the
+broadcast would look like silence — from ground, indistinguishable from a dead bus.
+
+Two records now, both `must_match`, both verified by control against the port:
+
+| mutation | effect |
+|---|---|
+| client branch also compares `src` | `delivered` 2 → **0** — every broadcast answer lost |
+| client branch matches everything | `stray_port_delivered` 0 → **1** — the connection swallows unrelated traffic |
+| server branch stops comparing `src` | `connections` 2 → **1** — two peers share a connection and read each other's traffic |
+
+The third is why the second record exists. Without it, "copy the client rule to both
+branches" passes the broadcast case and silently merges peers, which is a confidentiality
+failure that the first record alone cannot see. All three are in `mutants.py`.
+
+`Router::forward` — item 2 of the standing prompt — is **closed** and was already closed
+before this cycle: it calls `route_policy::destinations`, which is the `find_all` fan-out
+plus the default-interface fallback, shared with `Node::resolve`. `Table::find` survives
+only as `route_from`'s single-destination convenience.

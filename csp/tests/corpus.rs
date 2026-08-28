@@ -2663,6 +2663,121 @@ fn replay_reply_to_a_connect() -> serde_json::Value {
     })
 }
 
+/// Answers to a broadcast request, from addresses the connection was never opened to.
+///
+/// `csp_conn_find_existing` matches an outgoing connection on the incoming **dport alone**
+/// (`csp_conn.c:112`), and that laxness is the whole of broadcast request/reply: a ping to
+/// 16383 is answered by nodes addressed 11, 12, 13, each with its own source port, and a
+/// matcher that also compared the source would drop every answer.
+///
+/// The stray reply is the guard. Delivering two is equally satisfied by a node that hands
+/// every packet to every connection it holds, and a reply on a port that is neither bound
+/// nor any connection's ephemeral port is what tells those two apart.
+#[cfg(feature = "rdp")]
+fn replay_reply_from_a_different_address() -> serde_json::Value {
+    const NODE: u16 = 10;
+    const BROADCAST: u16 = 16383;
+    const BOUND: u8 = 12;
+    const CLOCK: u32 = 100_000;
+
+    type N<'a> = csp::Node<'a, 8, 16, 264, 48, 32, 4>;
+    let storage = csp::CspStorage::<8, 16, 264, 48, 32>::new();
+    let mut n: N = csp::Node::new(&storage, csp::Config::new(Version::V2).address(NODE));
+    n.ifaces.add("test", NODE, 12, true).unwrap();
+    n.bind(BOUND).unwrap();
+
+    let h = n.connect(2, BROADCAST, 20, 0, CLOCK).expect("connect");
+    let ephemeral = n.conn_info(h).expect("live").dport;
+
+    fn inject(n: &mut N<'_>, src: u16, dport: u8, sport: u8) {
+        let mut p = n.packet().expect("the pool is empty");
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src,
+            dst: NODE,
+            dport,
+            sport,
+        });
+        p.set_payload(b"pong").unwrap();
+        n.router.receive(p, 0);
+        while !matches!(n.work(CLOCK), csp::Routed::Idle) {}
+    }
+
+    // Two answerers, neither of them address 16383, on two different source ports.
+    inject(&mut n, 11, ephemeral, 20);
+    inject(&mut n, 12, ephemeral, 21);
+    let mut delivered = 0;
+    while let Ok(Some(p)) = n.read(h) {
+        delivered += 1;
+        drop(p);
+    }
+
+    inject(&mut n, 11, ephemeral - 1, 20);
+    let mut stray_delivered = 0;
+    while let Ok(Some(p)) = n.read(h) {
+        stray_delivered += 1;
+        drop(p);
+    }
+
+    serde_json::json!({
+        "delivered": delivered,
+        "stray_port_delivered": stray_delivered,
+    })
+}
+
+/// Two peers that picked the same source port are two connections, not one.
+///
+/// The *incoming* branch of the same matcher compares dport, sport **and** source address.
+/// It is the control on the case above: copy the client rule to both branches and that one
+/// still passes, while these two peers share a connection and read each other's traffic.
+fn replay_two_peers_same_ports() -> serde_json::Value {
+    type P = Pool<16, 264>;
+    type R = Router<8, 16, 48, 32>;
+
+    let pool = P::new();
+    let mut r = R::new(LOCAL_ADDR, Version::V2);
+    r.bind(TEST_PORT).unwrap();
+    let mut ifaces = {
+        let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
+        l.add("INGRESS", LOCAL_ADDR, 12, false).unwrap();
+        l
+    };
+
+    for src in [11u16, 12] {
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src,
+            dst: LOCAL_ADDR,
+            dport: TEST_PORT,
+            sport: 40,
+        });
+        p.set_payload(b"hi").unwrap();
+        r.receive(p, 0);
+        let _ = r.work(&pool, &mut ifaces, 0);
+    }
+
+    let mut connections = 0;
+    let mut packets = 0;
+    while let Some(h) = r.accept() {
+        while let Ok(Some(slot)) = r.conns.dequeue_rx(h) {
+            drop(pool.from_index(slot));
+            packets += 1;
+        }
+        let mut drained = [0u16; 32];
+        if let Ok(n) = r.conns.close(h, &mut drained) {
+            for &slot in &drained[..n] {
+                drop(pool.from_index(slot));
+            }
+        }
+        connections += 1;
+    }
+
+    serde_json::json!({ "connections": connections, "packets": packets })
+}
+
 /// The receive-queue gate: acknowledgements stop while the connection is nearly full.
 ///
 /// `csp_rdp_check_ack` refuses to acknowledge while the receive queue has less than a window
@@ -4300,6 +4415,16 @@ fn replay(rec: &Record) -> Option<(serde_json::Value, String)> {
         "conn" if rec.case == "a_reply_reaches_the_connection_that_asked_for_it" => Some((
             replay_reply_to_a_connect(),
             "a reply on an unbound ephemeral port".to_string(),
+        )),
+        "conn" if rec.case == "a_reply_from_a_different_address_reaches_the_client_connection" => {
+            Some((
+                replay_reply_from_a_different_address(),
+                "answers to a broadcast, from two other addresses".to_string(),
+            ))
+        }
+        "conn" if rec.case == "two_peers_on_the_same_ports_get_two_connections" => Some((
+            replay_two_peers_same_ports(),
+            "two peers sharing a source port".to_string(),
         )),
         "conn" if rec.case == "a_connection_is_offered_to_the_application_only_once" => {
             let input: ConnInput = serde_json::from_value(rec.input.clone()).unwrap();
