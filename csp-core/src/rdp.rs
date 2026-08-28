@@ -928,6 +928,17 @@ impl Connection {
 
         match self.state {
             State::Closed => {
+                // "No SYN flag set while in closed. Inform by sending back RST"
+                // (`csp_rdp.c:535`): a stray data or ACK packet to a port with no
+                // connection is answered, so the sender learns there is nothing there.
+                // Measured in `difftest/tests/node_rdp_edges.rs`.
+                if h.flags & 0x0F != SYN {
+                    return Action::SendControl(Header {
+                        flags: RST,
+                        seq_nr: self.snd_nxt,
+                        ack_nr: self.rcv_cur,
+                    });
+                }
                 if h.has(SYN) && !h.has(ACK) {
                     // Incoming connection. A SYN must carry a complete option block; the
                     // C sends RST and closes otherwise, rather than using defaults.
@@ -1012,14 +1023,27 @@ impl Connection {
             }
 
             State::Open => {
-                // An extended acknowledgement is acknowledgement *only*. `csp_rdp.c:712`
-                // updates `snd_una`, clears the retransmit counter, and then
-                // `goto discard_open` -- the packet is thrown away including any payload.
-                //
-                // This module defined the flag and never read it, so a packet carrying
-                // `ACK|EAK` and a body was delivered to the application: data a peer had
-                // marked as pure acknowledgement, handed over as if it were a message. It
-                // was also answered, which the C does not do.
+                // `csp_rdp_new_packet`'s two range checks (`csp_rdp.c:653`, `:661`), in its
+                // order, both against **twice the negotiated window**. A sequence number
+                // outside `[rcv_cur+1, rcv_cur+2w]` is discarded in silence -- the port
+                // used to re-acknowledge it, which the C never does -- and so is an
+                // acknowledgement number outside `[snd_una-1-2w, snd_nxt-1]`, which the
+                // port used to accept and act on. Measured against a real node in
+                // `difftest/tests/node_rdp_edges.rs`.
+                let _ = max_window;
+                // `uint32_t` arithmetic in the C, wrapping; the `u16` narrowing is the C's too.
+                let span = self.opts.window_size.wrapping_mul(2) as u16;
+                let expected = self.rcv_cur.wrapping_add(1);
+                if !seq_between(h.seq_nr, expected, self.rcv_cur.wrapping_add(span)) {
+                    return Action::Nothing;
+                }
+                if !seq_between(
+                    h.ack_nr,
+                    self.snd_una.wrapping_sub(1).wrapping_sub(span),
+                    self.snd_nxt.wrapping_sub(1),
+                ) {
+                    return Action::Nothing;
+                }
                 if h.has(EAK) {
                     if h.has(ACK) {
                         self.snd_una = h.ack_nr.wrapping_add(1);
@@ -1027,28 +1051,15 @@ impl Connection {
                     self.retransmits = 0;
                     return Action::Nothing;
                 }
-
                 if !payload.is_empty() {
-                    let expected = self.rcv_cur.wrapping_add(1);
                     if h.seq_nr == expected {
                         self.rcv_cur = h.seq_nr;
                         return Action::Deliver;
                     }
-                    // Ahead of the gap but inside the window: held, not dropped. This
-                    // re-acknowledged and discarded it, so one lost packet cost a
-                    // retransmission of everything behind it -- on a link with real
-                    // latency, most of the window. Measured against the C by
-                    // `rdp::a_gap_filled_late_delivers_both_in_order`.
-                    if seq_between(h.seq_nr, expected, expected.wrapping_add(max_window as u16)) {
-                        return Action::Hold(h.seq_nr);
-                    }
-                    // A duplicate or genuinely out-of-window sequence number is
-                    // re-acknowledged — that is how the peer learns to stop retransmitting.
-                    return Action::SendControl(Header {
-                        flags: ACK,
-                        seq_nr: self.snd_nxt,
-                        ack_nr: self.rcv_cur,
-                    });
+                    // In the window but not next: held for the gap to fill, and not
+                    // acknowledged -- `csp_rdp_rx_queue_add` succeeds and the C goes to
+                    // `accepted_open` without `csp_rdp_check_ack`.
+                    return Action::Hold(h.seq_nr);
                 }
                 if h.has(ACK) {
                     self.snd_una = h.ack_nr.wrapping_add(1);
@@ -1361,12 +1372,17 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicate_is_reacknowledged_not_delivered() {
-        // Delivering a duplicate would hand the application the same bytes twice; not
-        // acknowledging it would make the peer retransmit forever.
+    fn a_duplicate_is_discarded_in_silence() {
+        // Measured against a real node in difftest/tests/node_rdp_edges.rs: a packet the
+        // C has already acknowledged falls below `rcv_cur + 1` and is discarded without a
+        // reply (csp_rdp.c:653). This used to re-acknowledge it, reasoning that silence
+        // makes the peer retransmit "forever" -- it does not; the peer gives up after
+        // MAX_RETRANSMITS, which is the C's answer to a lost acknowledgement too.
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         c.rcv_cur = 10;
+        c.snd_una = 1;
+        c.snd_nxt = 1;
         let a = c.step(
             Event::Packet(
                 Header {
@@ -1379,15 +1395,19 @@ mod tests {
             0,
             MAX_WINDOW,
         );
-        assert!(matches!(a, Action::SendControl(h) if h.flags == ACK && h.ack_nr == 10));
+        assert_eq!(a, Action::Nothing);
         assert_eq!(c.rcv_cur, 10, "must not advance on a duplicate");
     }
 
     #[test]
-    fn an_out_of_window_packet_is_reacknowledged_not_delivered() {
+    fn an_out_of_window_packet_is_discarded_in_silence() {
+        // csp_rdp.c:653: outside [rcv_cur+1, rcv_cur+2w] the C discards and says nothing.
+        // Measured in difftest/tests/node_rdp_edges.rs; this used to re-acknowledge.
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         c.rcv_cur = 10;
+        c.snd_una = 1;
+        c.snd_nxt = 1;
         let a = c.step(
             Event::Packet(
                 Header {
@@ -1400,8 +1420,54 @@ mod tests {
             0,
             MAX_WINDOW,
         );
-        assert!(matches!(a, Action::SendControl(h) if h.flags == ACK));
+        assert_eq!(a, Action::Nothing);
         assert_eq!(c.rcv_cur, 10);
+    }
+
+    #[test]
+    fn an_out_of_range_acknowledgement_is_discarded() {
+        // csp_rdp.c:661: ack_nr outside [snd_una-1-2w, snd_nxt-1] discards the packet,
+        // data and all. This used to deliver it and move snd_una to the bogus number.
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        c.rcv_cur = 10;
+        c.snd_una = 100;
+        c.snd_nxt = 102;
+        let a = c.step(
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 11,
+                    ack_nr: 5000,
+                },
+                b"data",
+            ),
+            0,
+            MAX_WINDOW,
+        );
+        assert_eq!(a, Action::Nothing);
+        assert_eq!(c.rcv_cur, 10, "not delivered");
+        assert_eq!(c.snd_una, 100, "and the window untouched");
+    }
+
+    #[test]
+    fn a_stray_packet_on_a_closed_connection_is_reset() {
+        // csp_rdp.c:535: anything but a bare SYN in CLOSED draws an RST.
+        let mut c = Connection::new(1, SynOptions::default());
+        let a = c.step(
+            Event::Packet(
+                Header {
+                    flags: ACK,
+                    seq_nr: 5,
+                    ack_nr: 5,
+                },
+                b"stray",
+            ),
+            0,
+            MAX_WINDOW,
+        );
+        assert!(matches!(a, Action::SendControl(h) if h.flags == RST));
+        assert_eq!(c.state, State::Closed);
     }
 
     /// `csp_rdp_send` refuses once `snd_nxt` reaches `snd_una + window_size - 1`; the C
@@ -1561,6 +1627,9 @@ mod tests {
         c.rcv_cur = 10;
         c.rcv_lsa = 10;
         c.ack_timestamp = 0;
+        // A send window the peer's `ack_nr: 0` falls inside, now that it is range-checked.
+        c.snd_una = 1;
+        c.snd_nxt = 1;
         c
     }
 

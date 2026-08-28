@@ -249,6 +249,8 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_buf_free() -> c_int;
     fn shim_node_unbind(port: u8) -> c_int;
+    fn shim_node_read_count(port: u8) -> c_int;
+    fn shim_node_read_held(port: u8) -> c_int;
     fn shim_hmac_set_key(key: *const u8, keylen: u32) -> c_int;
     fn shim_node_held_active(port: u8) -> c_int;
     fn shim_node_open_conns() -> c_int;
@@ -1513,6 +1515,19 @@ pub fn c_node_buf_free() -> i32 {
 pub fn c_node_unbind(port: u8) -> i32 {
     // SAFETY: bounded by SHIM_PORTS on the C side. Callers hold `LOCK`.
     unsafe { shim_node_unbind(port) }
+}
+
+/// Accept and read everything waiting on the C's `port`, then close: packets read.
+pub fn c_node_read_count(port: u8) -> i32 {
+    // SAFETY: bounded by SHIM_PORTS on the C side; frees what it reads. Callers hold `LOCK`.
+    unsafe { shim_node_read_count(port) }
+}
+
+/// Read everything waiting on the connection the C holds for `port` (accepting one if
+/// none is held) without closing it; release with [`c_node_release`].
+pub fn c_node_read_held(port: u8) -> i32 {
+    // SAFETY: bounded by SHIM_PORTS on the C side; frees what it reads. Callers hold `LOCK`.
+    unsafe { shim_node_read_held(port) }
 }
 
 /// `csp_hmac_set_key` on the C node: one process-wide key, SHA-1-derived as the C does.
