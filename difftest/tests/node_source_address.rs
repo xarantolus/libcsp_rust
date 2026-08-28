@@ -189,7 +189,7 @@ fn a_connection_is_sourced_from_the_interface_it_leaves_by() {
             want,
             "the port's connection to {peer} is sourced from the interface it leaves by"
         );
-        node.close(conn).unwrap();
+        node.close(conn, 0).unwrap();
     }
 }
 

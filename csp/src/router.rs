@@ -1518,6 +1518,24 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             .map_err(|_| csp_core::Error::Unroutable { dst: idout.dst })
     }
 
+    /// Close an RDP connection the way `csp_close` does: send `ACK|RST` and keep the slot
+    /// until the peer answers or CLOSE_WAIT times out. Returns whether a handshake is now
+    /// pending; `false` means there was nothing to send and the caller may release the slot.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_close<const B: usize, const SZ: usize, const N: usize, const A: usize>(
+        &mut self,
+        pool: &Pool<B, SZ>,
+        ifaces: &crate::iflist::IfList<N, A>,
+        handle: Handle,
+        now_ms: u32,
+    ) -> csp_core::Result<bool> {
+        let Some((idout, header)) = self.conns.rdp_close(handle, now_ms, RDP_MAX_WINDOW)? else {
+            return Ok(false);
+        };
+        let _ = self.queue_rdp_from_tick(pool, idout, ifaces, header, &[]);
+        Ok(true)
+    }
+
     /// Decide where a packet that is not for us should go.
     ///
     /// Mirrors `csp_send_direct`'s precedence, which is **three levels, not one**:
@@ -1677,13 +1695,33 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         #[cfg(feature = "rdp")]
         let mut n_pending = 0usize;
         #[cfg(feature = "rdp")]
-        let closed = closed
-            + self.conns.tick_rdp(now_ms, RDP_MAX_WINDOW, |id, h| {
+        let mut timed_out: [Option<Handle>; CONNS] = [None; CONNS];
+        #[cfg(feature = "rdp")]
+        let n_timed_out = self.conns.tick_rdp(
+            now_ms,
+            RDP_MAX_WINDOW,
+            |id, h| {
                 if n_pending < CONNS {
                     pending[n_pending] = Some((id, h));
                     n_pending += 1;
                 }
-            });
+            },
+            &mut timed_out,
+        );
+        // Release what a timed-out connection still held: a close the peer never answered
+        // keeps its unacknowledged copies until CLOSE_WAIT expires, and a reset slot that
+        // kept them would leak one pool buffer each.
+        #[cfg(feature = "rdp")]
+        for h in timed_out.iter().take(n_timed_out).flatten() {
+            let mut drained = [0u16; RXQ];
+            if let Ok(n) = self.conns.close(*h, &mut drained) {
+                for &idx in &drained[..n] {
+                    drop(pool.from_index(idx));
+                }
+            }
+        }
+        #[cfg(feature = "rdp")]
+        let closed = closed + n_timed_out;
         #[cfg(feature = "rdp")]
         for entry in pending.iter().take(n_pending) {
             let Some((id, h)) = entry else { continue };

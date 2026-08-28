@@ -180,7 +180,7 @@ fn rust_conn_exchange(frames: &[Vec<u8>], rounds: usize) -> ConnOutcome {
             while let Ok(Some(pkt)) = node.read(conn) {
                 drop(pkt);
             }
-            let _ = node.close(conn);
+            let _ = node.close(conn, 0);
             accepted += 1;
         }
         out.rounds.push(accepted);

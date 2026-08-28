@@ -954,6 +954,15 @@ void shim_node_check_timeouts(void) {
 /* Buffers currently free, so a test can assert the node leaks nothing. */
 int shim_node_buf_free(void) { return csp_buffer_remaining(); }
 
+/* How many connections the C node holds open, via libcsp's own test hook. */
+int shim_node_open_conns(void) {
+	size_t n = 0;
+	const csp_conn_t *arr = csp_conn_get_array(&n);
+	int open = 0;
+	for (size_t i = 0; i < n; i++) { if (arr[i].state == CONN_OPEN) { open++; } }
+	return open;
+}
+
 /*
  * Hold buffers out of the pool, so a rule gated on `csp_buffer_remaining()` -- the
  * promiscuous tap's reserve, `csp_promisc.c:59` -- is reachable by allocation rather than by

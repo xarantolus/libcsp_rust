@@ -796,13 +796,16 @@ impl Connection {
             }
 
             Event::Close => {
-                if self.state == State::Closed {
+                // `csp_rdp_close_internal` (`csp_rdp.c:936`): already closing or closed,
+                // nothing more to send; otherwise `ACK|RST`, and wait in CLOSE_WAIT for the
+                // peer's answer or the connection timeout.
+                if matches!(self.state, State::Closed | State::CloseWait) {
                     return Action::Nothing;
                 }
                 self.state = State::CloseWait;
                 self.last_activity = now_ms;
                 Action::SendControl(Header {
-                    flags: RST,
+                    flags: ACK | RST,
                     seq_nr: self.snd_nxt,
                     ack_nr: self.rcv_cur,
                 })
@@ -810,6 +813,15 @@ impl Connection {
 
             Event::Tick => {
                 if self.state == State::Closed {
+                    return Action::Nothing;
+                }
+                // A close the peer never answered: `csp_rdp_check_timeouts` closes a
+                // CLOSE_WAIT connection once `conn_timeout` has passed (`csp_rdp.c:370`).
+                if self.state == State::CloseWait {
+                    if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout {
+                        self.state = State::Closed;
+                        return Action::Closed(ClosedBy::Timeout);
+                    }
                     return Action::Nothing;
                 }
                 // Only before the connection is established. `csp_rdp_check_timeouts`
@@ -1471,8 +1483,32 @@ mod tests {
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         let a = c.step(Event::Close, 0, MAX_WINDOW);
-        assert!(matches!(a, Action::SendControl(h) if h.flags == RST));
+        assert!(
+            matches!(a, Action::SendControl(h) if h.flags == ACK | RST),
+            "csp_rdp_close_internal sends ACK|RST, not a bare RST"
+        );
         assert_eq!(c.state, State::CloseWait);
+        // Closing again sends nothing more.
+        assert_eq!(c.step(Event::Close, 1, MAX_WINDOW), Action::Nothing);
+    }
+
+    #[test]
+    fn a_close_the_peer_never_answers_times_out_of_close_wait() {
+        let mut c = Connection::new(1, SynOptions::default());
+        c.state = State::Open;
+        let _ = c.step(Event::Close, 1000, MAX_WINDOW);
+        let t = c.opts.conn_timeout;
+        assert_eq!(
+            c.step(Event::Tick, 1000 + t, MAX_WINDOW),
+            Action::Nothing,
+            "not yet"
+        );
+        assert_eq!(
+            c.step(Event::Tick, 1000 + t + 1, MAX_WINDOW),
+            Action::Closed(ClosedBy::Timeout),
+            "csp_rdp_check_timeouts closes a CLOSE_WAIT connection after conn_timeout"
+        );
+        assert_eq!(c.state, State::Closed);
     }
 
     #[test]
