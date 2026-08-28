@@ -792,6 +792,19 @@ MUTANTS = [
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
   ("conn: close releases the slot", "csp/src/conn.rs",
    "        c.reset();\n        Ok(n)\n    }", "        let _ = &c;\n        Ok(n)\n    }"),
+  # The three ways to get csp_conn.c:112 wrong. A client connection matches on dport
+  # alone, so answers to a broadcast reach it whoever sent them; a server one also
+  # matches the source, so two peers are two connections. Tighten the first, loosen
+  # either, and one of the two conn records stops reproducing the C.
+  ("conn: a client connection ignores who answered", "csp/src/conn.rs",
+   "                Kind::Client => c.idin.dport == id.dport,",
+   "                Kind::Client => c.idin.dport == id.dport && c.idin.src == id.src,"),
+  ("conn: a client connection still checks the port", "csp/src/conn.rs",
+   "                Kind::Client => c.idin.dport == id.dport,",
+   "                Kind::Client => true,"),
+  ("conn: a server connection is per peer", "csp/src/conn.rs",
+   "                    c.idin.dport == id.dport && c.idin.sport == id.sport && c.idin.src == id.src",
+   "                    c.idin.dport == id.dport && c.idin.sport == id.sport"),
   ("id: the fragment flag is read", "csp-core/src/id.rs",
    "    pub const fn is_fragment(&self) -> bool {\n        self.has_flag(crate::flags::FRAG)",
    "    pub const fn is_fragment(&self) -> bool {\n        false && self.has_flag(crate::flags::FRAG)"),

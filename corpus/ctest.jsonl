@@ -126,6 +126,8 @@
 {"suite":"sfp","case":"a_second_fragment_that_changes_the_total_is_refused","verdict":"must_match","input":{"fragments":[{"body":"68656c6c6f","offset":0,"totalsize":10},{"body":"776f726c64","offset":5,"totalsize":99}]},"observed":{"ret":-103,"writes":1,"assembled":"68656c6c6f"}}
 {"suite":"sfp","case":"the_fragment_mtu_for_each_option_set","verdict":"must_match","input":{"buffer_size":256},"observed":{"plain":248,"rdp":243,"crc32":244,"hmac":244,"all_three":235}}
 {"suite":"conn","case":"a_reply_reaches_the_connection_that_asked_for_it","verdict":"must_match","input":{"bound_port":12,"reply_body":"706f6e67"},"observed":{"delivered":1,"delivered_len":4,"delivered_body":"706f6e67"}}
+{"suite":"conn","case":"a_reply_from_a_different_address_reaches_the_client_connection","verdict":"must_match","input":{"connected_to":16383,"answerers":2},"observed":{"delivered":2,"stray_port_delivered":0}}
+{"suite":"conn","case":"two_peers_on_the_same_ports_get_two_connections","verdict":"must_match","input":{"peers":2,"shared_sport":40},"observed":{"connections":2,"packets":2}}
 {"suite":"conn","case":"running_out_of_connections_costs_no_buffers","verdict":"must_match","input":{"conn_max":8,"buffer_count":15,"offered":16},"observed":{"accepted":8,"buffers_lost":0}}
 {"suite":"conn","case":"a_closed_connection_can_be_used_again","verdict":"must_match","input":{"conn_max":8,"buffer_count":15,"rounds":3},"observed":{"accepted_total":24,"accepted_per_round":[8,8,8],"buffers_lost":0}}
 {"suite":"conn","case":"a_second_packet_reuses_the_same_connection","verdict":"must_match","input":{"packets_from_one_peer":2},"observed":{"connections":1,"packets_on_it":2}}
