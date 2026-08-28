@@ -211,6 +211,11 @@ MUTANTS = [
   ("crc32: the checksum covers the payload", "csp-core/src/crc32.rs",
    "    c.update(payload);\n    let expected = c.finalize().to_be_bytes();",
    "    let expected = c.finalize().to_be_bytes();"),
+  # csp_hmac_set_key stores SHA-1(material)[..16]. A node that stored the material itself
+  # would MAC every packet with a different key from every C peer -- and fail all of them.
+  ("hmac: the key is derived as csp_hmac_set_key derives it", "csp/src/node.rs",
+   "        self.router.hmac_key = Some(csp_core::hmac::derive_key(material));",
+   "        self.router.hmac_key = Some({\n            let mut k = [0u8; csp_core::hmac::KEY_LEN];\n            let n = material.len().min(k.len());\n            k[..n].copy_from_slice(&material[..n]);\n            k\n        });"),
   ("hmac: a wrong tag is refused", "csp-core/src/hmac.rs",
    "    if diff != 0 {\n        return Err(Error::BadChecksum);\n    }",
    "    if false {\n        return Err(Error::BadChecksum);\n    }"),
@@ -903,15 +908,15 @@ MUTANTS = [
   # (csp_io.c:247-271). Setting the flag without the bytes is what made every CMP reply
   # undeliverable to a stock libcsp ground station; each call site is covered separately.
   ("egress: an originated packet carries the trailer it promises", "csp/src/node.rs",
-   "                if from_me\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()",
-   "                if false\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()"),
+   "                if from_me\n                    && crate::egress::protect(\n                        &mut packet,",
+   "                if false\n                    && crate::egress::protect(\n                        &mut packet,"),
   # Both RDP queue points carry the same three lines, so each is anchored on the line that
   # follows it -- `queue_rdp_from_tick` reads the destination next, `queue_rdp` comments.
   ("egress: an rdp timer's frame carries it too", "csp/src/router.rs",
-   "        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;",
+   "        if crate::egress::protect(\n            &mut reply,\n            out_flags,\n            self.hmac_key.as_ref().map(|k| &k[..]),\n        )\n        .is_err()\n        {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;",
    "        if false {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;"),
   ("egress: an rdp reply carries it too", "csp/src/router.rs",
-   "        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n\n        // Route it the way any outgoing packet is routed",
+   "        if crate::egress::protect(\n            &mut reply,\n            out_flags,\n            self.hmac_key.as_ref().map(|k| &k[..]),\n        )\n        .is_err()\n        {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n\n        // Route it the way any outgoing packet is routed",
    "        if false {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n\n        // Route it the way any outgoing packet is routed"),
   # The three ways to get csp_conn.c:112 wrong. A client connection matches on dport
   # alone, so answers to a broadcast reach it whoever sent them; a server one also

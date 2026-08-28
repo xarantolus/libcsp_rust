@@ -112,6 +112,11 @@ pub enum Routed {
     Dropped(DropReason),
 }
 
+/// Bytes of the stored HMAC key: `csp_hmac_set_key` keeps the first 16 of the SHA-1 digest
+/// (`csp_hmac.c:122`, `sizeof(csp_hmac_key)`). A plain number here rather than
+/// `csp_core::hmac::KEY_LEN`, so the field exists in a build without the `hmac` feature.
+pub const HMAC_KEY_LEN: usize = 16;
+
 /// The promiscuous tap yields when the pool is down to this fraction of its capacity:
 /// `CSP_PROMISC_BUFFER_RESERVE` is `CSP_BUFFER_COUNT / 4` (`csp_promisc.c:16`).
 const PROMISC_RESERVE_DIVISOR: usize = 4;
@@ -252,11 +257,13 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     /// in its own SYN is adopted for that connection regardless, as the C does.
     #[cfg(feature = "rdp")]
     pub rdp_options: csp_core::rdp::SynOptions,
-    /// HMAC key, if one is configured.
+    /// The HMAC key, if one is configured: the **derived** key, as `csp_hmac_set_key`
+    /// stores it (SHA-1 of the material, truncated -- `csp_hmac.c:115`). Set through
+    /// [`Node::set_hmac_key`](crate::Node::set_hmac_key), which derives it.
     ///
     /// `None` means a packet claiming authentication cannot be verified, and is refused
     /// rather than trusted.
-    pub hmac_key: Option<&'static [u8]>,
+    pub hmac_key: Option<[u8; HMAC_KEY_LEN]>,
     /// Connections delivered to but not yet accepted by the application.
     ///
     /// One queue, not one per port: every consumer of the C binds `CSP_ANY` and dispatches
@@ -706,7 +713,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 &[],
                 body,
                 csp_core::crc32::Coverage::PayloadOnly,
-                self.hmac_key,
+                self.hmac_key.as_ref().map(|k| &k[..]),
                 security::Support::default(),
             )
             .map(|stripped| stripped.len())
@@ -1291,7 +1298,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // must carry their trailers too -- `csp_rdp_send_cmp` goes through
         // `csp_send_direct` with `from_me` set like anything else.
         let out_flags = reply.id().flags;
-        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {
+        if crate::egress::protect(
+            &mut reply,
+            out_flags,
+            self.hmac_key.as_ref().map(|k| &k[..]),
+        )
+        .is_err()
+        {
             self.counters.malformed += 1;
             return Err(Routed::Dropped(DropReason::Malformed));
         }
@@ -1372,7 +1385,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // must carry their trailers too -- `csp_rdp_send_cmp` goes through
         // `csp_send_direct` with `from_me` set like anything else.
         let out_flags = reply.id().flags;
-        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {
+        if crate::egress::protect(
+            &mut reply,
+            out_flags,
+            self.hmac_key.as_ref().map(|k| &k[..]),
+        )
+        .is_err()
+        {
             self.counters.malformed += 1;
             return Err(Routed::Dropped(DropReason::Malformed));
         }

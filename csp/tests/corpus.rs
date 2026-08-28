@@ -136,7 +136,8 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
     // so the value goes across unmasked rather than being filtered into a shape that
     // hides a difference.
     r.endpoint_opts = input.socket_opts;
-    r.hmac_key = Some(HMAC_KEY);
+    // Derived, as `csp_hmac_set_key` stores it; the trailer below uses the same derived key.
+    r.hmac_key = Some(csp_core::hmac::derive_key(HMAC_KEY));
 
     let mut ifaces = {
         let mut l = csp::iflist::IfList::<4, 4>::new(Version::V2);
@@ -161,7 +162,7 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
         )
         .unwrap(),
         Trailer::Hmac => csp_core::hmac::append(
-            HMAC_KEY,
+            &csp_core::hmac::derive_key(HMAC_KEY),
             &[],
             payload,
             csp_core::crc32::Coverage::PayloadOnly,
@@ -171,7 +172,7 @@ fn replay_security(input: &SecurityInput) -> SecurityObserved {
         Trailer::HmacThenCrc32 => {
             let mut signed = [0u8; 32];
             let m = csp_core::hmac::append(
-                HMAC_KEY,
+                &csp_core::hmac::derive_key(HMAC_KEY),
                 &[],
                 payload,
                 csp_core::crc32::Coverage::PayloadOnly,

@@ -249,6 +249,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_buf_free() -> c_int;
     fn shim_node_unbind(port: u8) -> c_int;
+    fn shim_hmac_set_key(key: *const u8, keylen: u32) -> c_int;
     fn shim_node_held_active(port: u8) -> c_int;
     fn shim_node_open_conns() -> c_int;
     fn shim_buffers_hold(n: c_int) -> c_int;
@@ -1512,6 +1513,12 @@ pub fn c_node_buf_free() -> i32 {
 pub fn c_node_unbind(port: u8) -> i32 {
     // SAFETY: bounded by SHIM_PORTS on the C side. Callers hold `LOCK`.
     unsafe { shim_node_unbind(port) }
+}
+
+/// `csp_hmac_set_key` on the C node: one process-wide key, SHA-1-derived as the C does.
+pub fn c_hmac_set_key(material: &[u8]) -> i32 {
+    // SAFETY: the slice is valid for the call; the C copies the derived key. Callers hold `LOCK`.
+    unsafe { shim_hmac_set_key(material.as_ptr(), material.len() as u32) }
 }
 
 /// `csp_conn_is_active` on the connection [`c_node_send_on`] holds for `port`: `Some(true)`

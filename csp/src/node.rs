@@ -455,6 +455,23 @@ impl<
         self.router.rdp_options
     }
 
+    /// Set the HMAC key from key material -- `csp_hmac_set_key`.
+    ///
+    /// The C uses SHA-1 as its key-derivation function and stores the first 16 bytes of the
+    /// digest (`csp_hmac.c:115`); a peer must derive the same way or every MAC fails. This
+    /// derives here so an integrator hands over the shared secret, not the digest. Measured
+    /// against a real node in `difftest/tests/node_hmac.rs`.
+    #[cfg(feature = "hmac")]
+    pub fn set_hmac_key(&mut self, material: &[u8]) {
+        self.router.hmac_key = Some(csp_core::hmac::derive_key(material));
+    }
+
+    /// Forget the HMAC key: packets claiming authentication are refused again.
+    #[cfg(feature = "hmac")]
+    pub fn clear_hmac_key(&mut self) {
+        self.router.hmac_key = None;
+    }
+
     /// Connection options.
     pub fn conn_opts(&self, conn: Handle) -> Result<u32> {
         self.router.conns.opts(conn)
@@ -1077,7 +1094,12 @@ impl<
                 // `csp_send_direct_iface` frees the packet and counts `tx_error` when the
                 // append fails (`csp_io.c:290`); here the caller gets it back to release.
                 if from_me
-                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()
+                    && crate::egress::protect(
+                        &mut packet,
+                        id.flags,
+                        self.router.hmac_key.as_ref().map(|k| &k[..]),
+                    )
+                    .is_err()
                 {
                     return Outbound::NoRoute(packet, Unroutable::NoRoute);
                 }
@@ -1690,7 +1712,7 @@ mod tests {
         );
         // The table holds four and each check above opened one.
         n.close(c, 0).unwrap();
-        n.router.hmac_key = Some(b"0123456789abcdef");
+        n.router.hmac_key = Some(*b"0123456789abcdef");
         assert_eq!(
             flags_on_the_wire(&mut n, o::HMAC_REQ),
             csp_core::flags::HMAC
