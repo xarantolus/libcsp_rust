@@ -24,7 +24,7 @@ use csp_core::{flags, Error, Result};
 pub(crate) fn protect<const B: usize, const SZ: usize>(
     packet: &mut Packet<'_, B, SZ>,
     flags: u8,
-    key: Option<&'static [u8]>,
+    key: Option<&[u8]>,
 ) -> Result<()> {
     if flags & (flags::HMAC | flags::CRC32) == 0 {
         return Ok(());

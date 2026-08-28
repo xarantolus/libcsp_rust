@@ -676,6 +676,11 @@ int shim_node_unbind(uint8_t port) {
 	return r;
 }
 
+/* `csp_hmac_set_key`: the C's one process-wide key, derived by SHA-1 as the C does. */
+int shim_hmac_set_key(const uint8_t *key, uint32_t keylen) {
+	return csp_hmac_set_key(key, keylen);
+}
+
 int shim_node_bind(uint8_t port) {
 	if (port >= SHIM_PORTS) { return -1; }
 	if (shim_bound[port]) { return 0; }
