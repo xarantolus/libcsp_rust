@@ -474,6 +474,17 @@ MUTANTS = [
   ("cmp: a refused route_set answers nothing", "csp/src/service.rs",
    "            if !hooks.route_set(r.dest_node, r.netmask, r.interface, r.next_hop_via) {\n                return Ok(None);\n            }",
    "            let _ = hooks.route_set(r.dest_node, r.netmask, r.interface, r.next_hop_via);"),
+  # The ROUTE_SET_V2 reply is the request echoed. libcsp's client reads its fields back out
+  # of that echo, so a transposed pair or a blanked name is what ground would see.
+  ("cmp: the route_set echo keeps dest and via apart", "csp-core/src/cmp.rs",
+   "        out[o..o + 2].copy_from_slice(&self.dest_node.to_be_bytes());\n        out[o + 2..o + 4].copy_from_slice(&self.next_hop_via.to_be_bytes());",
+   "        out[o..o + 2].copy_from_slice(&self.next_hop_via.to_be_bytes());\n        out[o + 2..o + 4].copy_from_slice(&self.dest_node.to_be_bytes());"),
+  ("cmp: the route_set echo carries the interface name", "csp-core/src/cmp.rs",
+   "        put_str(&mut out[o + 6..o + 6 + len::IFACE], self.interface);",
+   "        put_str(&mut out[o + 6..o + 6 + len::IFACE], \"\");"),
+  ("cmp: the 32-bit peek address is big-endian", "csp-core/src/cmp.rs",
+   "        out[Header::LEN..Header::LEN + 4].copy_from_slice(&self.addr.to_be_bytes());",
+   "        out[Header::LEN..Header::LEN + 4].copy_from_slice(&self.addr.to_le_bytes());"),
   # Config -> Node -> IDENT. Node::new dropped these three outright, so the builder setter
   # had no effect on the only type that can route.
   ("node: keeps the configured hostname", "csp/src/node.rs",

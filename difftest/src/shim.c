@@ -1944,3 +1944,91 @@ int shim_i2c_rx(const uint8_t *frame, uint32_t len) {
 	while (csp_route_work() == CSP_ERR_NONE) { }
 	return 1;
 }
+
+/* --- libcsp's own ROUTE_SET_V2, PEEK and POKE clients ------------------------ */
+
+/*
+ * Measured after the CLOCK work: of the nine CMP codes, IDENT had a hand-rolled client,
+ * IF_STATS and CLOCK the real one, PEEK_V2 a real `csp_transaction`. ROUTE_SET_V2 and the
+ * 32-bit PEEK/POKE had nothing on the client side at all -- and ROUTE_SET is the code by
+ * which ground rewrites a satellite's routing table. One runner, three fillers: each filler
+ * lays the struct out exactly as a C application does (host fields through htobe*), and
+ * the thread calls libcsp's own inline entry point for that code, nothing else.
+ */
+static pthread_t              shim_rsp_thread;
+static int                    shim_rsp_running;
+static int                    shim_rsp_code;
+static uint16_t               shim_rsp_node;
+static volatile int           shim_rsp_status;
+static struct csp_cmp_message shim_rsp_msg;
+
+static void * shim_rsp_thread_fn(void * arg) {
+	(void)arg;
+	switch (shim_rsp_code) {
+		case CSP_CMP_ROUTE_SET_V2: shim_rsp_status = csp_cmp_route_set_v2(shim_rsp_node, 5000, &shim_rsp_msg); break;
+		case CSP_CMP_PEEK:         shim_rsp_status = csp_cmp_peek(shim_rsp_node, 5000, &shim_rsp_msg); break;
+		case CSP_CMP_POKE:         shim_rsp_status = csp_cmp_poke(shim_rsp_node, 5000, &shim_rsp_msg); break;
+		default:                   shim_rsp_status = -999; break;
+	}
+	return NULL;
+}
+
+static int shim_rsp_launch(int code, uint16_t node) {
+	if (shim_rsp_running) { return -2; }
+	shim_rsp_code = code;
+	shim_rsp_node = node;
+	shim_rsp_status = -1000;
+	shim_node_clear_tx();
+	if (pthread_create(&shim_rsp_thread, NULL, shim_rsp_thread_fn, NULL) != 0) { return -1; }
+	shim_rsp_running = 1;
+	for (int i = 0; i < 3000 && shim_tx_n == 0 && shim_rsp_status == -1000; i++) { usleep(1000); }
+	return shim_tx_n;
+}
+
+/* Begin a real `csp_cmp_route_set_v2`. Returns how many frames the request put on the wire. */
+int shim_cmp_route_set_v2_start(uint16_t node, uint16_t dest, uint16_t netmask, uint16_t via,
+								const char * ifname) {
+	if (shim_rsp_running) { return -2; }
+	memset(&shim_rsp_msg, 0, sizeof(shim_rsp_msg));
+	shim_rsp_msg.route_set_v2.dest_node = htobe16(dest);
+	shim_rsp_msg.route_set_v2.next_hop_via = htobe16(via);
+	shim_rsp_msg.route_set_v2.netmask = htobe16(netmask);
+	strncpy(shim_rsp_msg.route_set_v2.interface, ifname,
+			sizeof(shim_rsp_msg.route_set_v2.interface) - 1);
+	return shim_rsp_launch(CSP_CMP_ROUTE_SET_V2, node);
+}
+
+/* Begin a real `csp_cmp_peek` for `len` bytes at the 32-bit `addr`. */
+int shim_cmp_peek_start(uint16_t node, uint32_t addr, uint8_t len) {
+	if (shim_rsp_running) { return -2; }
+	memset(&shim_rsp_msg, 0, sizeof(shim_rsp_msg));
+	shim_rsp_msg.peek.addr = htobe32(addr);
+	shim_rsp_msg.peek.len = len;
+	return shim_rsp_launch(CSP_CMP_PEEK, node);
+}
+
+/* Begin a real `csp_cmp_poke` writing `data` at the 32-bit `addr`. */
+int shim_cmp_poke_start(uint16_t node, uint32_t addr, const uint8_t * data, uint8_t len) {
+	if (shim_rsp_running) { return -2; }
+	if (len > CSP_CMP_POKE_MAX_LEN) { return -3; }
+	memset(&shim_rsp_msg, 0, sizeof(shim_rsp_msg));
+	shim_rsp_msg.poke.addr = htobe32(addr);
+	shim_rsp_msg.poke.len = len;
+	memcpy(shim_rsp_msg.poke.data, data, len);
+	return shim_rsp_launch(CSP_CMP_POKE, node);
+}
+
+/*
+ * Wait for the client and copy the message it holds -- the reply, written over the
+ * request by `csp_cmp` -- out as raw packed bytes. Returns libcsp's own status.
+ */
+int shim_cmp_raw_join(uint8_t * out, int maxlen) {
+	if (!shim_rsp_running) { return -1000; }
+	pthread_join(shim_rsp_thread, NULL);
+	shim_rsp_running = 0;
+	/* The union's unpacked members pad it past the sum of its fields; copy what fits. */
+	int n = (int)sizeof(shim_rsp_msg);
+	if (n > maxlen) { n = maxlen; }
+	if (out != NULL && n > 0) { memcpy(out, &shim_rsp_msg, (size_t)n); }
+	return shim_rsp_status;
+}
