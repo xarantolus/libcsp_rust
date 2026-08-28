@@ -4161,3 +4161,87 @@ adoption are not [covered], and no record varies them." Two records do:
 written before them and never re-measured. Corrected. `untraced.py` checks that every
 untraced test *has* a justification row; it does not check that the row is still true, and
 a sweep this cycle confirmed every corpus record those rows name does still exist.
+
+### The port set the checksum flag and never appended the checksum
+
+2026-08-28. **A real defect, found by driving libcsp's own client.** No `csp_cmp_*` client
+helper was called by either harness: `node_cmp_server.rs` and `node_v2.rs` cover CMP in both
+directions, but each builds the request by filling libcsp's struct and sends it with a
+hand-rolled client. libcsp's actual entry point — `csp_cmp_if_stats` and its siblings, all
+funnelling through `csp_cmp` → `csp_transaction_w_opts` — had never executed. Three things
+live only on that path, and the first is the one that bit:
+
+| | where |
+|---|---|
+| the request is sent with `CSP_O_CRC32` | `csp_services.c:218` |
+| the reply's length is checked exactly | `csp_io.c:352` |
+| "no reply" becomes `CSP_ERR_TIMEDOUT` | `csp_services.c:220` |
+
+`difftest/tests/node_cmp_if_stats.rs` ran it and libcsp answered `CSP_ERR_TIMEDOUT`.
+Measured on the wire: request `flags=0x01`, 63 bytes = 6 header + 53 struct + **4 checksum**;
+reply `flags=0x01`, 59 bytes = 6 + 53 + **0**. The port set `CSP_FCRC32` and appended nothing.
+
+`csp_send_direct_iface` appends the HMAC and then the CRC32 to every packet whose flags ask
+for it, guarded by `if (from_me)` so forwarded traffic is untouched (`csp_io.c:249-271`).
+**The port had no counterpart at all.** `csp_core::crc32::append` was called from two places,
+both inside `#[cfg(test)] mod tests`. `connect` set the flags (`node.rs:606`) and `reply_to`
+copied them, and the bytes were never written.
+
+The consequence is not a corrupted packet — it is a **missing** one. The peer's router
+verifies, fails, and drops before any application sees it, so the sender looks unreachable
+rather than wrong. Since libcsp's CMP client *always* sets `CSP_O_CRC32`, no stock ground
+station could read this node's `IDENT`, `IF_STATS`, `CLOCK`, `PEEK` or `ROUTE_SET` at all,
+and every one would have looked like a dead satellite. The same held for any application
+connection opened with `CSP_O_CRC32` or `CSP_O_HMAC`.
+
+Fixed in a new `csp/src/egress.rs`, called from the two places this node originates traffic:
+`Node::route_from` when `routed_from.is_none()` (send, `send_prio`, `reply_to`, `sendto`) and
+the router's two RDP control queues (`csp_rdp_send_cmp` goes through `csp_send_direct` with
+`from_me` set like anything else). Order matters and follows the C: HMAC first, then the
+checksum over it.
+
+Controls:
+
+| control | `node_cmp_if_stats` | `node_rdp_crc` |
+|---|---|---|
+| `protect` does nothing | FAIL | FAIL |
+| the router's calls removed | pass | FAIL |
+| `route_from`'s call removed | FAIL | FAIL |
+
+`difftest/tests/node_rdp_crc.rs` is the second test, and it exists because fixing the router
+path without driving it would have been the same mistake in a new place: it opens an RDP
+connection with `RDP_REQ | CRC32_REQ` and asserts the SYN's *length*, not just its flag, then
+that a real C node answers it.
+
+**And that control table was not as sharp as it looks, which `just mutants` caught and I did
+not.** "The router's calls removed" was one string substitution and Python replaced *both*
+occurrences, so it disabled the two RDP queue points together. Split into separate mutations
+they came apart: `queue_rdp_from_tick` (the SYN, queued by `connect`) was noticed, and
+`queue_rdp` (the reply built by swapping an incoming header — the handshake's third leg) was
+noticed by **nothing**. The reason is worth keeping: an unchecksummed third leg is dropped by
+the C's router, but the C then opens the connection on the *data* packet that follows, which
+is checksummed correctly by the other call site — so the end-to-end assertion still passed.
+Fixed by asserting the third leg's length on the wire (`6 + 5 + 4`) rather than inferring it
+from the outcome. All three mutations are now noticed.
+
+That is the fourth time in this project that a control which looked decisive was measuring
+something adjacent, and the first time the mutation tool found it rather than a re-reading.
+
+**One behaviour change beyond the C's letter, deliberate.** Sending on an HMAC connection
+with no key configured now refuses instead of emitting an unauthenticated packet that claims
+a MAC. That is `csp_io.c:254-256`'s `goto tx_err`, and the unit test
+`connect_options_reach_the_header` had been asserting the old behaviour — it now asserts the
+refusal, and sets a key for the flag check.
+
+**A stale claim, from the same sweep.** SCOPE.md's justification row for
+`rdp::syn_keeps_valid_options` read "**Partial.** … `conn_timeout` and `ack_timeout` adoption
+are not [covered], and no record varies them." Two records do —
+`a_proposed_conn_timeout_is_adopted` (3 000 ms proposed, idled 4 000, still answers) and
+`a_proposed_ack_timeout_is_adopted` (5 000 ms, `waited_ms: 5250`). The row predates them and
+was never re-measured. `untraced.py` checks that every untraced test *has* a row, not that
+the row is still true; a sweep confirmed every corpus record those 17 rows name does exist.
+
+**Also noted, not changed:** `csp::iface::Stats` and `csp_core::cmp::IfStats` are the same ten
+`u32`s with no conversion between them, so every integrator retypes the list by hand into the
+`if_stats` hook — in an order where a transposition is invisible. A `From` impl would remove
+the class; it is an API addition, so it is written here rather than done unasked.

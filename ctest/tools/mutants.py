@@ -792,6 +792,20 @@ MUTANTS = [
    "    pub fn find(&self, id: &Id) -> Option<Handle> {\n        return None;\n        #[allow(unreachable_code)]\n        for (i, c) in self.conns.iter().enumerate() {"),
   ("conn: close releases the slot", "csp/src/conn.rs",
    "        c.reset();\n        Ok(n)\n    }", "        let _ = &c;\n        Ok(n)\n    }"),
+  # The trailers `csp_send_direct_iface` appends to everything this node originates
+  # (csp_io.c:247-271). Setting the flag without the bytes is what made every CMP reply
+  # undeliverable to a stock libcsp ground station; each call site is covered separately.
+  ("egress: an originated packet carries the trailer it promises", "csp/src/node.rs",
+   "                if routed_from.is_none()\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()",
+   "                if false\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()"),
+  # Both RDP queue points carry the same three lines, so each is anchored on the line that
+  # follows it -- `queue_rdp_from_tick` reads the destination next, `queue_rdp` comments.
+  ("egress: an rdp timer's frame carries it too", "csp/src/router.rs",
+   "        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;",
+   "        if false {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;"),
+  ("egress: an rdp reply carries it too", "csp/src/router.rs",
+   "        if crate::egress::protect(&mut reply, out_flags, self.hmac_key).is_err() {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n\n        // Route it the way any outgoing packet is routed",
+   "        if false {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n\n        // Route it the way any outgoing packet is routed"),
   # The three ways to get csp_conn.c:112 wrong. A client connection matches on dport
   # alone, so answers to a broadcast reach it whoever sent them; a server one also
   # matches the source, so two peers are two connections. Tighten the first, loosen
