@@ -4685,3 +4685,32 @@ come before idling out, and the port could not propose anything. `Node::set_rdp_
 proposal to the defaults. Flight code does not call `csp_rdp_set_opt` today; the row was
 still a lie the coverage tool could not see, of exactly the kind its own docstring warns
 about.
+
+### HMAC end to end: a pin, and two rows in the map that were not
+
+2026-08-28, thirteenth cycle, from the API map. `csp_rdp_set_opt` (previous cycle) had
+been mapped to a codec function, so I listed every `ported` row whose target sits in
+`csp-core` — the pure codec layer — while the C function acts on a node. Fifty-nine rows;
+most are honest (the interfaces are the integrator's by scope; `csp_id_*` are codecs).
+Three were not:
+
+- **`csp_hmac_set_key` → `hmac::derive_key`.** The node's key was a raw
+  `Option<&'static [u8]>` on the router, used directly as the MAC key. The C stores
+  SHA-1 of the material truncated to 16 bytes (`csp_hmac.c:115`), so an integrator who
+  handed the shared secret to the port got a node that failed every MAC from every C
+  peer, unless they knew to derive first. `Node::set_hmac_key` now derives and owns the
+  key; the corpus replay was building its MACs from the raw material on both sides — an
+  internally consistent test that could not see the difference — and now derives too.
+- **the nine `csp_cmp_*` clients → `cmp::decode`.** The port's client is
+  `csp::client::cmp_request`; the rows pointed at the parser.
+- **`csp_sfp_conn_max_mtu` → `sfp::max_mtu`, `csp_rtable_set` → `Table::set`.** Both have
+  node-level counterparts (`Node::conn_sfp_mtu`, `Node::route_set`).
+
+Then the measurement that had never been made: the MAC was compared on random keys and
+messages, and the router refused a bad tag in its own tests, but no **authenticated
+exchange** with a C node had run in either direction — the shape of the CRC32 trailer
+defect. `difftest/tests/node_hmac.rs`: C `csp_ping` with `CSP_O_HMAC` to the port and
+back through the real client's byte-by-byte check; the port to the C's ping service and
+back; and a different secret on one side, refused by both (`autherr` on the port, silence
+from the C). **All three came out clean** — the first full cycle since the fourth that
+pinned rather than fixed. One mutation, on the derivation.
