@@ -668,6 +668,14 @@ static int          shim_bound[SHIM_PORTS];
  * declare the ports it needs without tracking what an earlier case bound (the C
  * cannot unbind -- see SCOPE.md deviation 2).
  */
+/* `csp_socket_close` on the socket bound to `port`: the port stops listening. */
+int shim_node_unbind(uint8_t port) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return -1; }
+	int r = csp_socket_close(&shim_sockets[port]);
+	shim_bound[port] = 0;
+	return r;
+}
+
 int shim_node_bind(uint8_t port) {
 	if (port >= SHIM_PORTS) { return -1; }
 	if (shim_bound[port]) { return 0; }
