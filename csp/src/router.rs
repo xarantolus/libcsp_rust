@@ -230,10 +230,16 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     pending_missed: u32,
     /// Counters.
     pub counters: Counters,
-    /// Options every bound port requires of incoming packets.
+    /// Options every bound port requires of incoming packets — the **socket** policy.
     ///
     /// The C keeps these per socket; one policy for the node is the shape both firmware
-    /// consumers actually use, since each binds `CSP_ANY` once.
+    /// consumers actually use, since each binds `CSP_ANY` once. It is not the whole rule:
+    /// a packet for an existing connection is checked against *that connection's* options
+    /// (`csp_route.c:288`, `conn ? conn->opts : socket->opts`), which for a connection this
+    /// node opened are whatever `connect` was given, and for one it accepted are this value
+    /// (`csp_route.c:171`, `conn->opts = socket->opts`). So a reply to a `CRC32_REQ`
+    /// connection is refused bare even when this is zero, and a plain connection on the
+    /// same node takes a bare reply even when this demands a checksum.
     pub endpoint_opts: u32,
     /// HMAC key, if one is configured.
     ///
@@ -655,7 +661,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // receive anything. The client API, the CMP client and RDP's `SYN|ACK` were all
         // dead for that reason, and every test passed, because none of them ever put a
         // reply into a node that had called `connect`.
-        if !self.is_bound(id.dport) && self.conns.find(&id).is_none() {
+        let existing = self.conns.find(&id);
+        if !self.is_bound(id.dport) && existing.is_none() {
             self.counters.port_not_bound += 1;
             return Routed::Dropped(DropReason::PortNotBound);
         }
@@ -663,9 +670,18 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // The endpoint's policy, before the application sees anything. This is the only
         // thing standing between a node configured to demand HMAC and an unauthenticated
         // peer -- and the "required but absent" half is silent when it is missing.
+        //
+        // The endpoint is the connection when one exists, the socket otherwise
+        // (`csp_route.c:288`). A reply to a connection this node opened with `CRC32_REQ`
+        // is therefore held to that request whatever the node-wide policy says. Checked
+        // against `endpoint_opts` alone, a bare reply on such a connection reached the
+        // application as if verified -- measured in `difftest/tests/node_conn_policy.rs`.
+        let policy = existing
+            .and_then(|h| self.conns.opts(h).ok())
+            .unwrap_or(self.endpoint_opts);
         let verified_len = packet.with_payload(|body| {
             security::check(
-                self.endpoint_opts,
+                policy,
                 &id,
                 &[],
                 body,
@@ -725,7 +741,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // the comment "Ensure that this connection will not be posted to this socket
         // again" — so a second packet joins a connection the application already holds
         // without announcing it a second time.
-        let (handle, is_new) = match self.conns.find(&id) {
+        let (handle, is_new) = match existing {
             Some(h) => (h, false),
             None => {
                 let reply = Id {
@@ -736,7 +752,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                     dport: id.sport,
                     sport: id.dport,
                 };
-                match self.conns.alloc(reply, 0, now_ms) {
+                // `conn->opts = socket->opts` (`csp_route.c:171`): every later packet on
+                // this connection is held to the policy of the socket that accepted it.
+                match self.conns.alloc(reply, self.endpoint_opts, now_ms) {
                     Ok(h) => {
                         let _ = self.conns.set_id_in(h, id);
                         (h, true)
@@ -2766,6 +2784,110 @@ mod tests {
         );
         assert_eq!(r.counters.rx_error, 1);
         assert_eq!(pool.available(), 16, "and the packet is released");
+    }
+
+    #[test]
+    fn a_reply_is_held_to_its_own_connections_policy_not_the_nodes() {
+        // csp_route.c:288: `conn ? conn->opts : socket->opts`. The node demands nothing;
+        // the connection this node opened asked for CRC32. A bare reply is refused.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        assert_eq!(r.endpoint_opts, 0);
+        let out = Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: ME,
+            dst: 8,
+            dport: 20,
+            sport: 17,
+        };
+        let h = r
+            .conns
+            .alloc_kind(
+                out,
+                csp_core::security::opts::CRC32_REQ,
+                0,
+                crate::conn::Kind::Client,
+            )
+            .unwrap();
+        r.conns.set_id_out(h, out).unwrap();
+        // What `Node::connect` records as the reply it expects: ports swapped, our
+        // ephemeral 17 as the destination.
+        r.conns
+            .set_id_in(
+                h,
+                Id {
+                    pri: 2,
+                    flags: csp_core::flags::CRC32,
+                    src: 8,
+                    dst: ME,
+                    dport: 17,
+                    sport: 20,
+                },
+            )
+            .unwrap();
+
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: 0,
+            src: 8,
+            dst: ME,
+            dport: 17,
+            sport: 20,
+        });
+        p.set_payload(b"bare reply").unwrap();
+        r.receive(p, 0);
+        assert_eq!(
+            r.work(&pool, &mut test_ifaces(), 0),
+            Routed::Dropped(DropReason::Refused(Refusal::ChecksumRequired))
+        );
+        assert_eq!(r.counters.rx_error, 1);
+    }
+
+    #[test]
+    fn an_accepted_connection_inherits_the_socket_policy() {
+        // csp_route.c:171: `conn->opts = socket->opts`. The first packet opens the
+        // connection under the socket's CRC32 demand; the second, bare, on the same
+        // connection is refused -- by the connection's policy, which is the socket's.
+        let pool = P::new();
+        let mut r = R::new(ME, Version::V1);
+        r.bind(20).unwrap();
+        r.endpoint_opts = csp_core::security::opts::CRC32_REQ;
+
+        let mut buf = [0u8; 64];
+        let n = csp_core::crc32::append(
+            &[],
+            b"first",
+            csp_core::crc32::Coverage::PayloadOnly,
+            &mut buf,
+        )
+        .unwrap();
+        let mut p = pool.acquire(0).unwrap();
+        p.set_id(Id {
+            pri: 2,
+            flags: csp_core::flags::CRC32,
+            src: 8,
+            dst: ME,
+            dport: 20,
+            sport: 10,
+        });
+        p.set_payload(&buf[..n]).unwrap();
+        r.receive(p, 0);
+        let conn = match r.work(&pool, &mut test_ifaces(), 0) {
+            Routed::Delivered { conn, .. } => conn,
+            other => panic!("the checksummed opener is delivered: {other:?}"),
+        };
+        assert_eq!(
+            r.conns.opts(conn).unwrap(),
+            csp_core::security::opts::CRC32_REQ
+        );
+
+        r.receive(pkt(&pool, ME, 20, b"second, bare"), 0);
+        assert_eq!(
+            r.work(&pool, &mut test_ifaces(), 0),
+            Routed::Dropped(DropReason::Refused(Refusal::ChecksumRequired))
+        );
     }
 
     #[test]
