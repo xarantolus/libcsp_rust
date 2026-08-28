@@ -24,11 +24,11 @@ numbers three times. The `hand port` column is `csp-core/src` + `csp/src` on `po
 | `static mut` | **90** | 90 | **0** |
 | `extern "C"` | 486 | 486 | 0 |
 | raw pointers | **2 709** | 2 709 | 0 |
-| Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 578 (0.99×)** |
-| Rust LOC (tests) | 0 | 0 | 15 470 |
+| Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 661 (1.00×)** |
+| Rust LOC (tests) | 0 | 0 | 15 488 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **594** |
-| Differential tests vs the C | 0 | 0 | **120** |
+| Tests passing | 0 | 0 | **595** |
+| Differential tests vs the C | 0 | 0 | **121** |
 | Two nodes in one process | no | no | **yes** |
 
 The implementation figure has roughly doubled since the first "the port is complete", and

@@ -439,6 +439,22 @@ impl<
         Ok(self.router.conns.id_out(conn)?.dst)
     }
 
+    /// Set the RDP options this node proposes in the SYN of every connection it opens.
+    ///
+    /// `csp_rdp_set_opt`. The C keeps them in six process-wide statics (`csp_rdp.c:976`,
+    /// SCOPE.md deviation 26); here they belong to the node. A peer's own proposal is
+    /// adopted for the connection it opens, exactly as in the C.
+    #[cfg(feature = "rdp")]
+    pub fn set_rdp_options(&mut self, opts: csp_core::rdp::SynOptions) {
+        self.router.rdp_options = opts;
+    }
+
+    /// The RDP options this node proposes -- `csp_rdp_get_opt`.
+    #[cfg(feature = "rdp")]
+    pub fn rdp_options(&self) -> csp_core::rdp::SynOptions {
+        self.router.rdp_options
+    }
+
     /// Connection options.
     pub fn conn_opts(&self, conn: Handle) -> Result<u32> {
         self.router.conns.opts(conn)

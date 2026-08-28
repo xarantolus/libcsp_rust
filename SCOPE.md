@@ -4646,3 +4646,42 @@ reading `ConnectionReset` back — which is the divergence, not the safety.
 its side of a closed connection at once under FAST_CLOSE (previous entry); and I first wrote
 this test's revival row assuming the C's `timestamp` is refreshed on any packet — it is, but
 only for a connection userspace holds (`dest_socket == NULL`), which the test now arranges.
+
+### Giving up closed the slot and told the peer nothing
+
+2026-08-28, twelfth cycle, from the same sweep of records that count without looking. The
+C record `rdp: unacknowledged_data_is_retransmitted_then_given_up_on` counted frames before
+and after the C gave up on a silent peer. Regenerated with the kind and timing of each
+frame, it says what the count could not:
+
+| observed on the C | |
+|---|---|
+| `rst_frames` | **1** — giving up goes through `csp_conn_close`, whose `ACK|RST` is the only thing that tells the peer (`csp_rdp.c:431`) |
+| `first_rst_ms_after_send` | 13 750 |
+| `last_frame_ms_after_send` | 33 750, `last_flags: 4` — the C keeps **retransmitting in CLOSE_WAIT** for twenty more seconds, until the CLOSE_WAIT timeout's early `return` (`csp_rdp.c:371`) stops the sweep |
+
+The port's `TxAction::GiveUp` closed the slot on the spot and sent nothing: the peer kept a
+connection nobody would ever speak on again, with no reset to say so. It now sends the one
+`ACK|RST` through the same close path `Node::close` uses, enters CLOSE_WAIT, and stops
+retransmitting — `rdp_handles` no longer offers a closing connection to the sweep. The
+twenty-second tail of retransmissions the C produces after its own reset is recorded here
+and not reproduced: it is an artefact of the order of blocks in `csp_rdp_check_timeouts`,
+and the record's own `frames_after_giving_up: 0` is the behaviour the port keeps.
+
+Two more things from the same cycle: `tick` now runs its passes in the C's order — the
+handshake and CLOSE_WAIT timeouts, then the retransmission sweep, then the `RDP_OPEN`
+timeout — so a retransmission and a reset that fall in one sweep leave as the C's do; and
+`difftest/tests/node_rdp_giveup.rs` drives the port through the record's scenario against a
+real C handshake and pins the single reset. One mutation.
+
+The same test could not be written without a third thing: **`csp_rdp_set_opt` was mapped to
+`SynOptions::decode_clamped`**, a codec function. The row passed every check the API map
+runs — the name exists, it is a function, it lives in the named module — and configured
+nothing: the node proposed `SynOptions::default()` in every SYN and there was no way to say
+otherwise. The C's record proposed a 20 s `conn_timeout` precisely so that giving up would
+come before idling out, and the port could not propose anything. `Node::set_rdp_options` /
+`rdp_options` now exist (per node, where the C's are process-wide statics — deviation 26),
+`rdp_connect` proposes them, the map rows point at them, and a mutation regresses the
+proposal to the defaults. Flight code does not call `csp_rdp_set_opt` today; the row was
+still a lie the coverage tool could not see, of exactly the kind its own docstring warns
+about.
