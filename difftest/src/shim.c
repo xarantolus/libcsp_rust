@@ -1667,6 +1667,73 @@ void shim_rdp_initiator_close(void) {
 	shim_node_pump();
 }
 
+/* --- libcsp's own CMP client, unmodified ------------------------------------ */
+
+/*
+ * `node_cmp_server.rs` builds a CMP request by filling libcsp's struct and sends it with a
+ * hand-rolled client. That leaves libcsp's *real* entry point -- `csp_cmp_if_stats` and its
+ * siblings, which all funnel through `csp_cmp` -> `csp_transaction_w_opts` -- never called
+ * by either harness. Three things live only on that path:
+ *
+ *   - `csp_cmp` sends with **CSP_O_CRC32** (`csp_services.c:218`), so the request carries a
+ *     checksum and the reply is expected to carry one back. A reply without it is dropped by
+ *     the client's own router and the operator sees a timeout, not an error.
+ *   - `csp_transaction_persistent` refuses a reply whose length is not exactly the struct's
+ *     (`csp_io.c:352`).
+ *   - `csp_cmp` turns "no reply" into `CSP_ERR_TIMEDOUT` (`csp_services.c:219`).
+ *
+ * `csp_read` blocks, so the call runs on its own thread and the caller drives the exchange,
+ * exactly as for `shim_rdp_connect_start`.
+ */
+static pthread_t              shim_cmp_thread;
+static volatile int           shim_cmp_result;
+static int                    shim_cmp_running;
+static uint16_t               shim_cmp_node;
+static struct csp_cmp_message shim_cmp_msg;
+
+static void * shim_cmp_thread_fn(void * arg) {
+	(void)arg;
+	shim_cmp_result = csp_cmp_if_stats(shim_cmp_node, 5000, &shim_cmp_msg);
+	return NULL;
+}
+
+/*
+ * Begin a real `csp_cmp_if_stats` against `node`, asking about `ifname`.
+ *
+ * Returns how many frames the client put on the wire (one request), or negative on failure
+ * to start.
+ */
+int shim_cmp_if_stats_start(uint16_t node, const char * ifname) {
+	if (shim_cmp_running) { return -2; }
+	memset(&shim_cmp_msg, 0, sizeof(shim_cmp_msg));
+	strncpy(shim_cmp_msg.if_stats.interface, ifname,
+			sizeof(shim_cmp_msg.if_stats.interface) - 1);
+	shim_cmp_node = node;
+	shim_cmp_result = -1000;
+	shim_node_clear_tx();
+	if (pthread_create(&shim_cmp_thread, NULL, shim_cmp_thread_fn, NULL) != 0) { return -1; }
+	shim_cmp_running = 1;
+	/* The request is on the wire before `csp_read` blocks. Bounded, so a client that
+	   sends nothing fails the test rather than hanging it. */
+	for (int i = 0; i < 3000 && shim_tx_n == 0 && shim_cmp_result == -1000; i++) { usleep(1000); }
+	return shim_tx_n;
+}
+
+/*
+ * Wait for `csp_cmp_if_stats` to return and copy out the message it filled.
+ *
+ * Returns libcsp's own status: `CSP_ERR_NONE` (0) only if a reply arrived, survived the
+ * client's router, and was exactly `sizeof(struct csp_cmp_if_stats_msg)` bytes.
+ */
+int shim_cmp_if_stats_join(uint8_t * out, int maxlen) {
+	if (!shim_cmp_running) { return -1000; }
+	pthread_join(shim_cmp_thread, NULL);
+	shim_cmp_running = 0;
+	int n = (int)sizeof(struct csp_cmp_if_stats_msg);
+	if (out != NULL && maxlen >= n) { memcpy(out, &shim_cmp_msg, (size_t)n); }
+	return shim_cmp_result;
+}
+
 /* --- I2C: the bus address csp_i2c_tx picks --------------------------------- */
 
 /*

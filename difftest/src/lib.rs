@@ -170,6 +170,8 @@ unsafe extern "C" {
     fn shim_rdp_connect_join() -> c_int;
     fn shim_rdp_initiator_send(body: *const u8, len: c_int) -> c_int;
     fn shim_rdp_initiator_close();
+    fn shim_cmp_if_stats_start(node: u16, ifname: *const u8) -> c_int;
+    fn shim_cmp_if_stats_join(out: *mut u8, maxlen: c_int) -> c_int;
     fn shim_i2c_init(address: u16) -> c_int;
     fn shim_i2c_tx(dst: u16, via: u16) -> c_int;
     fn shim_i2c_rx(frame: *const u8, len: u32) -> c_int;
@@ -902,6 +904,73 @@ pub fn c_rdp_initiator_send(body: &[u8]) -> Vec<Vec<u8>> {
 pub fn c_rdp_initiator_close() {
     // SAFETY: idempotent on the C side.
     unsafe { shim_rdp_initiator_close() }
+}
+
+/// What libcsp's `struct csp_cmp_if_stats_msg` carries back, host-order.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CIfStats {
+    pub interface: String,
+    pub tx: u32,
+    pub rx: u32,
+    pub tx_error: u32,
+    pub rx_error: u32,
+    pub drop: u32,
+    pub autherr: u32,
+    pub frame: u32,
+    pub txbytes: u32,
+    pub rxbytes: u32,
+    pub irq: u32,
+}
+
+/// Begin a real `csp_cmp_if_stats` on the C node and return the request it put on the wire.
+///
+/// This is libcsp's own client entry point, not a request this repository composed: it sends
+/// with `CSP_O_CRC32` and checks the reply's length itself. `csp_read` blocks, so the call
+/// runs on its own thread; finish with [`c_cmp_if_stats_join`].
+pub fn c_cmp_if_stats_start(node: u16, ifname: &str) -> Vec<Vec<u8>> {
+    let name = std::ffi::CString::new(ifname).expect("no interior nul");
+    // SAFETY: `name` outlives the call; the shim copies it before returning.
+    let n = unsafe { shim_cmp_if_stats_start(node, name.as_ptr().cast()) };
+    assert!(
+        n >= 0,
+        "the C client could not start a CMP transaction: {n}"
+    );
+    captured_frames()
+}
+
+/// libcsp's own verdict on the port's IF_STATS reply, and the message it parsed.
+///
+/// `Err(code)` is libcsp's error — `CSP_ERR_TIMEDOUT` covers both "no reply" and "a reply
+/// the client's own router threw away", which is what a missing CRC32 looks like.
+pub fn c_cmp_if_stats_join() -> Result<CIfStats, i32> {
+    let mut buf = [0u8; 128];
+    // SAFETY: `buf` is larger than the struct; the shim bounds-checks against `maxlen`.
+    let status = unsafe { shim_cmp_if_stats_join(buf.as_mut_ptr(), buf.len() as c_int) };
+    if status != 0 {
+        return Err(status);
+    }
+    let name_end = buf[2..2 + 11].iter().position(|&b| b == 0).unwrap_or(11);
+    let be = |i: usize| {
+        u32::from_be_bytes([
+            buf[13 + i * 4],
+            buf[14 + i * 4],
+            buf[15 + i * 4],
+            buf[16 + i * 4],
+        ])
+    };
+    Ok(CIfStats {
+        interface: String::from_utf8_lossy(&buf[2..2 + name_end]).into_owned(),
+        tx: be(0),
+        rx: be(1),
+        tx_error: be(2),
+        rx_error: be(3),
+        drop: be(4),
+        autherr: be(5),
+        frame: be(6),
+        txbytes: be(7),
+        rxbytes: be(8),
+        irq: be(9),
+    })
 }
 
 /// Give the C node a second address it answers to. 0=INGRESS, 1=EGRESS, 2=ROUTED.

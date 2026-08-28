@@ -53,6 +53,7 @@ pub mod conn;
 pub mod dedup;
 #[cfg(feature = "sfp")]
 pub mod delivery;
+mod egress;
 pub mod hooks;
 pub mod iface;
 pub mod iflist;
