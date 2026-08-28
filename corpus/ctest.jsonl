@@ -17,7 +17,7 @@
 {"suite":"rdp","case":"three_sends_are_sequential_and_an_ack_releases_them","verdict":"must_match","input":{"packets":3},"observed":{"sequential":1,"frames_after_the_ack":0,"buffers_lost":0}}
 {"suite":"rdp","case":"one_retransmission_after_the_packet_timeout","verdict":"must_match","input":{"packet_timeout":1000,"swept_ms":1250},"observed":{"repeats":1,"repeat_flags":4,"repeat_carries_the_payload":1}}
 {"suite":"rdp","case":"a_sent_data_packet_carries_an_rdp_trailer","verdict":"must_match","input":{"payload_bytes":5},"observed":{"frames":1,"flags":4,"seq_is_iss_plus_one":1,"ack_is_rcv_cur":1,"payload_len":5}}
-{"suite":"rdp","case":"unacknowledged_data_is_retransmitted_then_given_up_on","verdict":"diverges","input":{"packet_timeout":1000,"tick_ms":250},"observed":{"frames_on_first_send":1,"total_frames":29,"frames_after_giving_up":0}}
+{"suite":"rdp","case":"unacknowledged_data_is_retransmitted_then_given_up_on","verdict":"diverges","input":{"packet_timeout":1000,"tick_ms":250},"observed":{"frames_on_first_send":1,"total_frames":29,"last_flags":4,"rst_frames":1,"first_rst_ms_after_send":13750,"last_frame_ms_after_send":33750,"frames_after_giving_up":0}}
 {"suite":"rdp","case":"a_gap_filled_late_delivers_both_in_order","verdict":"must_match","observed":{"delivered_bytes":2,"delivered_body":"4142"}}
 {"suite":"rdp","case":"an_eak_carries_no_data_to_the_application","verdict":"must_match","observed":{"delivered":0,"delivered_bytes":0,"frames_back":0,"reply_flags":0}}
 {"suite":"rdp","case":"out_of_sequence_data_is_answered_but_not_delivered","verdict":"must_match","observed":{"delivered":0,"delivered_bytes":0,"frames_back":0,"reply_flags":0}}
