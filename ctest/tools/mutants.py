@@ -344,6 +344,10 @@ MUTANTS = [
   # The catch-all, `csp_bind(socket, CSP_ANY)`, which the port had no way to express at all.
   # Four rules: it delivers, the port ceiling still bounds it, releasing it stops delivery,
   # and releasing it hands the buffers back.
+  # csp_socket_close leaves an accepted connection open; unbind closed it.
+  ("unbind: an accepted connection survives", "csp/src/conn.rs",
+   "                || c.idin.dport != port\n                || c.accepted\n            {",
+   "                || c.idin.dport != port\n            {"),
   ("bind_any: the catch-all delivers an unbound port", "csp/src/router.rs",
    "        (port as usize) < PORTS && (self.bound[port as usize] || self.any_bound)",
    "        (port as usize) < PORTS && self.bound[port as usize]"),

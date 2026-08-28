@@ -62,6 +62,9 @@ impl Handle {
 struct Entry<const RXQ: usize> {
     state: State,
     kind: Kind,
+    /// Handed to the application by `accept`. `csp_socket_close` leaves such a
+    /// connection alone; only the ones still queued on the socket go with the socket.
+    accepted: bool,
     generation: u16,
     /// Header of packets arriving on this connection.
     idin: Id,
@@ -117,6 +120,7 @@ impl<const RXQ: usize> Entry<RXQ> {
         Entry {
             state: State::Closed,
             kind: Kind::Server,
+            accepted: false,
             generation: 0,
             idin: Id::default(),
             idout: Id::default(),
@@ -370,11 +374,14 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         Ok(n)
     }
 
-    /// Close every server connection bound to `port`, draining their queues.
+    /// Close every server connection on `port` the application has **not** accepted,
+    /// draining their queues.
     ///
-    /// `csp_socket_close` does this, and it must: without it a connection created before
-    /// the port was unbound stays acceptable, so `accept` keeps handing out connections
-    /// for a port the application has stopped serving.
+    /// `csp_socket_close` empties the socket's queue of connections waiting to be accepted
+    /// and leaves an accepted one alone: it stays open and still receives, because
+    /// `csp_route_deliver` finds the existing connection before it looks for a socket
+    /// (`csp_route.c:279`). Measured in `difftest/tests/node_unbind.rs`. (The C drops the
+    /// queued ones without closing them -- SCOPE.md deviation 31; here they are closed.)
     ///
     /// Stops as soon as `drained` cannot hold another connection's queue, returning how
     /// many were closed and how many slots need releasing. Call again to continue.
@@ -382,7 +389,11 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         let mut closed = 0;
         let mut n = 0;
         for c in self.conns.iter_mut() {
-            if c.state != State::Open || c.kind != Kind::Server || c.idin.dport != port {
+            if c.state != State::Open
+                || c.kind != Kind::Server
+                || c.idin.dport != port
+                || c.accepted
+            {
                 continue;
             }
             if drained.len() - n < c.rx_len {
@@ -400,6 +411,12 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
             closed += 1;
         }
         (closed, n)
+    }
+
+    /// Record that `accept` handed this connection to the application.
+    pub fn mark_accepted(&mut self, h: Handle) -> Result<()> {
+        self.entry_mut(h)?.accepted = true;
+        Ok(())
     }
 
     /// Close every open connection, releasing whatever each still holds.

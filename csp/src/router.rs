@@ -401,9 +401,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
     ///
     /// Returns how many connections were closed and the slot indices to release.
     ///
-    /// `csp_socket_close` drains the socket's queue for the same reason: without it a
-    /// connection created before the unbind stays acceptable, and `accept` keeps handing
-    /// out connections for a port nothing is serving any more.
+    /// `csp_socket_close` drains the socket's queue of connections not yet accepted, and
+    /// leaves an accepted one open and receiving (`csp_route_deliver` finds the connection
+    /// before it looks for a socket). Closing the accepted ones too took a connection out
+    /// from under the application; measured in `difftest/tests/node_unbind.rs`.
     ///
     /// The C also stops after unbinding the **first** port that names the socket
     /// (`csp_port.c:149`, `break`), even though `csp_bind` happily binds one socket to
@@ -485,6 +486,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         for slot in self.accept.iter_mut() {
             if let Some(h) = slot.take() {
                 self.accept_len -= 1;
+                let _ = self.conns.mark_accepted(h);
                 return Some(h);
             }
         }

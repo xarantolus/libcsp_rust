@@ -4582,3 +4582,22 @@ in-sequence RST at once — `CSP_USE_RDP_FAST_CLOSE` is 1 by default (`csp_rdp.c
 and the reader was woken with a NULL packet instead. Only the application's `csp_close`
 frees it. FAST_CLOSE spares the *timeout*, not the userspace close. The row above is the
 measured one.
+
+### `unbind` took an accepted connection out from under the application
+
+2026-08-28, tenth cycle. `Node::unbind` had no differential test, and its doc said
+`csp_socket_close` "does this, and it must": close every server connection on the port.
+Read against `csp_port.c:138`, that is not what the C does, and measured in
+`difftest/tests/node_unbind.rs` it is not what happens either:
+
+| after closing the socket | C | port before |
+|---|---|---|
+| a connection the application had accepted | **still open**; a packet on it is still delivered | closed |
+| a connection still queued for accept | dropped from the queue (not closed — deviation 31) | closed |
+| a new peer | refused | refused |
+
+The C finds an existing connection before it looks for a socket (`csp_route.c:279-289`),
+so a held connection outlives the socket it arrived on. The port now records `accepted`
+when `accept` hands a connection out, and `unbind` closes only the ones still waiting —
+which it does properly, where the C leaks them. One mutation. The two comments that
+described the C wrongly say the measured rule now.
