@@ -1544,6 +1544,40 @@ int shim_sfp_send(uint16_t dst, uint8_t dport, const uint8_t *body, int len, uin
 	return shim_tx_n;
 }
 
+/*
+ * The same, but on the connection this node is already holding for `port` — which after a
+ * handshake is a real RDP connection a peer opened to it.
+ *
+ * `csp_sfp_send` appends its trailer and hands each fragment to `csp_send`, which on an RDP
+ * connection appends a *second* trailer at `data[length]`. Only the port's sending order had
+ * ever been checked, by a C node stripping it (`node_sfp_rdp.rs`). Nothing had made the port
+ * strip two trailers off a fragment a real libcsp sender produced, and getting that order
+ * wrong is silent: the reassembler reads the RDP header as part of the SFP offset and the
+ * stream never completes.
+ *
+ * Returns the frame count, a negative libcsp error, or 0 if no connection was held.
+ */
+int shim_node_sfp_send_on(uint8_t port, const uint8_t *body, int len, uint32_t mtu) {
+	if (port >= SHIM_PORTS || !shim_bound[port]) { return 0; }
+	if (shim_held[port] == NULL) {
+		shim_held[port] = csp_accept(&shim_sockets[port], 0);
+	}
+	if (shim_held[port] == NULL) { return 0; }
+	/* Drain whatever the peer sent, so the connection is not holding buffers. */
+	csp_packet_t *in;
+	while ((in = csp_read(shim_held[port], 0)) != NULL) { csp_buffer_free(in); }
+
+	shim_sfp_src = body;
+	shim_sfp_src_len = (uint32_t)len;
+	const csp_sfp_read_t reader = { .data = NULL, .read = shim_sfp_read };
+
+	shim_node_clear_tx();
+	int ret = csp_sfp_send(shim_held[port], &reader, (uint32_t)len, mtu, 0);
+	shim_node_pump();
+	if (ret != CSP_ERR_NONE) { return -100 + ret; }
+	return shim_tx_n;
+}
+
 /* --- I2C: the bus address csp_i2c_tx picks --------------------------------- */
 
 /*
