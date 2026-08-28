@@ -2310,13 +2310,13 @@ fn replay_rdp_reset(in_sequence: bool) -> serde_json::Value {
 
 /// An established RDP connection left idle past its negotiated `conn_timeout`.
 ///
-/// libcsp does not reap it: `csp_rdp_check_timeouts`'s CONNECTION TIMEOUT branch is guarded
-/// by `conn->dest_socket != NULL`, and `dest_socket` is cleared the moment the connection is
-/// *announced* to the socket, not when the application accepts it. So the branch only covers
-/// the window before announcement.
+/// libcsp closes it: `csp_rdp_check_timeouts` has a second, unguarded CONNECTION TIMEOUT
+/// for `RDP_OPEN` (`csp_rdp.c:443`), sends `ACK|RST`, and answers the peer's next packet
+/// with a reset. The record used to count frames only, and that reset counted as "still
+/// answering" -- which is what the earlier version of this comment said. `answer_flags`
+/// is what tells the two apart.
 ///
-/// Driven through a real `Node` -- handshake, idle with `tick`, then one data packet -- so
-/// what is compared is whether the peer still gets an answer.
+/// Driven through a real `Node` -- handshake, idle with `tick`, then one data packet.
 #[cfg(feature = "rdp")]
 fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Value {
     use csp_core::rdp;
@@ -2345,6 +2345,7 @@ fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Valu
     let olen = opts.encode(&mut body).unwrap();
 
     // Drive the peer's half: SYN, then the handshake's final ACK, then one data packet.
+    let last_flags = core::cell::Cell::new(0u8);
     let send = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>,
                 payload: &[u8],
                 flags: u8,
@@ -2376,7 +2377,11 @@ fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Valu
             match n.work(now) {
                 csp::Routed::Respond { packet, .. } => {
                     frames += 1;
-                    drop(n.take_forwarded(packet));
+                    if let Some(p) = n.take_forwarded(packet) {
+                        let f = p
+                            .with_payload(|d| rdp::Header::decode(d).map(|h| h.flags).unwrap_or(0));
+                        last_flags.set(f);
+                    }
                 }
                 csp::Routed::Delivered { conn, .. } => {
                     while let Ok(Some(pkt)) = n.read(conn) {
@@ -2403,13 +2408,9 @@ fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Valu
     while step < idled_ms {
         step += 250;
         t = CLOCK.wrapping_add(step);
-        // The *node's* idle policy, deliberately well past the test window, not the peer's
-        // proposal. Two different mechanisms: `ConnTable::expire_idle` is the node deciding
-        // how long to hold a slot, and libcsp has no counterpart for an established RDP
-        // connection -- its table is bounded and reused instead. What this record measures
-        // is whether the peer-proposed `conn_timeout` alone stops the answers, so the
-        // node-level reaper must not fire inside the window or it would answer a different
-        // question.
+        // The *node's* idle policy, deliberately well past the test window: what this record
+        // measures is the peer-proposed `conn_timeout`, applied by the RDP timer inside
+        // `tick`, not the node-level slot reaper.
         let _ = conn_timeout;
         n.tick(t, 60_000);
         loop {
@@ -2421,11 +2422,16 @@ fn replay_rdp_conn_timeout(conn_timeout: u32, idled_ms: u32) -> serde_json::Valu
         }
     }
 
-    // Now the peer speaks. `answered` is the whole question: does anything come back?
+    // Now the peer speaks: is there an answer, and is it an acknowledgement or a reset?
     let answered = u32::from(send(&mut n, b"x", rdp::ACK, 1001, iss, t) > 0);
+    let answer_flags = if answered == 1 {
+        last_flags.get() & 0x0F
+    } else {
+        0
+    };
 
     // Only what the peer can see. Whether a table slot still exists is implementation.
-    serde_json::json!({ "answered_after_idle": answered })
+    serde_json::json!({ "answered_after_idle": answered, "answer_flags": answer_flags })
 }
 
 #[cfg(feature = "rdp")]

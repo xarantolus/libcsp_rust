@@ -112,9 +112,13 @@ fn closing_an_rdp_connection_tells_the_c_peer_and_frees_its_side() {
     // The port closes.
     node.close(conn, 1400).expect("close");
     assert!(
-        node.conn_is_active(conn),
+        node.router.conns.is_live(conn),
         "csp_close returns while the handshake is outstanding; the slot is held until the \
          peer answers or CLOSE_WAIT times out"
+    );
+    assert!(
+        !node.conn_is_active(conn, 1400),
+        "but csp_conn_is_active already says no in CLOSE_WAIT"
     );
     let on_close = drain(&mut node, 1400);
     assert_eq!(
@@ -154,7 +158,7 @@ fn closing_an_rdp_connection_tells_the_c_peer_and_frees_its_side() {
     inject(&mut node, &reply.tx[0]);
     let _ = drain(&mut node, 1500);
     assert!(
-        !node.conn_is_active(conn),
+        !node.router.conns.is_live(conn),
         "the peer's ACK|RST completes the port's close and releases the slot"
     );
 }

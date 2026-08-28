@@ -102,7 +102,7 @@ fn the_port_keeps_an_accepted_connection_across_unbind() {
 
     let closed = node.unbind(PORT);
     assert!(
-        node.conn_is_active(conn),
+        node.conn_is_active(conn, 0),
         "csp_socket_close leaves an accepted connection alone; unbind closed {closed}"
     );
 

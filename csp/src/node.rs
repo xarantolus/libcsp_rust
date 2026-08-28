@@ -464,9 +464,38 @@ impl<
         })
     }
 
-    /// True if the handle still refers to a live connection.
-    pub fn conn_is_active(&self, conn: Handle) -> bool {
-        self.router.conns.is_live(conn)
+    /// `csp_conn_is_active`: the connection is open and, if it is RDP, still alive.
+    ///
+    /// For an RDP connection the C answers no once it is closing (`CLOSE_WAIT`, `CLOSED`)
+    /// or has heard nothing from the peer for `conn_timeout` (`csp_rdp_conn_is_active`,
+    /// `csp_rdp.c:1005`) -- which is what stops `csp_sfp_send`'s loop on a dead peer. The
+    /// slot may still be held while this says no; see [`close`](Self::close). A plain
+    /// connection is active for as long as it is open. Measured in
+    /// `difftest/tests/node_conn_active.rs`.
+    pub fn conn_is_active(&self, conn: Handle, now_ms: u32) -> bool {
+        if !self.router.conns.is_live(conn) {
+            return false;
+        }
+        #[cfg(feature = "rdp")]
+        if let Ok(id) = self.router.conns.id_in(conn) {
+            if id.has_flag(csp_core::flags::RDP) {
+                let Ok(r) = self.router.conns.rdp(conn) else {
+                    return false;
+                };
+                if matches!(
+                    r.state,
+                    csp_core::rdp::State::CloseWait | csp_core::rdp::State::Closed
+                ) {
+                    return false;
+                }
+                if now_ms.wrapping_sub(r.last_activity) > r.opts.conn_timeout {
+                    return false;
+                }
+            }
+        }
+        #[cfg(not(feature = "rdp"))]
+        let _ = now_ms;
+        true
     }
 
     /// True once an RDP connection has completed its handshake.
@@ -1503,7 +1532,7 @@ mod tests {
         let mut n = node(&s);
         let c = n.connect(2, 8, 20, 0, 0).unwrap();
         n.close(c, 0).unwrap();
-        assert!(!n.conn_is_active(c));
+        assert!(!n.conn_is_active(c, 0));
         assert!(matches!(n.read(c), Err(Error::NoTransferInProgress)));
     }
 

@@ -23,7 +23,7 @@
 {"suite":"rdp","case":"out_of_sequence_data_is_answered_but_not_delivered","verdict":"must_match","observed":{"delivered":0,"delivered_bytes":0,"frames_back":0,"reply_flags":0}}
 {"suite":"rdp","case":"an_in_sequence_rst_is_answered","verdict":"must_match","input":{"rst_in_sequence":1},"observed":{"frames_after_rst":1,"reply_flags":5,"followup_flags":5}}
 {"suite":"rdp","case":"an_out_of_sequence_rst_is_ignored","verdict":"must_match","input":{"rst_in_sequence":0},"observed":{"frames_after_rst":0,"reply_flags":0,"followup_flags":4}}
-{"suite":"rdp","case":"a_proposed_conn_timeout_is_adopted","verdict":"must_match","input":{"conn_timeout":3000,"idled_ms":4000,"delayed_acks":0},"observed":{"answered_after_idle":1}}
+{"suite":"rdp","case":"a_proposed_conn_timeout_is_adopted","verdict":"must_match","input":{"conn_timeout":3000,"idled_ms":4000,"delayed_acks":0},"observed":{"answered_after_idle":1,"answer_flags":5}}
 {"suite":"rdp","case":"a_proposed_ack_timeout_is_adopted","verdict":"must_match","input":{"ack_timeout":5000,"delayed_acks":1,"ack_delay_count":4},"observed":{"acked_immediately":0,"acked":1,"waited_ms":5250}}
 {"suite":"rdp","case":"a_nonzero_delayed_acks_is_on_not_a_count","verdict":"must_match","input":{"delayed_acks":2,"ack_delay_count":2},"observed":{"normalised_to_on":1,"acks_after_n_packets":[0,0,1,1,1]}}
 {"suite":"rdp","case":"a_delay_count_beyond_the_window_is_bound_by_it","verdict":"must_match","input":{"window_size":2,"delayed_acks":1,"ack_delay_count":250},"observed":{"acks_after_n_packets":[0,0,1,1,1]}}
