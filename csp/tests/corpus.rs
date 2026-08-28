@@ -1892,13 +1892,28 @@ fn replay_rdp_unacked_send() -> serde_json::Value {
     // A `Cell`, because the two closures below both touch it and the borrow checker is
     // right that two `&mut` captures of the same counter is not a thing.
     let frames = core::cell::Cell::new(0u32);
+    let last_flags = core::cell::Cell::new(0u8);
+    let rst_frames = core::cell::Cell::new(0u32);
+    let first_rst_ms = core::cell::Cell::new(0u32);
+    let last_frame_ms = core::cell::Cell::new(0u32);
     let drain = |n: &mut csp::Node<'_, 8, 16, 264, 48, 32, 4>, now: u32, count: bool| loop {
         match n.work(now) {
             csp::Routed::Respond { packet, .. } | csp::Routed::Forwarded { packet, .. } => {
                 if count {
                     frames.set(frames.get() + 1);
                 }
-                drop(n.take_forwarded(packet));
+                if let Some(p) = n.take_forwarded(packet) {
+                    let f =
+                        p.with_payload(|d| rdp::Header::decode(d).map(|h| h.flags).unwrap_or(0));
+                    last_flags.set(f);
+                    last_frame_ms.set(now);
+                    if f & rdp::RST != 0 {
+                        if rst_frames.get() == 0 {
+                            first_rst_ms.set(now);
+                        }
+                        rst_frames.set(rst_frames.get() + 1);
+                    }
+                }
             }
             csp::Routed::Delivered { conn, .. } => {
                 while let Ok(Some(p)) = n.read(conn) {
@@ -1982,6 +1997,10 @@ fn replay_rdp_unacked_send() -> serde_json::Value {
     serde_json::json!({
         "frames_on_first_send": first,
         "total_frames": total,
+        "last_flags": last_flags.get() & 0x0F,
+        "rst_frames": rst_frames.get(),
+        "first_rst_ms_after_send": if rst_frames.get() > 0 { first_rst_ms.get().wrapping_sub(CLOCK) } else { 0 },
+        "last_frame_ms_after_send": last_frame_ms.get().wrapping_sub(CLOCK),
         "frames_after_giving_up": frames.get() - before_tail,
     })
 }

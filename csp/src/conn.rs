@@ -611,10 +611,14 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     #[cfg(feature = "rdp")]
     pub fn rdp_handles(&self) -> impl Iterator<Item = Handle> + '_ {
         self.conns.iter().enumerate().filter_map(|(i, c)| {
-            (c.state == State::Open && !c.tx_unacked.is_empty()).then_some(Handle {
-                idx: i as u16,
-                generation: c.generation,
-            })
+            // Not once it is closing: after giving up, the C sends nothing more (its record
+            // `unacknowledged_data_is_retransmitted_then_given_up_on` has a zero tail).
+            (c.state == State::Open && c.rdp.is_open() && !c.tx_unacked.is_empty()).then_some(
+                Handle {
+                    idx: i as u16,
+                    generation: c.generation,
+                },
+            )
         })
     }
 
@@ -713,16 +717,23 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
     /// the peer never answered keeps its unacknowledged copies -- and the caller owns the
     /// pool. Its handle is written to `timed_out` for the caller to [`close`](Self::close)
     /// and release. Returns how many were written.
+    ///
+    /// `established` selects which connections this pass steps: `false` for handshakes and
+    /// CLOSE_WAIT, `true` for `Open` ones. `csp_rdp_check_timeouts` orders them so -- the
+    /// guarded connection timeout and the CLOSE_WAIT timeout first, the retransmission
+    /// sweep, and only then the `RDP_OPEN` timeout (`csp_rdp.c:358`, `:371`, `:443`) -- so
+    /// a retransmission and the reset that follows it leave in the C's order.
     pub fn tick_rdp(
         &mut self,
         now_ms: u32,
         max_window: u32,
+        established: bool,
         mut send: impl FnMut(Id, rdp::Header),
         timed_out: &mut [Option<Handle>],
     ) -> usize {
         let mut closed = 0;
         for (i, c) in self.conns.iter_mut().enumerate() {
-            if c.state != State::Open {
+            if c.state != State::Open || c.rdp.is_open() != established {
                 continue;
             }
             let done = match c.rdp.step(rdp::Event::Tick, now_ms, max_window) {
@@ -1040,11 +1051,10 @@ mod tests {
     fn the_router_tick_drives_rdp_timeouts() {
         // The RDP machine reads no clock on purpose, so something has to step it.
         //
-        // Driven with a half-finished handshake, not an established connection: libcsp only
-        // reaps the former on `conn_timeout` (`csp_rdp.c`'s CONNECTION TIMEOUT is guarded by
-        // `dest_socket != NULL`), and this used the latter, which is the behaviour that
-        // turned out to be wrong. The property under test is that the tick reaches the
-        // timers at all, and a `SynSent` connection shows that just as well.
+        // Driven with a half-finished handshake: the property under test is that the tick
+        // reaches the timers at all, and a `SynSent` connection shows that. (An established
+        // connection times out too -- `csp_rdp.c:443` -- but by way of CLOSE_WAIT, which is
+        // `rdp::a_silent_established_connection_times_out_like_the_c`'s subject.)
         let mut t = T::new();
         let h = t.alloc(id(10), 0, 0).unwrap();
         {
@@ -1054,12 +1064,12 @@ mod tests {
         }
         let mut out = [None; 4];
         assert_eq!(
-            t.tick_rdp(5_000, 5, |_, _| {}, &mut out),
+            t.tick_rdp(5_000, 5, false, |_, _| {}, &mut out),
             0,
             "not yet timed out"
         );
         assert_eq!(
-            t.tick_rdp(60_000, 5, |_, _| {}, &mut out),
+            t.tick_rdp(60_000, 5, false, |_, _| {}, &mut out),
             1,
             "must close on timeout"
         );

@@ -46,10 +46,17 @@ static uint8_t tx_flags;
 static uint16_t tx_seq;
 static uint16_t tx_ack;
 static uint16_t tx_payload_len;
+/* Frames carrying RDP_RST, and when the first left and the last frame of any kind left, on
+   the test clock. A count of frames cannot say whether the C reset the peer, or when it
+   stopped talking. */
+static unsigned int tx_rst_count;
+static uint32_t tx_first_rst_ms;
+static uint32_t tx_last_ms;
 
 static int test_nexthop(csp_iface_t * iface, uint16_t via, csp_packet_t * packet, int from_me) {
 	(void)iface; (void)via; (void)from_me;
 	test_tx_count++;
+	tx_last_ms = csp_get_ms();
 	if (packet->length >= sizeof(test_rdp_header_t)) {
 		tx_payload_len = (uint16_t)(packet->length - sizeof(test_rdp_header_t));
 		const test_rdp_header_t * h =
@@ -57,6 +64,10 @@ static int test_nexthop(csp_iface_t * iface, uint16_t via, csp_packet_t * packet
 		tx_flags = h->flags;
 		tx_seq = be16toh(h->seq_nr);
 		tx_ack = be16toh(h->ack_nr);
+		if (h->flags & 0x01) {
+			if (tx_rst_count == 0) { tx_first_rst_ms = csp_get_ms(); }
+			tx_rst_count++;
+		}
 	}
 	csp_buffer_free(packet);
 	return CSP_ERR_NONE;
@@ -83,6 +94,9 @@ static void setup_stack(void) {
 	tx_seq = 0;
 	tx_ack = 0;
 	tx_payload_len = 0;
+	tx_rst_count = 0;
+	tx_first_rst_ms = 0;
+	tx_last_ms = 0;
 }
 
 static csp_packet_t * new_rdp_packet(void) {
@@ -1029,6 +1043,7 @@ START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
 
 	/* One packet out, never acknowledged. */
 	const unsigned int before = test_tx_count;
+	const uint32_t sent_at_ms = csp_get_ms();
 	csp_packet_t * out = csp_buffer_get(0);
 	ck_assert_ptr_nonnull(out);
 	memcpy(out->data, "hello", 5);
@@ -1069,6 +1084,9 @@ START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
 		csp_conn_check_timeouts();
 	}
 	const unsigned int total = test_tx_count - before;
+	/* What the last frame was: giving up goes through csp_conn_close, whose reset is the
+	   only thing that tells the peer. A count alone cannot see it. */
+	const uint8_t last_flags = tx_flags & 0x0F;
 
 	/* Another long stretch: anything sent here means it never gave up. */
 	const unsigned int before_tail = test_tx_count;
@@ -1088,6 +1106,11 @@ START_TEST(test_unacknowledged_data_is_retransmitted_then_given_up_on)
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("frames_on_first_send", (int64_t)first_send);
 		ctest_trace_int("total_frames", (int64_t)total);
+		ctest_trace_int("last_flags", (int64_t)last_flags);
+		ctest_trace_int("rst_frames", (int64_t)tx_rst_count);
+		ctest_trace_int("first_rst_ms_after_send",
+						(int64_t)(tx_rst_count ? (tx_first_rst_ms - sent_at_ms) : 0));
+		ctest_trace_int("last_frame_ms_after_send", (int64_t)(tx_last_ms - sent_at_ms));
 		ctest_trace_int("frames_after_giving_up", (int64_t)tail);
 		ctest_trace_obj_end();
 		ctest_trace_end();

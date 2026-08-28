@@ -178,8 +178,8 @@ csp_conn_sport	ported	csp::node::Node::conn_sport
 csp_conn_src	ported	csp::node::Node::conn_src
 csp_conn_flags	ported	csp::node::Node::conn_opts
 csp_conn_is_active	ported	csp::node::Node::conn_is_active
-csp_rdp_set_opt	ported	csp_core::rdp::SynOptions::decode_clamped
-csp_rdp_get_opt	ported	csp_core::rdp::SynOptions::encode
+csp_rdp_set_opt	ported	csp::node::Node::set_rdp_options
+csp_rdp_get_opt	ported	csp::node::Node::rdp_options
 csp_can_add_interface	ported	csp_core::cfp::new
 csp_can_remove_interface	ported	csp_core::cfp::reset
 csp_can_rx	ported	csp_core::cfp::push

@@ -809,6 +809,16 @@ MUTANTS = [
   ("rdp: an unfinished handshake times out", "csp-core/src/rdp.rs",
    "                if matches!(self.state, State::SynSent | State::SynRcvd)\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout\n                {",
    "                if false {"),
+  # csp_rdp_set_opt: the options a node proposes are configurable. Mapped to a codec
+  # function before, which passed the name check and configured nothing.
+  ("rdp: connect proposes the configured options", "csp/src/router.rs",
+   "        let proposed = self.rdp_options;",
+   "        let proposed = csp_core::rdp::SynOptions::default();"),
+  # csp_rdp.c:431 -- giving up goes through csp_conn_close, whose ACK|RST is the only thing
+  # that tells the peer. Measured: the C sends exactly one reset when it gives up.
+  ("rdp: giving up tells the peer", "csp/src/router.rs",
+   "                        if let Ok(Some((idout, hdr))) =\n                            self.conns.rdp_close(handle, now_ms, RDP_MAX_WINDOW)\n                        {\n                            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, hdr, &[]);\n                        }",
+   "                        let _ = self.conns.rdp_close(handle, now_ms, RDP_MAX_WINDOW);"),
   # csp_rdp.c:443 -- an RDP_OPEN connection silent for conn_timeout is closed with ACK|RST.
   ("rdp: a silent established connection times out", "csp-core/src/rdp.rs",
    "                if self.state == State::Open\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout\n                {",

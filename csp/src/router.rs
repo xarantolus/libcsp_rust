@@ -245,6 +245,13 @@ pub struct Router<const CONNS: usize, const RXQ: usize, const PORTS: usize, cons
     /// connection is refused bare even when this is zero, and a plain connection on the
     /// same node takes a bare reply even when this demands a checksum.
     pub endpoint_opts: u32,
+    /// The RDP options this node proposes when it opens a connection.
+    ///
+    /// `csp_rdp_set_opt` (`csp_rdp.c:976`) writes six process-wide statics that every
+    /// later `csp_connect` copies into its SYN; here they are per node. What a peer proposes
+    /// in its own SYN is adopted for that connection regardless, as the C does.
+    #[cfg(feature = "rdp")]
+    pub rdp_options: csp_core::rdp::SynOptions,
     /// HMAC key, if one is configured.
     ///
     /// `None` means a packet claiming authentication cannot be verified, and is refused
@@ -297,6 +304,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             pending_missed: 0,
             counters: Counters::default(),
             endpoint_opts: 0,
+            #[cfg(feature = "rdp")]
+            rdp_options: csp_core::rdp::SynOptions::default(),
             hmac_key: None,
             accept: [None; 8],
             accept_len: 0,
@@ -1125,7 +1134,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
 
-        let mut closed = 0;
+        // Giving up no longer closes the slot here -- the peer is told first (see below) and
+        // the CLOSE_WAIT timeout in `tick_rdp` releases it -- so nothing is counted closed.
+        let closed = 0;
         for handle in handles.iter().take(n_handles).flatten().copied() {
             // Sized by `RXQ`: the queue cannot hold more than the shared budget allows, and
             // a short array would leave entries unexamined with their timers unreset.
@@ -1177,12 +1188,16 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                         self.queue_built(pool, ifaces, id, c);
                     }
                     TxAction::GiveUp => {
-                        let mut drained = [0u16; RXQ];
-                        if let Ok(k) = self.conns.close(handle, &mut drained) {
-                            for slot in drained.iter().take(k) {
-                                drop(pool.from_index(*slot));
-                            }
-                            closed += 1;
+                        // "No progress after N retransmissions, closing": the C calls
+                        // `csp_conn_close`, which sends `ACK|RST` and waits in CLOSE_WAIT
+                        // (`csp_rdp.c:431`). Closing the slot silently left the peer a
+                        // connection it had never been told was gone; the reset is the
+                        // only thing that tells it. The slot goes when the peer answers or
+                        // CLOSE_WAIT expires, and the unacknowledged copies with it.
+                        if let Ok(Some((idout, hdr))) =
+                            self.conns.rdp_close(handle, now_ms, RDP_MAX_WINDOW)
+                        {
+                            let _ = self.queue_rdp_from_tick(pool, idout, ifaces, hdr, &[]);
                         }
                     }
                 }
@@ -1505,10 +1520,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         now_ms: u32,
     ) -> csp_core::Result<()> {
         let iss = Self::initial_seq(now_ms);
-        let defaults = csp_core::rdp::SynOptions::default();
+        let proposed = self.rdp_options;
         let Some((header, opts)) =
             self.conns
-                .rdp_connect(handle, iss, defaults, now_ms, RDP_MAX_WINDOW)
+                .rdp_connect(handle, iss, proposed, now_ms, RDP_MAX_WINDOW)
         else {
             return Err(csp_core::Error::Unsupported {
                 feature: csp_core::Feature::Rdp,
@@ -1696,12 +1711,16 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         let mut pending: [Option<(Id, csp_core::rdp::Header)>; CONNS] = [None; CONNS];
         #[cfg(feature = "rdp")]
         let mut n_pending = 0usize;
+        // Handshakes and CLOSE_WAIT first; established connections after the retransmission
+        // sweep, which is `csp_rdp_check_timeouts`'s order (`csp_rdp.c:358`, `:371`, `:403`,
+        // `:443`), so a retransmission and the reset that follows it leave as the C's do.
         #[cfg(feature = "rdp")]
         let mut timed_out: [Option<Handle>; CONNS] = [None; CONNS];
         #[cfg(feature = "rdp")]
         let n_timed_out = self.conns.tick_rdp(
             now_ms,
             RDP_MAX_WINDOW,
+            false,
             |id, h| {
                 if n_pending < CONNS {
                     pending[n_pending] = Some((id, h));
@@ -1737,6 +1756,43 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // connection on each call, counting one attempt per sweep rather than per packet.
         #[cfg(feature = "rdp")]
         let closed = closed + self.sweep_unacked(pool, ifaces, now_ms);
+
+        // The `RDP_OPEN` timeout, after the sweep.
+        #[cfg(feature = "rdp")]
+        let mut late_pending: [Option<(Id, csp_core::rdp::Header)>; CONNS] = [None; CONNS];
+        #[cfg(feature = "rdp")]
+        let mut n_late = 0usize;
+        #[cfg(feature = "rdp")]
+        let mut late_out: [Option<Handle>; CONNS] = [None; CONNS];
+        #[cfg(feature = "rdp")]
+        let n_late_out = self.conns.tick_rdp(
+            now_ms,
+            RDP_MAX_WINDOW,
+            true,
+            |id, h| {
+                if n_late < CONNS {
+                    late_pending[n_late] = Some((id, h));
+                    n_late += 1;
+                }
+            },
+            &mut late_out,
+        );
+        #[cfg(feature = "rdp")]
+        for entry in late_pending.iter().take(n_late) {
+            let Some((id, h)) = entry else { continue };
+            let _ = self.queue_rdp_from_tick(pool, *id, ifaces, *h, &[]);
+        }
+        #[cfg(feature = "rdp")]
+        for h in late_out.iter().take(n_late_out).flatten() {
+            let mut drained = [0u16; RXQ];
+            if let Ok(n) = self.conns.close(*h, &mut drained) {
+                for &idx in &drained[..n] {
+                    drop(pool.from_index(idx));
+                }
+            }
+        }
+        #[cfg(feature = "rdp")]
+        let closed = closed + n_late_out;
 
         // The delayed acknowledgement that only a timer can produce.
         //
