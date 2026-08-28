@@ -248,6 +248,7 @@ unsafe extern "C" {
         out_len: *mut c_int,
     ) -> c_int;
     fn shim_node_buf_free() -> c_int;
+    fn shim_node_open_conns() -> c_int;
     fn shim_buffers_hold(n: c_int) -> c_int;
     fn shim_buffers_release();
     fn shim_node_counters(
@@ -1503,6 +1504,12 @@ pub fn c_node_exchange(frame: &[u8], watch_ports: &[u8]) -> NodeOutcome {
 pub fn c_node_buf_free() -> i32 {
     // SAFETY: reads one counter.
     unsafe { shim_node_buf_free() }
+}
+
+/// Connections the C node holds open, counted through `csp_conn_get_array`.
+pub fn c_node_open_conns() -> i32 {
+    // SAFETY: reads libcsp's connection array. Callers hold `LOCK`.
+    unsafe { shim_node_open_conns() }
 }
 
 /// Take `n` buffers out of the C's pool and keep them, so `csp_buffer_remaining()` drops

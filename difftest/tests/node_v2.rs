@@ -114,7 +114,7 @@ fn rust_exchange(frame: &[u8], bind_ports: &[u8], routes: &[(u16, u16, u8, u16)]
                 payload: pkt.with_payload(|d| d.to_vec()),
             });
         }
-        let _ = node.close(conn);
+        let _ = node.close(conn, 0);
     }
     out
 }
@@ -330,7 +330,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
                     while let Ok(Some(pkt)) = node.read(conn) {
                         drop(pkt);
                     }
-                    let _ = node.close(conn);
+                    let _ = node.close(conn, 0);
                 }
                 Routed::Forwarded { packet, .. } => {
                     forwarded += 1;

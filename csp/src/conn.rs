@@ -666,39 +666,67 @@ impl<const N: usize, const RXQ: usize> Table<N, RXQ> {
         Ok(&self.entry(h)?.rdp)
     }
 
+    /// Begin closing an RDP connection: the `ACK|RST` to send, if one is due.
+    ///
+    /// The slot is kept -- `csp_close` returns while the handshake is outstanding
+    /// (`csp_conn.c:230`) -- and is released when the peer's `ACK|RST` arrives or the
+    /// connection times out of CLOSE_WAIT in [`tick_rdp`](Self::tick_rdp).
+    #[cfg(feature = "rdp")]
+    pub fn rdp_close(
+        &mut self,
+        h: Handle,
+        now_ms: u32,
+        max_window: u32,
+    ) -> Result<Option<(Id, rdp::Header)>> {
+        let c = self.entry_mut(h)?;
+        Ok(match c.rdp.step(rdp::Event::Close, now_ms, max_window) {
+            rdp::Action::SendControl(hdr) => Some((c.idout, hdr)),
+            _ => None,
+        })
+    }
+
     /// Step every open connection's RDP timers, closing any that time out.
     ///
     /// Returns the number closed. This is what drives retransmission and connection
     /// timeout — without it the RDP state machine never advances on its own, because it
     /// deliberately reads no clock.
     #[cfg(feature = "rdp")]
+    ///
+    /// A connection the timer closes is **not** reset here: it may hold packets -- a close
+    /// the peer never answered keeps its unacknowledged copies -- and the caller owns the
+    /// pool. Its handle is written to `timed_out` for the caller to [`close`](Self::close)
+    /// and release. Returns how many were written.
     pub fn tick_rdp(
         &mut self,
         now_ms: u32,
         max_window: u32,
         mut send: impl FnMut(Id, rdp::Header),
+        timed_out: &mut [Option<Handle>],
     ) -> usize {
         let mut closed = 0;
-        for c in self.conns.iter_mut() {
+        for (i, c) in self.conns.iter_mut().enumerate() {
             if c.state != State::Open {
                 continue;
             }
-            match c.rdp.step(rdp::Event::Tick, now_ms, max_window) {
-                rdp::Action::Closed(_) => {
-                    c.reset();
-                    closed += 1;
-                }
+            let done = match c.rdp.step(rdp::Event::Tick, now_ms, max_window) {
+                rdp::Action::Closed(_) => true,
                 // A retransmitted `SYN|ACK`, or the `RST` that gives up on one. These were
                 // discarded: the match arm only looked for `Closed`, so anything the timer
                 // wanted to put on the wire went nowhere and the peer heard nothing.
                 rdp::Action::SendControl(h) => {
                     send(c.idout, h);
-                    if c.rdp.state == csp_core::rdp::State::Closed {
-                        c.reset();
-                        closed += 1;
-                    }
+                    c.rdp.state == csp_core::rdp::State::Closed
                 }
-                _ => {}
+                _ => false,
+            };
+            if done {
+                if let Some(slot) = timed_out.get_mut(closed) {
+                    *slot = Some(Handle {
+                        idx: i as u16,
+                        generation: c.generation,
+                    });
+                }
+                closed += 1;
             }
         }
         closed
@@ -1007,8 +1035,21 @@ mod tests {
             c.state = rdp::State::SynSent;
             c.last_activity = 0;
         }
-        assert_eq!(t.tick_rdp(5_000, 5, |_, _| {}), 0, "not yet timed out");
-        assert_eq!(t.tick_rdp(60_000, 5, |_, _| {}), 1, "must close on timeout");
+        let mut out = [None; 4];
+        assert_eq!(
+            t.tick_rdp(5_000, 5, |_, _| {}, &mut out),
+            0,
+            "not yet timed out"
+        );
+        assert_eq!(
+            t.tick_rdp(60_000, 5, |_, _| {}, &mut out),
+            1,
+            "must close on timeout"
+        );
+        // The table reports it; the caller closes and releases, since it owns the pool.
+        let mut drained = [0u16; 4];
+        t.close(out[0].expect("the timed-out handle"), &mut drained)
+            .unwrap();
         assert_eq!(t.open_count(), 0);
     }
 

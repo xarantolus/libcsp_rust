@@ -3696,7 +3696,7 @@ fn replay_fragment_read_as_a_datagram(input: &SfpInput) -> serde_json::Value {
                         delivered_body = tohex(&got);
                     }
                 }
-                let _ = n.close(conn);
+                let _ = n.close(conn, 0);
             }
             csp::Routed::Idle => break,
             _ => {}
