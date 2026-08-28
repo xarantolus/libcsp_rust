@@ -249,6 +249,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn shim_node_buf_free() -> c_int;
     fn shim_node_unbind(port: u8) -> c_int;
+    fn shim_node_held_active(port: u8) -> c_int;
     fn shim_node_open_conns() -> c_int;
     fn shim_buffers_hold(n: c_int) -> c_int;
     fn shim_buffers_release();
@@ -1511,6 +1512,17 @@ pub fn c_node_buf_free() -> i32 {
 pub fn c_node_unbind(port: u8) -> i32 {
     // SAFETY: bounded by SHIM_PORTS on the C side. Callers hold `LOCK`.
     unsafe { shim_node_unbind(port) }
+}
+
+/// `csp_conn_is_active` on the connection [`c_node_send_on`] holds for `port`: `Some(true)`
+/// active, `Some(false)` not, `None` if nothing is held.
+pub fn c_node_held_active(port: u8) -> Option<bool> {
+    // SAFETY: bounded by SHIM_PORTS on the C side. Callers hold `LOCK`.
+    match unsafe { shim_node_held_active(port) } {
+        1 => Some(true),
+        0 => Some(false),
+        _ => None,
+    }
 }
 
 /// Connections the C node holds open, counted through `csp_conn_get_array`.

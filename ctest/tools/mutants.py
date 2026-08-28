@@ -106,6 +106,14 @@ MUTANTS = [
   ("rdp: a timed-out close releases what it held", "csp/src/router.rs",
    "        for h in timed_out.iter().take(n_timed_out).flatten() {",
    "        for h in timed_out.iter().take(0).flatten() {"),
+  # csp_conn_is_active: an RDP connection that has heard nothing for conn_timeout, or is
+  # closing, is not active -- this is what stops csp_sfp_send's loop on a dead peer.
+  ("conn: an RDP connection goes inactive after conn_timeout", "csp/src/node.rs",
+   "                if now_ms.wrapping_sub(r.last_activity) > r.opts.conn_timeout {\n                    return false;\n                }",
+   ""),
+  ("conn: a closing RDP connection is not active", "csp/src/node.rs",
+   "                    csp_core::rdp::State::CloseWait | csp_core::rdp::State::Closed\n                ) {\n                    return false;\n                }",
+   "                    csp_core::rdp::State::Closed\n                ) {\n                    return false;\n                }"),
   ("rdp: a reset is not back-pressure", "csp/src/node.rs",
    "            if !self.is_rdp_open(conn) {\n                return Err(Error::ConnectionReset);\n            }\n",
    ""),
@@ -798,9 +806,13 @@ MUTANTS = [
   ("rdp: a proposed ack_timeout is adopted", "csp-core/src/rdp.rs",
    "            ack_timeout: clamp(w(4), MIN_ACK_TIMEOUT, conn_timeout),",
    "            ack_timeout: 250,"),
-  ("rdp: only an unestablished connection times out", "csp-core/src/rdp.rs",
-   "                if self.state != State::Open\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout",
-   "                if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout"),
+  ("rdp: an unfinished handshake times out", "csp-core/src/rdp.rs",
+   "                if matches!(self.state, State::SynSent | State::SynRcvd)\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout\n                {",
+   "                if false {"),
+  # csp_rdp.c:443 -- an RDP_OPEN connection silent for conn_timeout is closed with ACK|RST.
+  ("rdp: a silent established connection times out", "csp-core/src/rdp.rs",
+   "                if self.state == State::Open\n                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout\n                {",
+   "                if false {"),
   # The blind-reset defence. One injected frame with the right addresses and ports must
   # not be able to drop a link when the sequence number is wrong.
   ("rdp: a reset is honoured only in sequence", "csp-core/src/rdp.rs",
