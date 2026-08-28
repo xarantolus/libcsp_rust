@@ -972,7 +972,7 @@ fn rust_node_exchange_routed(
                     payload,
                 });
             }
-            let _ = node.close(conn);
+            let _ = node.close(conn, 0);
             let _ = port;
         }
     }
@@ -1240,7 +1240,7 @@ fn no_path_through_the_node_leaks_a_buffer() {
                     while let Ok(Some(pkt)) = node.read(conn) {
                         drop(pkt);
                     }
-                    let _ = node.close(conn);
+                    let _ = node.close(conn, 0);
                 }
                 Routed::Forwarded { packet, .. } => {
                     outcomes[1] += 1;

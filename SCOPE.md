@@ -4545,3 +4545,40 @@ affected.
 **One thing I got wrong, caught by the test.** My first stream for the second row was
 `FEND 00 00 A FEND` — no empty frame at all — and both decoders agreed on it (the second
 `00` is data on both). The measured C rows above are from the corrected stream.
+
+### `close` on an RDP connection told the peer nothing
+
+2026-08-28, ninth cycle. The close handshake had been measured in one direction only: the
+C closes, sends `ACK|RST`, and the port answers so the C's close completes
+(`node_rdp_peer.rs`). The port closing had never been put next to a C peer. `Node::close`
+released the slot and put nothing on the wire; the state machine had an `Event::Close`
+that produces the reset, and nothing in the node ever stepped it — the same shape as the
+delayed-ack timer that only its own unit test had ever called.
+
+`difftest/tests/node_rdp_close.rs`, the port as client against a real C server, handshake
+and one data packet exchanged, then `close`:
+
+| | frames on close | the C peer afterwards |
+|---|---|---|
+| C `csp_close` | one `ACK|RST` | — |
+| port before | **none** | **still open**, retransmitting into a connection nobody holds, until its own `conn_timeout` |
+| port now | one `ACK|RST` | answers `ACK|RST`; frees the slot once its application closes too |
+
+Now the C's shape (`csp_rdp_close_internal`, `csp_rdp.c:936`; `csp_conn_close`,
+`csp_conn.c:230`): `close(conn, now_ms)` sends `ACK|RST` and **keeps the slot**, with
+everything queued on it, until the peer's `ACK|RST` arrives — `deliver_rdp`'s existing
+`Closed` path releases it — or the connection times out of CLOSE_WAIT in `tick`, which the
+C does after `conn_timeout` (`csp_rdp.c:370`) and the port did not do at all. The reset is
+`ACK|RST`, not the bare `RST` the state machine sent before. `close` gained a clock for the
+same reason `tick` has one. Three mutations; `node_rdp_inflight.rs` now completes the
+handshake with the real C before asserting that every buffer came back, which is what its
+own C section had always described.
+
+**What I got wrong, and the test corrected.** I expected the C to free its side on our
+in-sequence RST at once — `CSP_USE_RDP_FAST_CLOSE` is 1 by default (`csp_rdp.c:32`) and
+`discard_close` ORs in the timeout. Measured, the C still held the connection: it had been
+*announced* to the socket at the handshake, so `dest_socket` was already NULL and
+`csp_conn_close` was called without `CLOSED_BY_USERSPACE`; `csp_rdp_close` returned `AGAIN`
+and the reader was woken with a NULL packet instead. Only the application's `csp_close`
+frees it. FAST_CLOSE spares the *timeout*, not the userspace close. The row above is the
+measured one.

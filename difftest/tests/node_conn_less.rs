@@ -135,7 +135,7 @@ fn port_run(dport: u8, conn_less: bool) -> Doors {
             accepted.push((pkt.id().src, pkt.with_payload(|b| b[0])));
             drop(pkt);
         }
-        let _ = node.close(conn);
+        let _ = node.close(conn, 0);
     }
     while let Ok(Some(pkt)) = node.recvfrom() {
         received.push((pkt.id().src, pkt.with_payload(|b| b[0])));

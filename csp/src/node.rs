@@ -389,7 +389,24 @@ impl<
     }
 
     /// Close a connection, releasing anything still queued on it.
-    pub fn close(&mut self, conn: Handle) -> Result<()> {
+    ///
+    /// On an open RDP connection this is `csp_close`: an `ACK|RST` is queued for the peer
+    /// (the next [`work`](Self::work) reports it as `Routed::Respond`) and the slot stays
+    /// held -- with whatever it has queued, as the C's `csp_conn_close` returns before
+    /// flushing (`csp_conn.c:230`) -- until the peer's `ACK|RST` arrives or the connection
+    /// times out of CLOSE_WAIT in [`tick`](Self::tick). A close that sent nothing left a C
+    /// peer holding the connection, retransmitting into it, until its own timeout;
+    /// measured in `difftest/tests/node_rdp_close.rs`.
+    pub fn close(&mut self, conn: Handle, now_ms: u32) -> Result<()> {
+        #[cfg(feature = "rdp")]
+        if self
+            .router
+            .rdp_close(&self.storage.pool, &self.ifaces, conn, now_ms)?
+        {
+            return Ok(());
+        }
+        #[cfg(not(feature = "rdp"))]
+        let _ = now_ms;
         // `RXQ`, not a literal: `Table::close` refuses rather than partially draining, so
         // a shorter array made this return `BufferTooSmall` for a connection whose queue
         // was deeper -- leaving it open, with every buffer still held, from the one call a
@@ -1130,7 +1147,7 @@ mod tests {
         let c = n.accept().expect("the connection is announced");
         assert!(n.buffers_free() < before);
 
-        n.close(c)
+        n.close(c, 0)
             .expect("closing a connection must not fail on a deep queue");
         assert_eq!(
             n.buffers_free(),
@@ -1319,7 +1336,7 @@ mod tests {
                 "sport {sport} collides with the service port range"
             );
             assert!(sport <= Version::V1.max_port());
-            n.close(c).unwrap();
+            n.close(c, 0).unwrap();
         }
     }
 
@@ -1437,7 +1454,7 @@ mod tests {
         let s = S::new();
         let mut n = node(&s);
         let c = n.connect(2, 8, 20, 0, 0).unwrap();
-        n.close(c).unwrap();
+        n.close(c, 0).unwrap();
         assert!(n.conn_info(c).is_err());
     }
 
@@ -1485,7 +1502,7 @@ mod tests {
         let s = S::new();
         let mut n = node(&s);
         let c = n.connect(2, 8, 20, 0, 0).unwrap();
-        n.close(c).unwrap();
+        n.close(c, 0).unwrap();
         assert!(!n.conn_is_active(c));
         assert!(matches!(n.read(c), Err(Error::NoTransferInProgress)));
     }
@@ -1510,7 +1527,7 @@ mod tests {
 
         let c = n.accept().unwrap();
         let before = n.buffers_free();
-        n.close(c).unwrap();
+        n.close(c, 0).unwrap();
         assert_eq!(
             n.buffers_free(),
             before + 1,
@@ -1627,7 +1644,7 @@ mod tests {
              unprotected packet claiming to be protected"
         );
         // The table holds four and each check above opened one.
-        n.close(c).unwrap();
+        n.close(c, 0).unwrap();
         n.router.hmac_key = Some(b"0123456789abcdef");
         assert_eq!(
             flags_on_the_wire(&mut n, o::HMAC_REQ),

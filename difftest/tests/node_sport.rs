@@ -181,7 +181,7 @@ fn a_reply_reaches_the_connection_that_asked_after_a_full_lap_of_ports() {
         if wire_sport(&mut node, c) == held_sport {
             reused += 1;
         }
-        node.close(c).expect("close");
+        node.close(c, 0).expect("close");
     }
     assert_eq!(
         reused,

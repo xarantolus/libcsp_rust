@@ -91,6 +91,21 @@ MUTANTS = [
    "        if true {\n            return None;\n        }"),
   # A reset connection and a full window are different refusals: one is permanent and the
   # other clears. Conflating them made an application retry for ever against a dead peer.
+  # csp_close on an RDP connection sends ACK|RST and holds the slot until the peer answers.
+  # Node::close released the slot and sent nothing: a C peer kept the connection open,
+  # retransmitting into it, until its own timeout.
+  ("rdp: close tells the peer and holds the slot", "csp/src/node.rs",
+   "            .rdp_close(&self.storage.pool, &self.ifaces, conn, now_ms)?\n        {\n            return Ok(());\n        }",
+   "            .rdp_close(&self.storage.pool, &self.ifaces, conn, now_ms)?\n        {\n            let _ = ();\n        }"),
+  ("rdp: the close is an ACK|RST", "csp-core/src/rdp.rs",
+   "                self.state = State::CloseWait;\n                self.last_activity = now_ms;\n                Action::SendControl(Header {\n                    flags: ACK | RST,",
+   "                self.state = State::CloseWait;\n                self.last_activity = now_ms;\n                Action::SendControl(Header {\n                    flags: RST,"),
+  ("rdp: a close the peer never answers times out", "csp-core/src/rdp.rs",
+   "                if self.state == State::CloseWait {\n                    if now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout {",
+   "                if self.state == State::CloseWait {\n                    if false {"),
+  ("rdp: a timed-out close releases what it held", "csp/src/router.rs",
+   "        for h in timed_out.iter().take(n_timed_out).flatten() {",
+   "        for h in timed_out.iter().take(0).flatten() {"),
   ("rdp: a reset is not back-pressure", "csp/src/node.rs",
    "            if !self.is_rdp_open(conn) {\n                return Err(Error::ConnectionReset);\n            }\n",
    ""),

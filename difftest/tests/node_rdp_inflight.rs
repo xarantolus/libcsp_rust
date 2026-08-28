@@ -127,12 +127,25 @@ fn closing_a_connection_with_data_in_flight_leaks_nothing() {
          {before} then nothing was retained and this case tests nothing"
     );
 
-    node.close(conn).expect("close");
-    // A close can queue a reset for the peer; drain it so the comparison is of what the
-    // connection released, not of a frame still waiting to be handed to a driver.
+    node.close(conn, 1300).expect("close");
+    // `csp_close` sends ACK|RST and keeps the connection -- and everything queued on it --
+    // until the peer answers (`csp_conn.c:230`). Complete the handshake with the real C, so
+    // the comparison is of what the *finished* close released.
     for f in drain(&mut node, 1300) {
-        c_node_exchange(&f, &[]);
+        let reply = c_node_exchange(&f, &[]);
+        for t in &reply.tx {
+            let mut p = node.packet().expect("pool");
+            p.set_frame(VERSION, t).expect("the C's frame");
+            node.router.receive(p, 0);
+        }
     }
+    let _ = drain(&mut node, 1350);
+    // The C never received the in-flight packets, so our ACK|RST -- sequenced after them --
+    // is out of sequence there: "RST out of sequence, keep connection open". The C's own
+    // csp_close would wait the same way. The close completes when CLOSE_WAIT times out.
+    let conn_timeout = csp_core::rdp::SynOptions::default().conn_timeout;
+    node.tick(1350 + conn_timeout + 1, u32::MAX);
+    let _ = drain(&mut node, 1350 + conn_timeout + 2);
     assert_eq!(
         node.pool().available(),
         before,
