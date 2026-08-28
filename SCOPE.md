@@ -4389,3 +4389,46 @@ forms.** `csp_cmp_peek_handler` byte-swaps `addr` in place and never swaps it ba
 node's reply carries the address in *host* order. The port echoes what arrived. The v2 test
 already records this; the v1 test now asserts the port's side of it, so the divergence is
 pinned in both forms rather than assumed to match.
+
+### A reply was checked against the node's policy, not its connection's
+
+2026-08-28, fifth cycle. Found by reading `csp_route.c` next to `Router::deliver_local` while
+checking whether the port-as-client direction was covered (it was: `node_v2.rs`,
+`node_client.rs`), and then measured before anything was changed.
+
+The C resolves the endpoint first and checks the packet against *that* endpoint's options:
+`uint32_t opts = conn ? conn->opts : socket->opts` (`csp_route.c:288`). For a connection this
+node opened, `conn->opts` is what `csp_connect` was given (`csp_conn.c:320`); for one it
+accepted, the socket's (`csp_route.c:171`). The port had one `endpoint_opts` for the node,
+applied to everything, and allocated accepted connections with opts `0`. The node-wide value
+is a recorded deviation with a written justification — both firmware consumers bind `CSP_ANY`
+once — but that justification is about *sockets*. It says nothing about the connections a
+flight node opens itself, and a flight node is a client too: it asks the payload for its status
+and the radio for its counters.
+
+`difftest/tests/node_conn_policy.rs`, both stacks, a real ping echo from the other:
+
+| connection opened with | reply carries | C | port before |
+|---|---|---|---|
+| `CRC32_REQ` | a checksum | accepted, stripped | accepted, stripped |
+| `CRC32_REQ` | nothing | **refused**, `ret 0`, `rx_error` | **delivered** — `"policy is per connection"` reached the application |
+| `0` | nothing | accepted | accepted |
+
+The middle row is a flag set and nothing behind it, on the receive side: the request went out
+with `CSP_FCRC32`, the answer came back bare, and the application read it as verified. The
+mirror of what `egress.rs` fixed on the send side.
+
+Fixed as the C's line: the connection is looked up once, its options are the policy when it
+exists, `endpoint_opts` otherwise, and an accepted connection is allocated *with*
+`endpoint_opts` so its later packets are held to the socket that accepted it. Two mutations,
+each reverting one half; two unit tests in `router.rs` so the server half — which the corpus
+cannot distinguish from the old behaviour, since socket policy and node policy were the same
+value — is noticed too. The C-side row is measured through a new `shim_client_transaction_opts`
+that opens the connection under the caller's options and lets the queued reply carry a
+checksum the way `csp_sendto_reply(.., CSP_O_SAME)` would.
+
+**What this does not change.** `endpoint_opts` keeps its meaning for bound ports; the
+`*_PROHIB` bits are still not a receive policy (the entry above on `security::check` stands);
+and a node with no policy and no connection asking for one accepts a plain packet exactly as
+before — the 46 records behind `security: a plain packet with no policy is accepted` all still
+move.

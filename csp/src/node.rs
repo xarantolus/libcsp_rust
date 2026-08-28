@@ -548,8 +548,10 @@ impl<
         idout.sport = sport;
         self.router.conns.set_id_out(h, idout)?;
         // The reply we expect: their source is our destination and vice versa. The C sets
-        // the same flags on both ids, so a reply that drops the protection no longer
-        // matches the connection.
+        // the same flags on both ids, but neither stack matches a reply on them --
+        // `csp_conn_find_existing` compares ports and source only, so a reply that drops
+        // the protection still finds the connection and is refused by the connection's
+        // policy in `deliver_local`, not by failing to match.
         let idin = Id {
             pri,
             flags,

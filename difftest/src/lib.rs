@@ -164,6 +164,18 @@ unsafe extern "C" {
         out: *mut u8,
         out_len: *mut c_int,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn shim_client_transaction_opts(
+        dst: u16,
+        dport: u8,
+        opts: u32,
+        reply_flags: u8,
+        reply: *const u8,
+        reply_len: c_int,
+        inlen: c_int,
+        out: *mut u8,
+        out_len: *mut c_int,
+    ) -> c_int;
     fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_node_sfp_send_on(port: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_rdp_connect_start(dst: u16, dport: u8) -> c_int;
@@ -777,6 +789,40 @@ pub fn c_client_transaction(dst: u16, dport: u8, reply: &[u8], inlen: i32) -> (i
         shim_client_transaction(
             dst,
             dport,
+            reply.as_ptr(),
+            reply.len() as c_int,
+            inlen,
+            out.as_mut_ptr(),
+            &mut n,
+        )
+    };
+    out.truncate(n as usize);
+    (ret, out)
+}
+
+/// [`c_client_transaction`] with the connection opened under `opts` and the queued reply
+/// carrying `reply_flags` (a `CRC32` flag gets its checksum appended, as a real peer's
+/// `csp_sendto_reply(.., CSP_O_SAME)` would).
+///
+/// This is how the C's **per-connection** policy is observed: `csp_route.c:288` checks a
+/// reply against `conn->opts`, the options `csp_connect` stored on this very connection.
+pub fn c_client_transaction_opts(
+    dst: u16,
+    dport: u8,
+    opts: u32,
+    reply_flags: u8,
+    reply: &[u8],
+    inlen: i32,
+) -> (i32, Vec<u8>) {
+    let mut out = vec![0u8; 256];
+    let mut n: c_int = 0;
+    // SAFETY: as `c_client_transaction`. Callers hold `LOCK`.
+    let ret = unsafe {
+        shim_client_transaction_opts(
+            dst,
+            dport,
+            opts,
+            reply_flags,
             reply.as_ptr(),
             reply.len() as c_int,
             inlen,
