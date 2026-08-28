@@ -4516,3 +4516,32 @@ mutations, one per fill and one for `connect`; the RDP one is what that test now
 
 `Config::address` keeps its role — what the node answers to on loopback and recognises as
 itself — and its doc now says what it is not.
+
+### KISS: the C loses the second of two frames that share a delimiter
+
+2026-08-28, eighth cycle, from the uncited-decision list: `csp_if_kiss.c` had 22 decision
+points and no line cited. Every KISS comparison fed one frame at a time; what the decoders
+do with a *stream* was a reading. The KISS specification lets one `FEND` close a frame and
+open the next. Measured in `difftest/tests/kiss_stream.rs`:
+
+| stream | C (`csp_kiss_rx`) | port |
+|---|---|---|
+| `FEND 00 A FEND 00 B FEND` | **1 frame** (A); B skipped whole in `NOT_STARTED` | 2 |
+| `FEND 00 FEND 00 A FEND` | **0 frames**, `frame++`: A's command byte taken as data | 1 |
+
+Both are the same mechanism: after accepting a frame the C returns to `NOT_STARTED` and
+skips to the next `FEND`, and after an empty frame it stays `STARTED` with `rx_first`
+already cleared. libcsp's own transmitter emits a full `FEND 00 … FEND` per frame, so C
+talks to C without noticing; a TNC or radio that shares delimiters, which the spec allows,
+loses every second frame at a C receiver.
+
+**Deliberate deviation, kept:** the port treats every `FEND` as a fresh start and delivers
+both. A receiver that drops valid frames is the worse fault, and the flight receiver on the
+radio link is this port. One mutation regresses it to the C's behaviour and the stream test
+notices. Whether the AX100 shares delimiters on its UART is not stated in the parts of its
+manual I could find; worth checking on the bench, since the C-based nodes would be the ones
+affected.
+
+**One thing I got wrong, caught by the test.** My first stream for the second row was
+`FEND 00 00 A FEND` — no empty frame at all — and both decoders agreed on it (the second
+`00` is data on both). The measured C rows above are from the corrected stream.

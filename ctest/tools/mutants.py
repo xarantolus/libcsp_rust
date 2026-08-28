@@ -343,6 +343,11 @@ MUTANTS = [
    "            let (c, _k) = self.conns.close_port(port as u8, &mut drained[n..]);\n            closed += c;"),
   # The KISS decoder's escape rule, against the C. The port's decoder had never been driven
   # against libcsp at all -- only its encoder, port-to-C.
+  # Deliberate deviation: a FEND that closes a frame opens the next. Regressing it to the
+  # C's NOT_STARTED loses the second of two frames sharing a delimiter.
+  ("kiss: a closing FEND opens the next frame", "csp-core/src/kiss.rs",
+   "                    self.expect_command = true;\n                    self.mode = Mode::InFrame;\n                    return if done",
+   "                    self.expect_command = false;\n                    self.mode = Mode::Idle;\n                    return if done"),
   ("kiss: an unknown escape drops the byte", "csp-core/src/kiss.rs",
    "                    TFESC => FESC,", "                    TFESC => FESC,\n                    other => other,"),
   # `if-i2c` was a default-on feature gating zero lines, with its three C functions mapped

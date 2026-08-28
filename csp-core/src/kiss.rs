@@ -178,6 +178,11 @@ impl<const N: usize> Decoder<N> {
                     return None;
                 }
                 if b == FEND {
+                    // A delimiter closes this frame and opens the next, as the KISS spec
+                    // allows. The C does not: after accepting a frame it returns to
+                    // NOT_STARTED and skips everything up to another FEND, so a stream
+                    // that shares delimiters loses every second frame there. Deliberate
+                    // deviation, measured in `difftest/tests/kiss_stream.rs`.
                     let done = self.len > 0;
                     let n = self.len;
                     self.len = 0;
