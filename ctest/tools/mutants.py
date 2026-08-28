@@ -125,9 +125,20 @@ MUTANTS = [
   ("rdp: the initiator answers SYN|ACK", "csp-core/src/rdp.rs",
    "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });\n                }\n                Action::Nothing",
    "                    return Action::Opened;\n                }\n                Action::Nothing"),
-  ("rdp: an out-of-window packet is re-acknowledged", "csp-core/src/rdp.rs",
-   "                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });\n                }\n                if h.has(ACK) {",
-   "                    return Action::Nothing;\n                }\n                if h.has(ACK) {"),
+  # csp_rdp.c:653/661, measured in node_rdp_edges.rs: outside the window the C is silent,
+  # and an out-of-range ack number discards the packet.
+  ("rdp: an out-of-window packet is discarded in silence", "csp-core/src/rdp.rs",
+   "                if !seq_between(h.seq_nr, expected, self.rcv_cur.wrapping_add(span)) {\n                    return Action::Nothing;\n                }",
+   "                if !seq_between(h.seq_nr, expected, self.rcv_cur.wrapping_add(span)) {\n                    return Action::SendControl(Header {\n                        flags: ACK,\n                        seq_nr: self.snd_nxt,\n                        ack_nr: self.rcv_cur,\n                    });\n                }"),
+  ("rdp: an out-of-range ack number is discarded", "csp-core/src/rdp.rs",
+   "                if !seq_between(\n                    h.ack_nr,\n                    self.snd_una.wrapping_sub(1).wrapping_sub(span),\n                    self.snd_nxt.wrapping_sub(1),\n                ) {\n                    return Action::Nothing;\n                }",
+   ""),
+  ("rdp: the window is twice the negotiated size", "csp-core/src/rdp.rs",
+   "                let span = self.opts.window_size.wrapping_mul(2) as u16;",
+   "                let span = max_window as u16;"),
+  ("rdp: a stray packet on a closed connection is reset", "csp-core/src/rdp.rs",
+   "                if h.flags & 0x0F != SYN {\n                    return Action::SendControl(Header {\n                        flags: RST,",
+   "                if false {\n                    return Action::SendControl(Header {\n                        flags: RST,"),
   # The port could not send a fragment on a connection at all: `send` stamps the
   # connection's id over the caller's, and no connection option sets FRAG. A real C node
   # answered the resulting stream with CSP_ERR_SFP.
@@ -841,8 +852,8 @@ MUTANTS = [
    "                if false {\n                    if h.has(ACK) {"),
   # The receive reorder queue, wired in 2026-08-26 after existing unused for the whole port.
   ("rdp: a packet ahead of the gap is held", "csp-core/src/rdp.rs",
-   "                    if seq_between(h.seq_nr, expected, expected.wrapping_add(max_window as u16)) {",
-   "                    if false {"),
+   "                    return Action::Hold(h.seq_nr);\n                }",
+   "                    return Action::Nothing;\n                }"),
   ("rdp: the gap-filler releases what was held", "csp/src/router.rs",
    "                        self.release_held(handle);", "                        {}"),
   ("conn: the receive and transmit queues share one budget", "csp/src/conn.rs",
