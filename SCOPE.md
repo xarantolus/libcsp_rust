@@ -4463,3 +4463,56 @@ a duplicate name and `csp_iflist_get_by_subnet` skips a zero netmask (both alrea
 `IfList`, both tested); `csp_buffer_get`'s reserve is `<=` on both sides;
 `csp_crc32_verify` refuses a body shorter than the checksum on both; `csp_bind` on a bound
 port is an error on both, though the port's is `TableFull` where the C says "in use".
+
+### The port had a node address; libcsp has none
+
+2026-08-28, seventh cycle. It began as a one-line finding — a reply to `ping 0x3FFF` was
+sourced from `0x3FFF` — and the C's answer to the same ping was not what I expected either,
+which is what made it a cycle rather than a fix.
+
+`csp_sendto_reply` leaves the source **zero** for the all-nodes broadcast (`csp_io.c:431`).
+I read that as "answer as the node" and wrote the expectation as the C node's first address.
+Measured, the C answered from **20**: its second interface, the default route toward the
+peer I had chosen. The zero is filled in `send_packet` (`csp_io.c:119`), *after* routing,
+with the address of the interface the packet leaves by. And that is not a special case for
+broadcast replies. `csp_connect` says it outright (`csp_conn.c:259`): *"CSP does not support
+'source address' on outgoing connections so the outgoing source address will be
+automatically applied after outgoing routing selects which interface the packet will leave
+from."* It leaves `outgoing_id.src` zero; `csp_sendto` sets no source at all. **libcsp has no
+node address.** Every packet a node originates is sourced per destination, from the link it
+goes out on.
+
+The port had one `address` and stamped it on everything it originated — `connect`, `sendto`,
+`reply_to`, and the RDP control frames built from a connection's outgoing id. On a node with
+one interface at that address the two rules agree, which is every node-level test in this
+repository until this one. A flight node has two links: CDH speaks CAN to the bus and KISS to
+the radio, and at v2 each carries its own address. There, a packet leaving by the radio was
+sourced from the CAN address.
+
+`difftest/tests/node_source_address.rs`, both nodes with two interfaces in different `/12`
+subnets, the second the default route — the C at 9 and 20, the port at 10 and 21:
+
+| originated by | toward the first subnet | beyond both subnets | port before |
+|---|---|---|---|
+| a reply to `ping 0x3FFF` | 9 | 20 | **16383** |
+| `connect` + `send` | 9 | 20 | 10, 10 |
+| `sendto` | (port only) | | 10, 10 |
+| a reply to the subnet broadcast | the broadcast address, verbatim | | same |
+
+Fixed as the C's rule, in the C's shape: `connect`, `sendto` and the all-nodes `reply_to`
+leave the source zero, and the source is filled with the egress interface's address where
+the interface is chosen — `Node::route_from` for what the application sends, and both router
+paths that emit a frame from a connection's outgoing id (`queue_built` for retransmissions,
+`queue_rdp_from_tick` for control frames). The loopback fills with the node's address, as
+`csp_if_lo` does. A reply on an accepted connection is untouched: the C sources it from the
+address the request came to, and so did the port.
+
+**The third emission path found itself.** The first version filled the source in
+`route_from` and `queue_built` only. The whole difftest suite then passed except one:
+`node_rdp`'s handshake, where the C answered the port's SYN with *nothing*. The SYN is built
+by `queue_rdp_from_tick`, which has its own routing tail rather than `queue_built`'s, and
+went out with source 0 — a SYN from nobody, which the C dutifully answered to nobody. Four
+mutations, one per fill and one for `connect`; the RDP one is what that test now pins.
+
+`Config::address` keeps its role — what the node answers to on loopback and recognises as
+itself — and its doc now says what it is not.

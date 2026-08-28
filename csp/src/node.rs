@@ -244,7 +244,7 @@ impl<
         self.revision
     }
 
-    /// This node's address.
+    /// This node's address — see [`Config::address`]. Not the source of what it sends.
     pub const fn address(&self) -> u16 {
         self.address
     }
@@ -525,10 +525,14 @@ impl<
         now_ms: u32,
     ) -> Result<Handle> {
         let flags = Self::conn_flags(opts)?;
+        // `csp_connect` leaves the source zero: "CSP does not support 'source address' on
+        // outgoing connections so the outgoing source address will be automatically applied
+        // after outgoing routing selects which interface the packet will leave from"
+        // (`csp_conn.c:259`). `route_from` fills it per destination.
         let mut idout = Id {
             pri,
             flags,
-            src: self.address,
+            src: 0,
             dst,
             dport,
             // A placeholder in range. The real one is a function of the slot, which is not
@@ -552,11 +556,13 @@ impl<
         // `csp_conn_find_existing` compares ports and source only, so a reply that drops
         // the protection still finds the connection and is refused by the connection's
         // policy in `deliver_local`, not by failing to match.
+        // `incoming_id.dst = 0`: the reply is accepted at whatever address the outgoing
+        // interface turns out to have. A client connection is matched on its port alone.
         let idin = Id {
             pri,
             flags,
             src: dst,
-            dst: self.address,
+            dst: 0,
             dport: sport,
             sport: dport,
         };
@@ -769,10 +775,11 @@ impl<
         flags: u8,
         mut packet: Packet<'a, BUFS, BUFSZ>,
     ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
+        // `csp_sendto` sets no source; the interface the packet leaves by does.
         let id = Id {
             pri,
             flags,
-            src: self.address,
+            src: 0,
             dst,
             dport,
             sport,
@@ -789,16 +796,29 @@ impl<
     /// **the same pointer** at the one call site that matters, passed as both a `const`
     /// and a mutable argument — which works only because of the order the fields happen to
     /// be read and written. Here they are two distinct values.
+    ///
+    /// The reply is sourced from the address the request was sent to — an alias answers as
+    /// the alias, a subnet broadcast is echoed verbatim — except the all-nodes broadcast:
+    /// `csp_sendto_reply` leaves that source zero (`csp_io.c:431`), and routing fills it
+    /// with the address of the interface the reply leaves by, so `ping 0x3FFF` is answered
+    /// by each node as itself. Sourced from `0x3FFF`, a reply is an answer from nobody, and
+    /// that ping is how an operator learns who is on the bus. Measured in
+    /// `difftest/tests/node_source_address.rs`.
     pub fn reply_to(
         &mut self,
         request: &Packet<'a, BUFS, BUFSZ>,
         mut reply: Packet<'a, BUFS, BUFSZ>,
     ) -> Result<Outbound<'a, BUFS, BUFSZ>> {
         let req = request.id();
+        let src = if req.dst == self.version.max_node_id() {
+            0
+        } else {
+            req.dst
+        };
         let id = Id {
             pri: req.pri,
             flags: req.flags,
-            src: req.dst,
+            src,
             dst: req.src,
             dport: req.sport,
             sport: req.dport,
@@ -957,16 +977,35 @@ impl<
         id: Id,
         routed_from: Option<u8>,
     ) -> Outbound<'a, BUFS, BUFSZ> {
+        let from_me = routed_from.is_none();
         if id.dst == self.address {
+            let mut packet = packet;
+            if from_me && id.src == 0 {
+                // The loopback interface carries the node's own address.
+                let mut out_id = id;
+                out_id.src = self.address;
+                packet.set_id(out_id);
+            }
             return Outbound::Loopback(packet);
         }
         match self.resolve(id.dst, routed_from) {
             Ok(d) => {
                 let first = d.as_slice()[0];
                 let mut packet = packet;
-                if id.dst != first.dst {
-                    let mut out_id = id;
-                    out_id.dst = first.dst;
+                let mut out_id = id;
+                out_id.dst = first.dst;
+                // `send_packet` (`csp_io.c:119`): a packet this node originates is sourced
+                // from the interface it leaves by, chosen only now. libcsp has no node
+                // address, and a node with a CAN link and a radio link answers on each as
+                // that link. Measured in `difftest/tests/node_source_address.rs`.
+                if from_me && out_id.src == 0 {
+                    out_id.src = self
+                        .ifaces
+                        .get(first.iface)
+                        .map(|e| e.addr)
+                        .unwrap_or(self.address);
+                }
+                if out_id != id {
                     packet.set_id(out_id);
                 }
                 // Only traffic this node originates is protected -- `csp_io.c:249`'s
@@ -975,7 +1014,7 @@ impl<
                 // corrupt it.
                 // `csp_send_direct_iface` frees the packet and counts `tx_error` when the
                 // append fails (`csp_io.c:290`); here the caller gets it back to release.
-                if routed_from.is_none()
+                if from_me
                     && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()
                 {
                     return Outbound::NoRoute(packet, Unroutable::NoRoute);

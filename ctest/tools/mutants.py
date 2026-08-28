@@ -145,6 +145,21 @@ MUTANTS = [
    "                Some(_c) => {}"),
   # csp_promisc.c:59 -- "Yield to real traffic when the pool runs low". The port cloned down
   # to zero: the tap took the last buffers on the bus it was switched on to watch.
+  # libcsp has no node address: everything a node originates leaves with source 0 and
+  # `send_packet` fills it from the interface the packet leaves by (csp_io.c:119). The port
+  # stamped one node-wide address, wrong on the second interface of a two-link node.
+  ("source: a packet is sourced from the interface it leaves by", "csp/src/node.rs",
+   "                if from_me && out_id.src == 0 {",
+   "                if false {"),
+  ("source: connect leaves the source to routing", "csp/src/node.rs",
+   "            src: 0,\n            dst,\n            dport,\n            // A placeholder in range.",
+   "            src: self.address,\n            dst,\n            dport,\n            // A placeholder in range."),
+  ("source: an RDP control frame is sourced by its interface", "csp/src/router.rs",
+   "                if reply.id().src == 0 {\n                    let mut id = reply.id();",
+   "                if false {\n                    let mut id = reply.id();"),
+  ("source: a retransmitted frame is sourced by its interface", "csp/src/router.rs",
+   "                if idout.src == 0 {\n                    let mut id = idout;",
+   "                if false {\n                    let mut id = idout;"),
   ("promisc: the tap yields to real traffic", "csp/src/router.rs",
    "            if pool.available() <= pool.capacity() / PROMISC_RESERVE_DIVISOR {\n                self.promisc_missed += 1;\n            } else if self.promisc_len < self.promisc.len() {",
    "            if self.promisc_len < self.promisc.len() {"),
@@ -842,7 +857,7 @@ MUTANTS = [
   # (csp_io.c:247-271). Setting the flag without the bytes is what made every CMP reply
   # undeliverable to a stock libcsp ground station; each call site is covered separately.
   ("egress: an originated packet carries the trailer it promises", "csp/src/node.rs",
-   "                if routed_from.is_none()\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()",
+   "                if from_me\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()",
    "                if false\n                    && crate::egress::protect(&mut packet, id.flags, self.router.hmac_key).is_err()"),
   # Both RDP queue points carry the same three lines, so each is anchored on the line that
   # follows it -- `queue_rdp_from_tick` reads the destination next, `queue_rdp` comments.
