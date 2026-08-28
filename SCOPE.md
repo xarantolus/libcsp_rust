@@ -4601,3 +4601,48 @@ so a held connection outlives the socket it arrived on. The port now records `ac
 when `accept` hands a connection out, and `unbind` closes only the ones still waiting —
 which it does properly, where the C leaks them. One mutation. The two comments that
 described the C wrongly say the measured rule now.
+
+### The C does reap a silent established RDP connection — the record could not tell
+
+2026-08-28, eleventh cycle, and a correction of the entry of 2026-08-26 above ("The port
+reaped idle RDP connections; libcsp does not").
+
+That entry rested on `rdp: a_proposed_conn_timeout_is_adopted`: a C record in which a server
+connection idles 4000 ms against a proposed 3000 ms `conn_timeout`, the peer then sends a
+packet, and the record notes whether the C *answered*. It did — `answered_after_idle: 1` —
+and I read that as the connection surviving. **The answer was a reset.** The record counted
+frames and not their kind, and an `ACK|RST` counts as a frame. Regenerated with
+`answer_flags`, the same test now says `5` (`ACK|RST`), and the port's replay is held to it.
+
+What the C does, measured this time with its clock advanced (`node_conn_active.rs`):
+`csp_rdp_check_timeouts` has **two** connection timeouts. The first (`csp_rdp.c:358`) is the
+guarded one the earlier entry saw, for a handshake never announced to a socket. The second
+(`csp_rdp.c:443`) is unguarded: an `RDP_OPEN` connection that has received nothing for
+`conn_timeout` is closed — `csp_conn_close` sends `ACK|RST` and waits in CLOSE_WAIT.
+`conn->timestamp` is refreshed on every packet received in `OPEN` (`csp_rdp.c:704`), so a
+connection that talks never times out; only a silent one does. `csp_conn_is_active`
+(`csp_rdp.c:1005`) reports the same rule without closing.
+
+| | C | port before |
+|---|---|---|
+| after the handshake | active | active |
+| a packet just inside the timeout, then almost another timeout | active — the clock restarted | active |
+| silence past the timeout | **inactive; closed with `ACK|RST`** on its next tick | active, for ever |
+
+Now the C's rule: `Event::Tick` closes an `Open` connection silent for `conn_timeout` with
+`ACK|RST` into CLOSE_WAIT, `Node::conn_is_active(conn, now_ms)` answers as
+`csp_rdp_conn_is_active` does (no in CLOSE_WAIT/CLOSED, no past the timeout, yes otherwise;
+a plain connection is active while open), and the slot goes when the peer answers or
+CLOSE_WAIT expires. The unit test that pinned the old reading is rewritten to the measured
+rule, the mutation with it, and the replay's doc comment says what the record measures.
+
+**The exposure the earlier entry worried about is real and is the C's too.** `conn_timeout`
+is proposed by the peer, so a peer can make a node close a quiet connection early; the clamp
+(`MIN_CONN_TIMEOUT`, 1 s) bounds it, as `csp_rdp_clamp` does in the C. A port that never
+reaped would have kept connections a C peer had already reset — sending into them and
+reading `ConnectionReset` back — which is the divergence, not the safety.
+
+**Two things I got wrong on the way, both caught by measurement.** I expected the C to free
+its side of a closed connection at once under FAST_CLOSE (previous entry); and I first wrote
+this test's revival row assuming the C's `timestamp` is refreshed on any packet — it is, but
+only for a connection userspace holds (`dest_socket == NULL`), which the test now arranges.

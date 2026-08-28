@@ -824,42 +824,38 @@ impl Connection {
                     }
                     return Action::Nothing;
                 }
-                // Only before the connection is established. `csp_rdp_check_timeouts`
-                // guards its CONNECTION TIMEOUT with `conn->dest_socket != NULL`, and
-                // `dest_socket` is cleared the moment the connection is *announced* to the
-                // socket (`csp_rdp.c:695`, "the connection handle has been passed to
-                // userspace") -- not when the application accepts it. So libcsp reaps a
-                // half-finished handshake and never an established connection.
+                // `csp_rdp_check_timeouts` has *two* connection timeouts. The first is
+                // guarded by `dest_socket != NULL` and covers a handshake never announced
+                // to a socket; the second (`csp_rdp.c:443`) is unguarded: an `RDP_OPEN`
+                // connection that has heard nothing for `conn_timeout` is closed --
+                // `csp_conn_close` sends `ACK|RST` and waits in CLOSE_WAIT. Measured with
+                // the C's clock advanced, in `difftest/tests/node_conn_active.rs`; the
+                // earlier reading that only an unestablished connection times out came
+                // from the first block alone, and from a record that could not tell an
+                // acknowledgement from a reset.
                 //
-                // This closed any state, so an idle-but-alive connection was dropped while
-                // the C kept answering on it: a telemetry link quiet between passes, whose
-                // next packet then goes unanswered. Worse, `conn_timeout` is *proposed by
-                // the peer*, so it was a lever a peer could pull to make this node discard
-                // its own connection early.
-                //
-                // Idle expiry as resource management still happens, in
-                // `ConnTable::expire_idle`, against the timeout the *node* chooses.
-                if self.state != State::Open
+                // `conn_timeout` is proposed by the peer, so a peer can make this node close
+                // a quiet connection early. That is the C's exposure too; the clamp bounds it.
+                if self.state == State::Open
+                    && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout
+                {
+                    self.state = State::CloseWait;
+                    self.last_activity = now_ms;
+                    return Action::SendControl(Header {
+                        flags: ACK | RST,
+                        seq_nr: self.snd_nxt,
+                        ack_nr: self.rcv_cur,
+                    });
+                }
+                // The first, guarded block (`csp_rdp.c:358`): a handshake that never
+                // finished is reaped on `conn_timeout`, so a half-open connection cannot
+                // hold a slot for ever.
+                if matches!(self.state, State::SynSent | State::SynRcvd)
                     && now_ms.wrapping_sub(self.last_activity) > self.opts.conn_timeout
                 {
                     self.state = State::Closed;
                     return Action::Closed(ClosedBy::Timeout);
                 }
-
-                // An unacknowledged `SYN|ACK` is repeated until the peer answers or the
-                // retransmit limit is reached, and then the connection is reset.
-                //
-                // This did nothing but check the connection timeout. A `SYN|ACK` lost on
-                // the way out was never repeated, so the peer waited for a connection this
-                // node believed it had opened and neither side ever learned otherwise --
-                // the RST below is the only thing that tells it. `csp_rdp_check_timeouts`
-                // does this; measured in
-                // `rdp::an_unacknowledged_syn_ack_is_retransmitted_then_reset`, where the C
-                // sends at least `MAX_RETRANSMITS` frames and this sent none.
-                //
-                // Only `SynRcvd` is handled: it is the one state in which this port has
-                // something outstanding of its own. Data retransmission needs the send
-                // side, which the node does not have -- see SCOPE.md.
                 if self.state == State::SynRcvd
                     && now_ms.wrapping_sub(self.ack_timestamp) > self.opts.packet_timeout
                 {
@@ -1408,12 +1404,6 @@ mod tests {
         assert_eq!(c.rcv_cur, 10);
     }
 
-    /// Measured against libcsp on 2026-08-26, and the opposite of what this test asserted
-    /// before: an **established** connection is not reaped on `conn_timeout`.
-    /// `csp_rdp_check_timeouts` guards its CONNECTION TIMEOUT with `dest_socket != NULL`,
-    /// and `dest_socket` is cleared when the connection is announced to the socket, so the
-    /// branch only ever covers a handshake that never finished. Pinned end to end by
-    /// `rdp::a_proposed_conn_timeout_is_adopted`.
     /// `csp_rdp_send` refuses once `snd_nxt` reaches `snd_una + window_size - 1`; the C
     /// blocks on `tx_wait` there, and a sans-io node reports it. Without the bound a sender
     /// runs ahead of what the peer can acknowledge and the window means nothing.
@@ -1440,14 +1430,31 @@ mod tests {
     }
 
     #[test]
-    fn only_an_unestablished_connection_times_out() {
-        // Established: stays, however long it is quiet. A telemetry link between passes.
+    fn a_silent_established_connection_times_out_like_the_c() {
+        // Established and quiet for conn_timeout: closed with ACK|RST, as csp_rdp.c:443.
         let mut open = Connection::new(1, SynOptions::default());
         open.state = State::Open;
         open.last_activity = 0;
         assert_eq!(open.step(Event::Tick, 5_000, MAX_WINDOW), Action::Nothing);
-        assert_eq!(open.step(Event::Tick, 10_001, MAX_WINDOW), Action::Nothing);
-        assert_eq!(open.state, State::Open);
+        assert_eq!(
+            open.step(Event::Tick, 10_000, MAX_WINDOW),
+            Action::Nothing,
+            "not yet"
+        );
+        assert!(
+            matches!(open.step(Event::Tick, 10_001, MAX_WINDOW),
+                Action::SendControl(h) if h.flags == ACK | RST),
+            "one ms past conn_timeout: csp_conn_close's reset"
+        );
+        assert_eq!(open.state, State::CloseWait);
+
+        // A packet from the peer inside the window keeps it alive: on_packet moves
+        // last_activity, and the clock counts from there.
+        let mut busy = Connection::new(1, SynOptions::default());
+        busy.state = State::Open;
+        busy.last_activity = 9_000;
+        assert_eq!(busy.step(Event::Tick, 10_001, MAX_WINDOW), Action::Nothing);
+        assert_eq!(busy.state, State::Open);
 
         // A handshake that never completed: reaped, so a half-open connection cannot hold
         // a slot for ever.

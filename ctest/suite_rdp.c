@@ -1240,10 +1240,14 @@ START_TEST(test_a_proposed_conn_timeout_is_adopted)
 		csp_conn_check_timeouts();
 	}
 
-	/* Now the peer speaks. Does anything come back? */
+	/* Now the peer speaks. Does anything come back -- and what? An acknowledgement means
+	   the connection survived the idle; a reset means the C closed it and is saying so.
+	   The first version of this record counted frames only, and an RST counted as an
+	   answer, which read as "the connection survived" for two days. */
 	const unsigned int before = test_tx_count;
 	deliver_data(1001, iss);
 	const int answered = (test_tx_count > before);
+	const uint8_t answer_flags = answered ? (tx_flags & 0x0F) : 0;
 
 	if (ctest_tracing()) {
 		ctest_trace_begin("rdp", "a_proposed_conn_timeout_is_adopted", "must_match");
@@ -1256,6 +1260,7 @@ START_TEST(test_a_proposed_conn_timeout_is_adopted)
 		ctest_trace_obj_end();
 		ctest_trace_obj_begin("observed");
 		ctest_trace_int("answered_after_idle", answered);
+		ctest_trace_int("answer_flags", answer_flags);
 		ctest_trace_obj_end();
 		ctest_trace_end();
 	}

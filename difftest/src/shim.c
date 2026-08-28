@@ -820,6 +820,13 @@ int shim_node_recv_any(uint16_t *src, uint16_t *dst, uint8_t *dport, uint8_t *sp
  */
 static csp_conn_t * shim_held[SHIM_PORTS];
 
+/* `csp_conn_is_active` on the connection `shim_node_send_on` holds for `port`; -1 if none. */
+int shim_node_held_active(uint8_t port) {
+	if (port >= SHIM_PORTS || shim_held[port] == NULL) { return -1; }
+	return csp_conn_is_active(shim_held[port]) ? 1 : 0;
+}
+
+
 /*
  * Let the C node *originate* data on a connection a peer opened to it.
  *
