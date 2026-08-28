@@ -1083,6 +1083,14 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             &mut hops,
         ) {
             crate::route_policy::Outcome::Hops(_) => {
+                // A frame on a connection this node opened carries a zero source until the
+                // interface is chosen (`csp_io.c:119`) -- the same rule `Node::route_from`
+                // applies to what the application sends.
+                if idout.src == 0 {
+                    let mut id = idout;
+                    id.src = ifaces.get(hops[0].iface).map(|e| e.addr).unwrap_or(0);
+                    packet.set_id(id);
+                }
                 let slot = packet.into_index();
                 self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
             }
@@ -1285,6 +1293,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             &mut hops,
         ) {
             crate::route_policy::Outcome::Hops(_) => {
+                // The connection's outgoing id carries a zero source until the interface is
+                // chosen (`csp_io.c:119`): a SYN sourced from 0 is answered to nobody.
+                if reply.id().src == 0 {
+                    let mut id = reply.id();
+                    id.src = ifaces.get(hops[0].iface).map(|e| e.addr).unwrap_or(0);
+                    reply.set_id(id);
+                }
                 let slot = reply.into_index();
                 self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
                 Ok(())

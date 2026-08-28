@@ -107,7 +107,14 @@ impl<'a> Config<'a> {
         }
     }
 
-    /// Set this node's address.
+    /// Set this node's address: what it answers to on loopback, and what it recognises as
+    /// itself alongside every interface address and alias.
+    ///
+    /// It is **not** what outgoing packets are sourced from. libcsp has no node address: a
+    /// packet a node originates is sourced from the address of the interface it leaves by,
+    /// chosen by routing (`csp_conn.c:259`, `csp_io.c:119`). A node with one interface at
+    /// this address sees no difference; a node with a CAN link and a radio link answers on
+    /// each as that link.
     pub const fn address(mut self, addr: u16) -> Self {
         self.address = addr;
         self
