@@ -206,6 +206,10 @@ unsafe extern "C" {
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_burst_start(port: u8, count: c_int, len: c_int) -> c_int;
+    fn shim_read_start(port: u8, timeout_ms: u32) -> c_int;
+    fn shim_read_peek() -> c_int;
+    fn shim_read_join(elapsed_ms: *mut u32) -> c_int;
+    fn shim_rdp_set_opt(w: c_uint, ct: c_uint, pt: c_uint, da: c_uint, at: c_uint, adc: c_uint);
     fn shim_burst_sent() -> c_int;
     fn shim_burst_join(max_block_ms: *mut u32) -> c_int;
     fn shim_can_route(address: u16, netmask: u16, via: u16) -> c_int;
@@ -1333,6 +1337,45 @@ pub fn c_node_tx_take() -> Vec<Vec<u8>> {
     // SAFETY: clears the locked capture.
     unsafe { shim_node_clear_tx() };
     frames
+}
+
+/// Start an application thread on the C blocked in `csp_read(held(port), timeout_ms)`.
+pub fn c_read_start(port: u8, timeout_ms: u32) -> bool {
+    // SAFETY: the shim owns the thread; the caller keeps the connection held until join.
+    unsafe { shim_read_start(port, timeout_ms) == 0 }
+}
+
+/// `None` while the read is still blocked; `Some(None)` for a NULL return; `Some(Some(len))`.
+pub fn c_read_peek() -> Option<Option<usize>> {
+    // SAFETY: a plain flag read.
+    match unsafe { shim_read_peek() } {
+        -2 => None,
+        -1 => Some(None),
+        n => Some(Some(n as usize)),
+    }
+}
+
+/// Join the read thread: (what it returned, wall-clock ms it blocked).
+pub fn c_read_join() -> (Option<usize>, u32) {
+    let mut ms = 0u32;
+    // SAFETY: joins the thread started by `c_read_start`.
+    let n = unsafe { shim_read_join(&mut ms) };
+    ((n >= 0).then_some(n as usize), ms)
+}
+
+/// `csp_rdp_set_opt`: the process-global RDP options a new C client connection copies.
+pub fn c_rdp_set_opt(o: &csp_core::rdp::SynOptions) {
+    // SAFETY: plain integers into libcsp's statics.
+    unsafe {
+        shim_rdp_set_opt(
+            o.window_size,
+            o.conn_timeout,
+            o.packet_timeout,
+            o.delayed_acks as c_uint,
+            o.ack_timeout,
+            o.ack_delay_count,
+        )
+    }
 }
 
 /// Route `address/netmask` out of the C's CAN interface through `via`.

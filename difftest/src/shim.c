@@ -1819,6 +1819,61 @@ int shim_burst_join(uint32_t * max_block_ms) {
 	return shim_burst_sent_n;
 }
 
+/* --- an application thread blocked in csp_read ------------------------------- */
+
+/*
+ * `csp_read` blocks on the connection's rx queue for `timeout` -- and on an RDP connection
+ * a non-zero timeout is raised to `conn_timeout` first (`csp_io.c:55`). Only a thread can
+ * observe either: the call does not return until the router delivers or the time passes.
+ */
+static pthread_t     shim_read_thread;
+static int           shim_read_running;
+static uint8_t       shim_read_port;
+static uint32_t      shim_read_timeout;
+static volatile int  shim_read_len;
+static uint32_t      shim_read_elapsed_ms;
+
+static void * shim_read_thread_fn(void * arg) {
+	(void)arg;
+	uint32_t t0 = shim_wall_ms();
+	csp_packet_t * p = csp_read(shim_held[shim_read_port], shim_read_timeout);
+	shim_read_elapsed_ms = shim_wall_ms() - t0;
+	if (p == NULL) {
+		shim_read_len = -1;
+	} else {
+		shim_read_len = p->length;
+		csp_buffer_free(p);
+	}
+	return NULL;
+}
+
+int shim_read_start(uint8_t port, uint32_t timeout_ms) {
+	if (shim_read_running || port >= SHIM_PORTS || shim_held[port] == NULL) { return -1; }
+	shim_read_port = port;
+	shim_read_timeout = timeout_ms;
+	shim_read_len = -2;
+	if (pthread_create(&shim_read_thread, NULL, shim_read_thread_fn, NULL) != 0) { return -2; }
+	shim_read_running = 1;
+	return 0;
+}
+
+/* -2 while still blocked, -1 for a NULL return, else the packet length. */
+int shim_read_peek(void) { return shim_read_len; }
+
+int shim_read_join(uint32_t * elapsed_ms) {
+	if (!shim_read_running) { return -3; }
+	pthread_join(shim_read_thread, NULL);
+	shim_read_running = 0;
+	if (elapsed_ms) { *elapsed_ms = shim_read_elapsed_ms; }
+	return shim_read_len;
+}
+
+/* The process-global RDP options every new client connection copies (`csp_rdp.c:801`). */
+void shim_rdp_set_opt(unsigned window, unsigned conn_timeout_ms, unsigned packet_timeout_ms,
+                      unsigned delayed_acks, unsigned ack_timeout, unsigned ack_delay_count) {
+	csp_rdp_set_opt(window, conn_timeout_ms, packet_timeout_ms, delayed_acks, ack_timeout, ack_delay_count);
+}
+
 /* --- the C as the RDP *initiator* ------------------------------------------- */
 
 /*
