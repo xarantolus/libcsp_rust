@@ -105,8 +105,7 @@ pub const fn uptime() -> Request<'static> {
 ///
 /// Every `csp_ps_hook` libcsp ships ignores the packet, so no stock node reads it — but a
 /// sentinel is the only reason the byte exists, and a hook that validates it would ignore a
-/// request without one. This sent an empty payload until it was compared against what the
-/// C's client actually emits.
+/// request without one.
 pub const PS_REQUEST: [u8; 1] = [0x55];
 
 /// Build a request for the process list.
@@ -164,9 +163,8 @@ pub const fn shutdown() -> Request<'static> {
 /// than that is discarded by a real node **with no reply and no error** — the caller just
 /// waits out its timeout.
 ///
-/// This used to emit `2 + body.len()`, so `cmp_request(code::IDENT, &[], …)` produced two
-/// bytes that no libcsp node would ever answer. The padding is zeroed, matching what the
-/// C's own clients send: `csp_cmp_ident` passes `sizeof(struct csp_cmp_ident_msg)`.
+/// The padding is zeroed, matching what the C's own clients send: `csp_cmp_ident` passes
+/// `sizeof(struct csp_cmp_ident_msg)`.
 #[cfg(feature = "cmp")]
 pub fn cmp_request(code: u8, body: &[u8], out: &mut [u8]) -> Result<usize> {
     let supplied = cmp::Header::LEN + body.len();

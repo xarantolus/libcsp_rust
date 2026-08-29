@@ -93,10 +93,10 @@ pub enum Error {
     /// nowhere to block, so the caller drains `work` and retries.
     ///
     /// Distinct from the failures around it because it is *temporary*: the same packet on
-    /// the same connection succeeds once an acknowledgement arrives. This used to be
-    /// returned for a **closed** connection as well — where retrying never succeeds, and
-    /// the caller needs to reconnect. The C separates them: `csp_rdp_send` returns
-    /// `CSP_ERR_RESET` when the state is not open and blocks only for the window.
+    /// the same connection succeeds once an acknowledgement arrives. A closed connection
+    /// returns a distinct error instead, since retrying never succeeds there. The C
+    /// separates them: `csp_rdp_send` returns `CSP_ERR_RESET` when the state is not open
+    /// and blocks only for the window.
     SendWindowFull,
     /// The connection is gone: the peer reset it, or it timed out.
     ///
