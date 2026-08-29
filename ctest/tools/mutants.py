@@ -70,6 +70,12 @@ MUTANTS = [
    "        if !self.is_bound(id.dport) {"),
   # An unacknowledged packet must be resent, and the resent frame has to be one a real C
   # peer accepts -- only a peer notices a malformed retransmission.
+  # A packet the fan-out queue has no room for must be dropped whole -- freeing its slot --
+  # not have its slot taken by into_index and then abandoned, which leaked one buffer per
+  # overflow when several unacked packets retransmitted at once.
+  ("router: a queue-full frame is freed, not leaked", "csp/src/router.rs",
+   "            self.pending_missed += 1;\n            drop(packet);",
+   "            self.pending_missed += 1;\n            let _ = packet.into_index();"),
   ("rdp: an unacknowledged packet is resent", "csp/src/router.rs",
    "                    TxAction::Retransmit { token, .. } => {",
    "                    TxAction::Retransmit { token, .. } => { let _ = token; continue; }\n                    #[allow(unreachable_patterns)]\n                    TxAction::Retransmit { token, .. } => {"),
