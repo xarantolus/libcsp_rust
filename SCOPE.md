@@ -4842,3 +4842,23 @@ direction, the C's retransmission through the port's reassembly, matched without
 The two retransmission defects — the trailer (cycle 15) and now the header — were both
 invisible to every per-feature test because both only exist in a packet that is re-sent,
 and only a lossy composite link re-sends one. That is what the composite scenarios are for.
+
+### Both ends close at once: no reset storm, on either side
+
+*2026-08-29.* `case RDP_CLOSE_WAIT` answers what it receives with `ACK|RST`, so two nodes
+closing the same connection in the same instant looked, from the state table, like a pair
+that would trade resets until a CLOSE-WAIT timer fired. Measured instead
+(`difftest/tests/node_rdp_simultaneous_close.rs`): the port and the C each send `ACK|RST`
+and each receives the other's, and **nothing comes back from either side**.
+
+The C's reset handling runs *before* the state switch. A reset arriving in CLOSE-WAIT with
+`ACK` set is taken as the peer's acknowledgement of the close and, with
+`CSP_USE_RDP_FAST_CLOSE`, closes at once without an answer ("RST received in CLOSE_WAIT …
+closing", `csp_rdp.c:501`); the `ACK|RST`-to-everything rule at `:752` is only ever reached
+by a packet that is not itself a reset. And once `csp_close` has released the C's slot, the
+port's reset reaches a fresh server connection in CLOSED, where a reset is "ignored"
+(`:495`) and the router frees the connection again — not the `RST` answer a stray data
+packet gets there. So the 2026-08-26 entry's "answers everything with `ACK|RST`" reads too
+wide: everything *except a reset*. The port already did the same on both counts
+(`Connection::on_packet`, CLOSE-WAIT arm of the reset branch; `Closed` arm), which this
+pins. A pin-only probe, the second of the composite series.
