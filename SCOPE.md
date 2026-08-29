@@ -4936,3 +4936,30 @@ peer needs to see from the outside.
   was released with the state still SYN-SENT. The port's SYN-SENT connection is closed by
   `tick` after `conn_timeout`, having sent one SYN — the same shape. The fifth time this
   sweep's reading of the C was corrected by running it.
+
+### A fan-out-queue overflow leaked one buffer per retransmission — fixed
+
+*2026-08-29.* Two RDP connections to the same C node, interleaved, one of them left with four
+unacknowledged packets when its retransmission timer fires
+(`difftest/tests/node_rdp_two_sessions.rs`). The port's fan-out queue `pending_tx` holds
+`MAX_FANOUT` (4) frames between `work()` calls; `sweep_unacked` pushes every retransmission
+into it, and a connection with more than that outstanding overflows it in one sweep.
+
+The overflow path leaked. `push_pending_tagged` took the buffer's slot with `into_index()`
+*before* the capacity check, and on a full queue did `pending_missed += 1` and dropped the
+raw index — nothing ever popped it, so the pool never got the buffer back. `into_index()`
+is the one place in this crate a leak is expressible (the reference is deliberately parked
+outside RAII for the queue to reclaim); handing it a slot the queue then refuses is exactly
+the case the queue cannot reclaim. One leaked buffer per overflowing retransmission; a node
+holding several busy RDP connections would bleed its pool and eventually deliver nothing.
+
+`push_pending_owned` now takes the whole `Packet` and only calls `into_index()` when there
+is room; on a full queue it drops the packet, and RAII frees the slot. A retransmission
+dropped this way is not lost — its `tx_unacked` entry stays and the next sweep re-sends it.
+The single-connection case never showed it: two packets retransmit, both fit. It took two
+connections and a four-packet backlog, and the leak was invisible to every per-feature test
+because the buffer is only allocated when a retransmission overflows a queue that a lone
+session never fills. Confirmed by control: reintroducing the `into_index()` fails the test at
+23 of 24 buffers. One mutation, noticed by the test. `node_rdp_lost_packet_leak.rs` adds the
+single-connection floor (a lost-then-retransmitted packet leaves no buffer) so the two
+scenarios bracket the path.

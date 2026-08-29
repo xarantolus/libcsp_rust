@@ -1109,8 +1109,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                     id.src = ifaces.get(hops[0].iface).map(|e| e.addr).unwrap_or(0);
                     packet.set_id(id);
                 }
-                let slot = packet.into_index();
-                self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
+                self.push_pending_owned(hops[0].iface, hops[0].via, packet, true);
             }
             _ => {
                 self.counters.no_route += 1;
@@ -1351,8 +1350,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                     id.src = ifaces.get(hops[0].iface).map(|e| e.addr).unwrap_or(0);
                     reply.set_id(id);
                 }
-                let slot = reply.into_index();
-                self.push_pending_tagged(hops[0].iface, hops[0].via, slot, true);
+                self.push_pending_owned(hops[0].iface, hops[0].via, reply, true);
                 Ok(())
             }
             _ => {
@@ -1446,8 +1444,7 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                 return Err(Routed::Dropped(DropReason::NoRoute));
             }
         };
-        let slot = reply.into_index();
-        self.push_pending_tagged(iface, via, slot, true);
+        self.push_pending_owned(iface, via, reply, true);
         Ok(())
     }
 
@@ -1641,16 +1638,24 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         self.finish_forward(&hops[..n], packet)
     }
 
-    fn push_pending(&mut self, iface: u8, via: u16, slot: u16) {
-        self.push_pending_tagged(iface, via, slot, false);
-    }
-
-    fn push_pending_tagged(&mut self, iface: u8, via: u16, slot: u16, ours: bool) {
+    /// Queue a packet the node produced, taking ownership. When the fan-out queue is full
+    /// the packet is **dropped here**, which frees its pool slot — the raw-index path below
+    /// cannot, so a slot handed to it while the queue was full leaked one buffer. A
+    /// retransmission dropped this way is not lost: its `tx_unacked` entry stays and the
+    /// next sweep re-sends it.
+    fn push_pending_owned<'p, const B: usize, const SZ: usize>(
+        &mut self,
+        iface: u8,
+        via: u16,
+        packet: Packet<'p, B, SZ>,
+        ours: bool,
+    ) {
         if self.pending_len < MAX_FANOUT {
-            self.pending_tx[self.pending_len] = Some((iface, via, slot, ours));
+            self.pending_tx[self.pending_len] = Some((iface, via, packet.into_index(), ours));
             self.pending_len += 1;
         } else {
             self.pending_missed += 1;
+            drop(packet);
         }
     }
 
@@ -1699,13 +1704,13 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             match packet.deep_copy() {
                 Some(mut c) => {
                     Self::set_dst(&mut c, h.dst);
-                    self.push_pending(h.iface, h.via, c.into_index());
+                    self.push_pending_owned(h.iface, h.via, c, false);
                 }
                 None => self.pending_missed += 1,
             }
         }
         Self::set_dst(&mut packet, last.dst);
-        self.push_pending(last.iface, last.via, packet.into_index());
+        self.push_pending_owned(last.iface, last.via, packet, false);
         self.pop_pending().expect("a destination was just queued")
     }
 
