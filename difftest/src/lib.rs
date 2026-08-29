@@ -179,6 +179,7 @@ unsafe extern "C" {
     fn shim_sfp_send(dst: u16, dport: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_node_sfp_send_on(port: u8, body: *const u8, len: c_int, mtu: u32) -> c_int;
     fn shim_rdp_connect_start(dst: u16, dport: u8) -> c_int;
+    fn shim_rdp_connect_start_opts(dst: u16, dport: u8, opts: u32) -> c_int;
     fn shim_rdp_connect_join() -> c_int;
     fn shim_rdp_initiator_send(body: *const u8, len: c_int) -> c_int;
     fn shim_rdp_initiator_close();
@@ -209,6 +210,9 @@ unsafe extern "C" {
     fn shim_can_get(i: c_int, id: *mut u32, data: *mut u8) -> c_int;
     fn shim_can_send(dst: u16, dport: u8, sport: u8, body: *const u8, len: c_int) -> c_int;
     fn shim_can_rx(id: u32, data: *const u8, dlc: u8) -> c_int;
+    fn shim_kiss_node_init(address: u16, netmask: u16) -> c_int;
+    fn shim_kiss_node_drain(out: *mut u8, max: c_int) -> c_int;
+    fn shim_kiss_node_rx(buf: *const u8, len: u32);
     fn shim_node_accept_count(port: u8) -> c_int;
     fn shim_clock_set(ms: u32);
     fn shim_clock_advance(ms: u32);
@@ -953,6 +957,14 @@ pub fn c_rdp_connect_start(dst: u16, dport: u8) -> Vec<Vec<u8>> {
 }
 
 /// libcsp's own verdict on the handshake: `true` if `csp_connect` returned a connection.
+/// [`c_rdp_connect_start`] with the connection opened under `opts` (RDP is always on).
+pub fn c_rdp_connect_start_opts(dst: u16, dport: u8, opts: u32) -> Vec<Vec<u8>> {
+    // SAFETY: the shim owns the thread and the connection for the life of the exchange.
+    let n = unsafe { shim_rdp_connect_start_opts(dst, dport, opts) };
+    assert!(n >= 0, "the C node could not start an RDP connect: {n}");
+    captured_frames()
+}
+
 pub fn c_rdp_connect_join() -> bool {
     // SAFETY: joins the thread started above; a no-op if none is running.
     unsafe { shim_rdp_connect_join() == 1 }
@@ -1330,6 +1342,28 @@ pub fn c_can_drain() -> Vec<CanFrame> {
 pub fn c_node_pump() -> i32 {
     // SAFETY: runs libcsp's router on its own queue. Callers hold `LOCK`.
     unsafe { shim_node_pump() }
+}
+
+/// Add a routed KISS interface to the C node, as a real serial link would be.
+pub fn c_kiss_node_init(address: u16, netmask: u16) -> bool {
+    // SAFETY: idempotent; the shim owns the interface for the process.
+    unsafe { shim_kiss_node_init(address, netmask) == 0 }
+}
+
+/// Every byte the C's KISS link has transmitted since the last drain.
+pub fn c_kiss_node_drain() -> Vec<u8> {
+    let mut out = vec![0u8; 8192];
+    // SAFETY: the shim copies at most `max` bytes. Callers hold `LOCK`.
+    let n = unsafe { shim_kiss_node_drain(out.as_mut_ptr(), out.len() as c_int) };
+    out.truncate(n.max(0) as usize);
+    out
+}
+
+/// Feed a byte stream to the real `csp_kiss_rx` on the C's routed KISS interface; the
+/// frames it completes are queued for the router (pump with [`c_node_pump`]).
+pub fn c_kiss_node_rx(bytes: &[u8]) {
+    // SAFETY: the slice is valid for the call. Callers hold `LOCK`.
+    unsafe { shim_kiss_node_rx(bytes.as_ptr(), bytes.len() as u32) }
 }
 
 /// Feed one CAN frame to the C's `csp_can_rx`. Returns libcsp's own return code.
