@@ -4795,3 +4795,26 @@ sent over CAN (its replies had only ever been read off the test interface), and
 over CFP framing survives a lost and a reordered CAN frame in the port-to-C direction,
 delivers the C's replies in order, closes with the C's `ACK|RST` exchange, and returns
 every buffer. That is the flight path — CDH to a C peer on the bus — measured end to end.
+
+### The same session under every protection, from the C's side, and over KISS
+
+*2026-08-29.* The CAN session that found the unprotected retransmission was one cell:
+`CRC32_REQ`, port-initiated. This cycle ran the rest of the table and a different link
+(`difftest/tests/node_rdp_over_can.rs`, `node_rdp_over_kiss.rs`):
+
+- the same loss-and-swap session under `HMAC_REQ` and under `HMAC_REQ|CRC32_REQ` —
+  the retransmissions are now protected afresh under each, and the C delivers them;
+- the **C-initiated** direction over CAN: the C connects through its real
+  `csp_can2_tx`, the port's reassembly pool and router accept, the port loses and swaps
+  frames of the C's packets, and the C's own `csp_rdp_check_timeouts` repairs them from
+  its own clock; the C closes and the port's `CLOSE_WAIT` timer releases the slot;
+- a `CRC32_REQ` session **over KISS** through the real `csp_kiss_rx`/`csp_kiss_tx` — the
+  ground link — with one frame lost in each direction and repaired.
+
+No port defect. This is the first cycle of the sweep in which the composite scenarios
+found nothing, and the C corrected the harness twice instead: the port's `Pbufs` leaves
+releasing a broken transfer and expiring a quiet one to the driver, exactly as
+`csp_if_can_pbuf.c` leaves it to the C's, and a harness that did neither ran out of slots
+on the third damaged packet; and RDP delivers in order, so the packet that arrives behind
+a gap is readable only once the retransmission fills the gap — the KISS test first asked
+for it early. Both are the C's rules, and both now hold in the port by measurement.
