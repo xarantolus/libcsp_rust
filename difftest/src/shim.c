@@ -1440,6 +1440,12 @@ int shim_can_init(uint16_t address, uint16_t netmask) {
 	return 0;
 }
 
+/* A routing-table entry pointing out of the CAN interface, for peers beyond its subnet. */
+int shim_can_route(uint16_t address, uint16_t netmask, uint16_t via) {
+	if (!shim_can_ready) { return -1; }
+	return csp_rtable_set(address, netmask, &shim_can_iface, via);
+}
+
 void shim_can_clear(void) { shim_can_n = 0; }
 int  shim_can_count(void) { return shim_can_n; }
 
