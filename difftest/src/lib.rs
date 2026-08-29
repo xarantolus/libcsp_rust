@@ -1286,6 +1286,21 @@ pub fn c_can_init(address: u16, netmask: u16) -> bool {
     unsafe { shim_can_init(address, netmask) == 0 }
 }
 
+/// Serve every request already queued on `port` (arrived over any interface) with the C's
+/// own `csp_service_handler`; the replies leave by the C's route to the requester.
+/// Returns how many were served.
+pub fn c_node_serve_pending(port: u8) -> u32 {
+    let mut n = 0;
+    // SAFETY: the shim bounds-checks `port` and owns every buffer. Callers hold `LOCK`.
+    unsafe {
+        shim_node_pump();
+        while shim_node_serve(port) == 1 {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Route `address/netmask` out of the C's CAN interface through `via`.
 pub fn c_can_route(address: u16, netmask: u16, via: u16) -> bool {
     // SAFETY: plain integers; the shim checks the interface exists. Callers hold `LOCK`.
