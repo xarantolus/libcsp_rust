@@ -1151,9 +1151,6 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             let Ok(count) = self.conns.poll_unacked(handle, now_ms, &mut actions) else {
                 continue;
             };
-            let Ok(id) = self.conns.id_out(handle) else {
-                continue;
-            };
             for action in actions.iter().take(count) {
                 match *action {
                     TxAction::Release { token } => drop(pool.from_index(token)),
@@ -1169,6 +1166,12 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                         // still has something to retransmit next time.
                         let _ = held.into_index();
                         let Some(mut c) = copy else { continue };
+                        // The copy keeps the header it was sent with, not the connection's:
+                        // a stream fragment carries `FRAG` on that one packet, and the C
+                        // retransmits `packet->id` as stored (`csp_rdp.c:418`). Re-sent under
+                        // the connection's flags it lost `FRAG` and a real `csp_sfp_recv_fp`
+                        // refused the whole stream (`difftest/tests/node_sfp_over_can.rs`).
+                        let id = c.id();
                         // "Update to latest outgoing ACK" -- the C rewrites `ack_nr` on
                         // every retransmission so the peer learns what has arrived since.
                         if let Ok(rcv_cur) = self.conns.rdp(handle).map(|r| r.rcv_cur) {

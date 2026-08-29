@@ -923,6 +923,9 @@ MUTANTS = [
    "                if false\n                    && crate::egress::protect(\n                        &mut packet,"),
   # Both RDP queue points carry the same three lines, so each is anchored on the line that
   # follows it -- `queue_rdp_from_tick` reads the destination next, `queue_rdp` comments.
+  ("rdp: a retransmitted fragment keeps the header it was sent with", "csp/src/router.rs",
+   "                        let id = c.id();\n",
+   "                        let id = self.conns.id_out(handle).unwrap_or(c.id());\n"),
   ("egress: a retransmission carries the trailer it promises", "csp/src/router.rs",
    "                        if crate::egress::protect(\n                            &mut c,\n                            id.flags,\n                            self.hmac_key.as_ref().map(|k| &k[..]),\n                        )\n                        .is_err()\n                        {",
    "                        if false {"),
