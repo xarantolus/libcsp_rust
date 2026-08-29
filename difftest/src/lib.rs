@@ -1303,6 +1303,35 @@ pub fn c_can_send(dst: u16, dport: u8, sport: u8, body: &[u8]) -> Vec<CanFrame> 
     out
 }
 
+/// Everything the C's CAN interface has transmitted since the last drain, in order.
+///
+/// Router-originated frames -- an RDP `SYN|ACK`, an acknowledgement, a service reply --
+/// leave through `csp_can2_tx` like anything else routed to a CAN peer, and land in the
+/// same capture `c_can_send` reads.
+pub fn c_can_drain() -> Vec<CanFrame> {
+    let mut out = Vec::new();
+    // SAFETY: the capture array is fixed-size and bounds-checked. Callers hold `LOCK`.
+    unsafe {
+        for i in 0..shim_can_count() {
+            let mut id: u32 = 0;
+            let mut data = vec![0u8; 8];
+            let n = shim_can_get(i, &mut id, data.as_mut_ptr());
+            if n >= 0 {
+                data.truncate(n as usize);
+                out.push((id, data));
+            }
+        }
+        shim_can_clear();
+    }
+    out
+}
+
+/// Turn the C router's crank until its queue is empty. `c_can_rx` only queues.
+pub fn c_node_pump() -> i32 {
+    // SAFETY: runs libcsp's router on its own queue. Callers hold `LOCK`.
+    unsafe { shim_node_pump() }
+}
+
 /// Feed one CAN frame to the C's `csp_can_rx`. Returns libcsp's own return code.
 ///
 /// Whether a packet came out is answered by pumping the router and reading the bound port,

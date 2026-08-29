@@ -923,6 +923,9 @@ MUTANTS = [
    "                if false\n                    && crate::egress::protect(\n                        &mut packet,"),
   # Both RDP queue points carry the same three lines, so each is anchored on the line that
   # follows it -- `queue_rdp_from_tick` reads the destination next, `queue_rdp` comments.
+  ("egress: a retransmission carries the trailer it promises", "csp/src/router.rs",
+   "                        if crate::egress::protect(\n                            &mut c,\n                            id.flags,\n                            self.hmac_key.as_ref().map(|k| &k[..]),\n                        )\n                        .is_err()\n                        {",
+   "                        if false {"),
   ("egress: an rdp timer's frame carries it too", "csp/src/router.rs",
    "        if crate::egress::protect(\n            &mut reply,\n            out_flags,\n            self.hmac_key.as_ref().map(|k| &k[..]),\n        )\n        .is_err()\n        {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;",
    "        if false {\n            self.counters.malformed += 1;\n            return Err(Routed::Dropped(DropReason::Malformed));\n        }\n        let dst = reply.id().dst;"),
