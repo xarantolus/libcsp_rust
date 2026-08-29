@@ -4875,3 +4875,14 @@ router forwards every packet — nothing delivered to it, nothing dropped, nothi
 and holds no buffer afterwards. A pin: `csp_route_work` checks security only for packets
 it delivers to itself, and `Router::forward` leaves a transit packet's trailers alone the
 same way. Third composite probe; one real defect (the fragment header) in three.
+
+### Services along the flight path: ping and IDENT through the router
+
+*2026-08-29.* The two requests every pass starts with, sent the way the ground sends them:
+a port node asks the C peer on the bus for a 100-byte ping echo and its identity, with
+CRC32 on the request, through the port as router (`difftest/tests/node_service_transit.rs`).
+The C serves both with its own `csp_service_handler`; the replies come back through the
+router to the asking connection, where `client::check_ping` finds every byte and
+`check_cmp_reply` + `Ident::decode` find a reply of exactly
+`sizeof(struct csp_cmp_ident_msg)`. A pin. Fourth composite probe: three pins in a row
+(simultaneous close, the transit session, the transit services) after the fragment header.
