@@ -7,6 +7,7 @@
  */
 #include <endian.h>
 #include <pthread.h>
+#include <time.h>
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -409,11 +410,15 @@ static const char * shim_tx_if[SHIM_TX_MAX];   /* which interface each frame lef
 static uint16_t     shim_tx_via[SHIM_TX_MAX];  /* and the next hop it was given */
 static int          shim_tx_n = 0;
 static int          shim_node_ready = 0;
+/* The capture is written by whichever thread calls into libcsp -- an application thread
+   blocked in `csp_send` as well as the main thread's router -- so it is locked. */
+static pthread_mutex_t shim_tx_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Capture nexthop: record the framed bytes, free the packet, report success. */
 static int shim_node_tx_fn(csp_iface_t *iface, uint16_t via, csp_packet_t *packet, int from_me) {
 	(void)from_me;
 	csp_id_prepend(packet);
+	pthread_mutex_lock(&shim_tx_mu);
 	if (shim_tx_n < SHIM_TX_MAX) {
 		int n = (int)packet->frame_length;
 		if (n > SHIM_FRAME_MAX) { n = SHIM_FRAME_MAX; }
@@ -423,6 +428,7 @@ static int shim_node_tx_fn(csp_iface_t *iface, uint16_t via, csp_packet_t *packe
 		shim_tx_via[shim_tx_n] = via;
 		shim_tx_n++;
 	}
+	pthread_mutex_unlock(&shim_tx_mu);
 	csp_buffer_free(packet);
 	return CSP_ERR_NONE;
 }
@@ -471,14 +477,26 @@ int shim_node_init(int version, uint16_t address, uint16_t netmask, uint16_t egr
 }
 
 /* Forget captured egress. Does not touch connections -- that is the node's business. */
-void shim_node_clear_tx(void) { shim_tx_n = 0; }
+void shim_node_clear_tx(void) {
+	pthread_mutex_lock(&shim_tx_mu);
+	shim_tx_n = 0;
+	pthread_mutex_unlock(&shim_tx_mu);
+}
 
-int shim_node_tx_count(void) { return shim_tx_n; }
+int shim_node_tx_count(void) {
+	pthread_mutex_lock(&shim_tx_mu);
+	int n = shim_tx_n;
+	pthread_mutex_unlock(&shim_tx_mu);
+	return n;
+}
 
 int shim_node_tx_get(int i, uint8_t *out) {
-	if (i < 0 || i >= shim_tx_n) { return -1; }
+	pthread_mutex_lock(&shim_tx_mu);
+	if (i < 0 || i >= shim_tx_n) { pthread_mutex_unlock(&shim_tx_mu); return -1; }
 	memcpy(out, shim_tx_buf[i], (size_t)shim_tx_len[i]);
-	return shim_tx_len[i];
+	int n = shim_tx_len[i];
+	pthread_mutex_unlock(&shim_tx_mu);
+	return n;
 }
 
 /* Name of the interface frame `i` left by, and the via it carried. */
@@ -1736,6 +1754,69 @@ int shim_node_sfp_send_on(uint8_t port, const uint8_t *body, int len, uint32_t m
 	shim_node_pump();
 	if (ret != CSP_ERR_NONE) { return -100 + ret; }
 	return shim_tx_n;
+}
+
+/* --- an application thread sending a burst on a held connection ------------- */
+
+/*
+ * `csp_rdp_send` blocks on `tx_wait` while `snd_nxt` is a full window past `snd_una`
+ * (`csp_rdp.c:868`), until the router task processes an acknowledgement or `conn_timeout`
+ * passes. Nothing single-threaded can see that: the call does not return. So the sends run
+ * on an application thread, the main thread is the router and the peer, and the visible
+ * fact is a counter of completed sends that stops at the window and moves again on an ack.
+ */
+static pthread_t     shim_burst_thread;
+static volatile int  shim_burst_sent_n;
+static int           shim_burst_running;
+static uint8_t       shim_burst_port;
+static int           shim_burst_count;
+static int           shim_burst_len;
+static uint32_t      shim_burst_max_block_ms;
+
+static uint32_t shim_wall_ms(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+static void * shim_burst_thread_fn(void * arg) {
+	(void)arg;
+	for (int i = 0; i < shim_burst_count; i++) {
+		csp_packet_t * out = csp_buffer_get(0);
+		if (out == NULL) { break; }
+		memset(out->data, (uint8_t)i, (size_t)shim_burst_len);
+		out->length = (uint16_t)shim_burst_len;
+		uint32_t t0 = shim_wall_ms();
+		csp_send(shim_held[shim_burst_port], out);
+		uint32_t dt = shim_wall_ms() - t0;
+		if (dt > shim_burst_max_block_ms) { shim_burst_max_block_ms = dt; }
+		shim_burst_sent_n++;
+	}
+	return NULL;
+}
+
+/* Start `count` sends of `len` bytes on the connection held for `port`. 0 on success. */
+int shim_burst_start(uint8_t port, int count, int len) {
+	if (shim_burst_running || port >= SHIM_PORTS || shim_held[port] == NULL) { return -1; }
+	shim_burst_port = port;
+	shim_burst_count = count;
+	shim_burst_len = len;
+	shim_burst_sent_n = 0;
+	shim_burst_max_block_ms = 0;
+	if (pthread_create(&shim_burst_thread, NULL, shim_burst_thread_fn, NULL) != 0) { return -2; }
+	shim_burst_running = 1;
+	return 0;
+}
+
+int shim_burst_sent(void) { return shim_burst_sent_n; }
+
+/* Wait for the thread; returns how many sends completed. */
+int shim_burst_join(uint32_t * max_block_ms) {
+	if (!shim_burst_running) { return -1; }
+	pthread_join(shim_burst_thread, NULL);
+	shim_burst_running = 0;
+	if (max_block_ms) { *max_block_ms = shim_burst_max_block_ms; }
+	return shim_burst_sent_n;
 }
 
 /* --- the C as the RDP *initiator* ------------------------------------------- */

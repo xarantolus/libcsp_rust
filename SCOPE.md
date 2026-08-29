@@ -4895,3 +4895,24 @@ router, repaired by the ground's timer through the router; and a router frame to
 ground that is lost, repaired by the C's timer with the retransmission crossing the router a
 second time — the reply behind the gap held on the ground until it fills, then both in
 order. Close completes; neither port node holds a buffer. A pin, the fourth in a row.
+
+### The C's send window, measured with the sender on its own thread
+
+*2026-08-29.* `csp_rdp_send` blocks in `csp_bin_sem_wait(&conn->rdp.tx_wait, conn_timeout)`
+while a full window is unacknowledged (`csp_rdp.c:868-876`), and only the router task's
+handling of an acknowledgement posts that semaphore. Every harness so far was one thread —
+the call simply would not return — so "window-full blocking" was the one RDP rule left
+unmeasured, and earlier entries say so. The difftest binary is `std`, so the C's
+application can be a real pthread (`shim_burst_start/sent/join`): it sends six datagrams on
+the held connection while the main thread is the C's router and the port peer, and the
+observable is a counter of completed sends (`difftest/tests/node_rdp_window_blocking.rs`).
+
+Measured: the counter reaches exactly four — the window — with nothing acknowledged, and
+stays there for 300 ms of wall clock; the port receives the four, its delayed-ack timer
+produces an acknowledgement, the main thread runs the C's router on it, and the counter
+moves to six; the longest single `csp_send` waited ≥ 250 ms. The port cannot block — it is
+sans-io — so the same rule surfaces as `Error::SendWindowFull` from `Node::send` on the
+fifth packet, asserted in the same test. The tx capture is now mutex-locked, since an
+application thread inside `csp_send` writes it while the main thread reads. The pattern
+serves any blocking libcsp call (`csp_read` with a timeout, `csp_connect`) that a sans-io
+peer needs to see from the outside.
