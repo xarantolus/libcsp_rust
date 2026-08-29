@@ -4759,3 +4759,39 @@ stacks deliver all six in order, but the C acknowledged four of the five fill pa
 the port five. That is a difference in acknowledgement cadence under reordering, observed
 and not explained here; it does not change what the application receives, and the row's
 purpose — that `cur+6` is inside the C's `2w` window and held — is what it pins.
+
+### A whole session over CAN: the retransmission carried the flag and no trailer
+
+2026-08-29, fifteenth cycle, and a change of method. Fourteen cycles of row-level
+comparison had exhausted the lists they came from; the risk left was *interaction*, which
+no per-feature test sees. So one composite scenario, the way a flight node runs one: the
+port opens an RDP connection with `CRC32_REQ` to a real C peer **through the real
+`csp_can_rx` and `csp_can2_tx`** — the port's CFP fragmenter and reassembly pool on one
+side, libcsp's CAN interface and router on the other — sends three packets that each span
+several CAN frames, loses the middle frame of the second and swaps two frames of the
+third, lets its retransmission timer repair them, takes two replies back over the same
+link, and closes (`difftest/tests/node_rdp_over_can.rs`).
+
+Every piece of that had its own comparison and every piece passed. The session did not:
+the two damaged packets were retransmitted — eighteen CAN frames, the right sequence
+numbers, the refreshed acknowledgement — and the C delivered neither. **The retransmitted
+copies carried `CSP_FCRC32` and no checksum.** The copy a connection holds for
+retransmission is taken in `send_flagged`, before `route_from` appends the trailers, and
+the retransmission path re-queued it as it was. The C appends its trailers on every
+`csp_send_direct`, a retransmission included (`csp_rdp.c:418`, then `csp_io.c:249-271`), so
+its copies are protected afresh each time. The earlier trailer fix (2026-08-28, "the port
+set the checksum flag and never appended the checksum") covered what the application
+sends and what the RDP timers compose; it did not cover what the timers *re-send*. On a
+lossy link with a checksum required, that is a connection that can never repair a loss:
+the peer's router drops every repair as corrupt, the sender gives up after ten, and
+neither side sees why.
+
+`sweep_unacked` now protects each retransmitted copy before queueing it. One mutation,
+noticed by the session. Two harness additions: `c_can_drain` reads what the C's router
+sent over CAN (its replies had only ever been read off the test interface), and
+`c_node_pump` runs the C's router after `c_can_rx`, which only queues.
+
+**What the session establishes that the rows could not:** a CRC32-protected RDP session
+over CFP framing survives a lost and a reordered CAN frame in the port-to-C direction,
+delivers the C's replies in order, closes with the C's `ACK|RST` exchange, and returns
+every buffer. That is the flight path — CDH to a C peer on the bus — measured end to end.

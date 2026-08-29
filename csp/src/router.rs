@@ -1192,6 +1192,24 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                                 (len, ())
                             });
                         }
+                        // The held copy was taken before the trailers went on, and the C
+                        // appends them on every `csp_send_direct` -- a retransmission
+                        // included (`csp_rdp.c:418`, then `csp_io.c:249-271`). Without this
+                        // a retransmission on a CRC32 or HMAC connection carried the flag
+                        // and no trailer, and the peer's router dropped every one: a lost
+                        // frame could never be repaired. Measured over a real CAN link in
+                        // `difftest/tests/node_rdp_over_can.rs`.
+                        if crate::egress::protect(
+                            &mut c,
+                            id.flags,
+                            self.hmac_key.as_ref().map(|k| &k[..]),
+                        )
+                        .is_err()
+                        {
+                            self.counters.malformed += 1;
+                            drop(c);
+                            continue;
+                        }
                         self.queue_built(pool, ifaces, id, c);
                     }
                     TxAction::GiveUp => {
