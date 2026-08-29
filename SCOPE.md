@@ -4886,3 +4886,12 @@ router to the asking connection, where `client::check_ping` finds every byte and
 `check_cmp_reply` + `Ident::decode` find a reply of exactly
 `sizeof(struct csp_cmp_ident_msg)`. A pin. Fourth composite probe: three pins in a row
 (simultaneous close, the transit session, the transit services) after the fragment header.
+
+### The flight topology with the loss on the ground leg
+
+*2026-08-29.* The transit session once more, losing on the near leg instead of the bus
+(`difftest/tests/node_rdp_transit_ground_loss.rs`): a ground frame that never reaches the
+router, repaired by the ground's timer through the router; and a router frame towards the
+ground that is lost, repaired by the C's timer with the retransmission crossing the router a
+second time — the reply behind the gap held on the ground until it fills, then both in
+order. Close completes; neither port node holds a buffer. A pin, the fourth in a row.
