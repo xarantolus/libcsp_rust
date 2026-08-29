@@ -49,11 +49,17 @@ fn to_c(frames: &[CanFrame]) -> Vec<CanFrame> {
 }
 
 /// Reassemble the C's CAN frames with the port's pool and deliver each packet to the node.
+/// A driver's duties around the pool, as `csp_if_can_pbuf.c` does them for the C: a
+/// transfer that breaks is dropped and its slot released, and quiet transfers expire.
 fn from_c(node: &mut TestNode, pool: &mut Pool, frames: &[CanFrame], now: u32) {
     let mut buf = [0u8; 512];
+    pool.expire(now, 1000);
     for (id, data) in frames {
         let key = *id & cfp::V2_CONN_MASK;
-        let re = pool.get_or_create(key, now).expect("a reassembly slot");
+        let Some(re) = pool.get_or_create(key, now) else {
+            // No slot: the frame is dropped, as the C drops one it has no buffer for.
+            continue;
+        };
         match re.push(*id, data, &mut buf) {
             Ok(Some((hdr, n))) => {
                 pool.release(key);
@@ -65,7 +71,8 @@ fn from_c(node: &mut TestNode, pool: &mut Pool, frames: &[CanFrame], now: u32) {
                 node.router.receive(p, 0);
             }
             Ok(None) => {}
-            Err(e) => panic!("the port's reassembler refused a C frame: {e:?}"),
+            // A lost or reordered frame breaks the transfer; the sender's RDP repairs it.
+            Err(_) => pool.release(key),
         }
     }
 }
@@ -111,28 +118,47 @@ fn settle(node: &mut TestNode, pool: &mut Pool, now: u32, sc: &mut u32) -> Vec<V
     delivered
 }
 
+const SECRET: &[u8] = b"a shared secret for the bus";
+
 #[test]
-fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
+fn an_rdp_session_over_can_survives_a_lost_and_a_swapped_frame_under_every_protection() {
     let _g = lock();
     c_set_version(VERSION);
     assert!(c_node_init(VERSION, C_ADDR, NETMASK, 20, 40));
     assert!(c_can_init(C_ADDR, NETMASK));
     assert_eq!(c_node_bind(PORT), 0);
+    assert_eq!(c_hmac_set_key(SECRET), 0);
     let _ = c_can_drain();
 
     let storage = CspStorage::<8, 24, 300, 64, 8>::new();
     let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(R_ADDR));
     node.ifaces.add("can", R_ADDR, NETMASK, true).unwrap();
+    node.set_hmac_key(SECRET);
     let mut pool = Pool::new();
     let mut sc = 0u32;
+
+    // The three protections a flight link would ask for; a retransmission must carry each.
+    for protection in [
+        opts::CRC32_REQ,
+        opts::HMAC_REQ,
+        opts::CRC32_REQ | opts::HMAC_REQ,
+    ] {
+        session(&mut node, &mut pool, &mut sc, protection);
+    }
+}
+
+fn session(node: &mut TestNode, pool: &mut Pool, sc: &mut u32, protection: u32) {
     let free_at_start = node.pool().available();
 
-    // Handshake, protected: every frame carries an RDP trailer and a CRC32.
+    // Handshake, protected: every frame carries an RDP trailer and the trailers asked for.
     let conn = node
-        .connect(2, C_ADDR, PORT, opts::RDP_REQ | opts::CRC32_REQ, 1000)
+        .connect(2, C_ADDR, PORT, opts::RDP_REQ | protection, 1000)
         .expect("connect");
-    settle(&mut node, &mut pool, 1000, &mut sc);
-    assert!(node.is_rdp_open(conn), "handshake over CAN completes");
+    settle(node, pool, 1000, sc);
+    assert!(
+        node.is_rdp_open(conn),
+        "handshake over CAN completes ({protection:#x})"
+    );
     let _ = c_node_read_held(PORT); // the C's application takes the connection
 
     // Three data packets, big enough to span several CAN frames each.
@@ -147,7 +173,7 @@ fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
             Outbound::Transmit { packet, .. } => (packet.id(), packet.with_payload(|d| d.to_vec())),
             other => panic!("{other:?}"),
         };
-        let mut frames = fragment(id, &payload, &mut sc);
+        let mut frames = fragment(id, &payload, sc);
         match i {
             // Lose the middle frame of the second packet.
             1 => {
@@ -158,8 +184,8 @@ fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
             _ => {}
         }
         let back = to_c(&frames);
-        from_c(&mut node, &mut pool, &back, now);
-        settle(&mut node, &mut pool, now, &mut sc);
+        from_c(node, pool, &back, now);
+        settle(node, pool, now, sc);
         now += 10;
     }
     assert_eq!(
@@ -171,7 +197,7 @@ fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
     // The port's retransmission timer repairs the other two.
     now += 1001;
     node.tick(now, u32::MAX);
-    settle(&mut node, &mut pool, now, &mut sc);
+    settle(node, pool, now, sc);
     assert_eq!(
         c_node_read_held(PORT),
         2,
@@ -184,15 +210,15 @@ fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
         let _ = c_node_send_on(PORT, reply);
         let frames = c_can_drain();
         assert!(!frames.is_empty(), "the C's reply leaves over CAN");
-        from_c(&mut node, &mut pool, &frames, now);
-        got.extend(settle(&mut node, &mut pool, now, &mut sc));
+        from_c(node, pool, &frames, now);
+        got.extend(settle(node, pool, now, sc));
         now += 10;
     }
     assert_eq!(got, vec![b"reply one".to_vec(), b"reply two".to_vec()]);
 
     // Close from the port; the C answers and both sides release.
     node.close(conn, now).expect("close");
-    settle(&mut node, &mut pool, now, &mut sc);
+    settle(node, pool, now, sc);
     now += 20_001;
     node.tick(now, u32::MAX);
     let _ = c_node_release(PORT);
@@ -201,4 +227,90 @@ fn an_rdp_crc32_session_over_can_survives_a_lost_and_a_swapped_frame() {
         free_at_start,
         "every buffer back once the session is over"
     );
+}
+
+/// The other direction: the C opens the connection over CAN and sends; the port receives,
+/// reassembles, delivers in order, and repairs a lost and a swapped frame through the C's
+/// retransmissions.
+#[test]
+fn a_c_initiated_rdp_crc32_session_over_can_repairs_a_lost_and_a_swapped_frame() {
+    let _g = lock();
+    c_set_version(VERSION);
+    assert!(c_node_init(VERSION, C_ADDR, NETMASK, 20, 40));
+    assert!(c_can_init(C_ADDR, NETMASK));
+    let _ = c_can_drain();
+
+    let storage = CspStorage::<8, 24, 300, 64, 8>::new();
+    let mut node: TestNode = Node::new(&storage, Config::new(VERSION).address(R_ADDR));
+    node.ifaces.add("can", R_ADDR, NETMASK, true).unwrap();
+    node.bind(PORT).unwrap();
+    let mut pool = Pool::new();
+    let mut sc = 0u32;
+    let free_at_start = node.pool().available();
+
+    // The C's csp_connect(RDP|CRC32) blocks on its own thread; its SYN leaves over CAN.
+    let _ = c_rdp_connect_start_opts(R_ADDR, PORT, opts::CRC32_REQ);
+    let syn = c_can_drain();
+    assert!(!syn.is_empty(), "the SYN goes out over CAN");
+    from_c(&mut node, &mut pool, &syn, 1000);
+    let mut now = 1000;
+    settle(&mut node, &mut pool, now, &mut sc);
+    assert!(c_rdp_connect_join(), "csp_connect returned a connection");
+    let conn = node.accept().expect("the port announced the connection");
+    assert!(node.is_rdp_open(conn));
+
+    // Three packets from the C, damaged on the way: the middle frame of the second lost,
+    // two frames of the third swapped.
+    let bodies: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| (0..60u8).map(|j| (i * 60 + j) ^ 0xA5).collect())
+        .collect();
+    let mut got = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        let _ = c_rdp_initiator_send(body);
+        let mut frames = c_can_drain();
+        assert!(frames.len() > 3, "several CAN frames for a 60-byte packet");
+        match i {
+            1 => {
+                frames.remove(frames.len() / 2);
+            }
+            2 => frames.swap(1, 2),
+            _ => {}
+        }
+        now += 10;
+        from_c(&mut node, &mut pool, &frames, now);
+        got.extend(settle(&mut node, &mut pool, now, &mut sc));
+    }
+    assert_eq!(
+        got,
+        vec![bodies[0].clone()],
+        "only the intact packet so far"
+    );
+
+    // The C's retransmission timer repairs the rest: packet_timeout of its own clock.
+    for _ in 0..6 {
+        c_clock_advance(300);
+        c_node_pump();
+        let frames = c_can_drain();
+        now += 300;
+        from_c(&mut node, &mut pool, &frames, now);
+        got.extend(settle(&mut node, &mut pool, now, &mut sc));
+    }
+    assert_eq!(
+        got, bodies,
+        "both damaged packets arrive by retransmission, in order"
+    );
+
+    // The C closes; the port answers its ACK|RST and everything is released.
+    c_rdp_initiator_close();
+    let frames = c_can_drain();
+    from_c(&mut node, &mut pool, &frames, now);
+    settle(&mut node, &mut pool, now, &mut sc);
+    // The port answers and sits in CLOSE_WAIT until its timer releases the connection.
+    now += 20_001;
+    node.tick(now, u32::MAX);
+    assert!(
+        !node.router.conns.is_live(conn),
+        "the C's close completed on the port"
+    );
+    assert_eq!(node.pool().available(), free_at_start, "every buffer back");
 }

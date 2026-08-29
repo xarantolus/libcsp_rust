@@ -1366,6 +1366,64 @@ static int shim_can_tx_fn(void *driver_data, uint32_t id, const uint8_t *data, u
 	return CSP_ERR_NONE;
 }
 
+/* `csp_kiss_tx` brackets its byte stream with the USART driver's lock (`csp_if_kiss.c:33`);
+   the drivers are out of scope, so the lock is a no-op here. */
+void csp_usart_lock(void * driver_data) { (void)driver_data; }
+void csp_usart_unlock(void * driver_data) { (void)driver_data; }
+
+/* --- KISS: a routed interface on the node, through the real csp_kiss_tx/rx ------------ */
+
+/*
+ * `shim_kiss_iface` above is a decoder harness that drains the queue itself. This one is
+ * added to the node like a real serial link: what the C routes to its subnet leaves
+ * through `csp_kiss_tx` -- escaped, with the KISS CRC -- into `shim_kiss_node_out`, and
+ * bytes fed to `shim_kiss_node_rx` go through `csp_kiss_rx` into the router.
+ */
+static csp_iface_t                shim_kiss_node_iface;
+static csp_kiss_interface_data_t  shim_kiss_node_data;
+static int                        shim_kiss_node_ready;
+#define SHIM_KISS_OUT_MAX 8192
+static uint8_t shim_kiss_node_out[SHIM_KISS_OUT_MAX];
+static int     shim_kiss_node_out_len;
+
+static int shim_kiss_node_tx_fn(void *driver_data, const uint8_t *data, size_t len) {
+	(void)driver_data;
+	if (shim_kiss_node_out_len + (int)len <= SHIM_KISS_OUT_MAX) {
+		memcpy(shim_kiss_node_out + shim_kiss_node_out_len, data, len);
+		shim_kiss_node_out_len += (int)len;
+	}
+	return CSP_ERR_NONE;
+}
+
+int shim_kiss_node_init(uint16_t address, uint16_t netmask) {
+	if (shim_kiss_node_ready) { return 0; }
+	shim_ensure_init();
+	memset(&shim_kiss_node_data, 0, sizeof(shim_kiss_node_data));
+	shim_kiss_node_data.tx_func = shim_kiss_node_tx_fn;
+	memset(&shim_kiss_node_iface, 0, sizeof(shim_kiss_node_iface));
+	shim_kiss_node_iface.name = "KISS";
+	shim_kiss_node_iface.addr = address;
+	shim_kiss_node_iface.netmask = netmask;
+	shim_kiss_node_iface.interface_data = &shim_kiss_node_data;
+	shim_kiss_node_iface.driver_data = NULL;
+	if (csp_kiss_add_interface(&shim_kiss_node_iface) != CSP_ERR_NONE) { return -1; }
+	shim_kiss_node_ready = 1;
+	return 0;
+}
+
+/* Bytes the C's KISS link transmitted since the last drain; returns the length copied. */
+int shim_kiss_node_drain(uint8_t *out, int max) {
+	int n = shim_kiss_node_out_len < max ? shim_kiss_node_out_len : max;
+	memcpy(out, shim_kiss_node_out, (size_t)n);
+	shim_kiss_node_out_len = 0;
+	return n;
+}
+
+/* Feed a byte stream to the real `csp_kiss_rx` on the routed interface. */
+void shim_kiss_node_rx(const uint8_t *buf, uint32_t len) {
+	csp_kiss_rx(&shim_kiss_node_iface, buf, len, NULL);
+}
+
 int shim_can_init(uint16_t address, uint16_t netmask) {
 	if (shim_can_ready) { return 0; }
 	shim_ensure_init();
@@ -1698,9 +1756,12 @@ static int          shim_rdp_running;
 static uint16_t     shim_rdp_dst;
 static uint8_t      shim_rdp_dport;
 
+static uint32_t shim_rdp_opts = CSP_SO_RDPREQ;
+int shim_rdp_connect_start(uint16_t dst, uint8_t dport);
+
 static void * shim_rdp_connect_thread(void * arg) {
 	(void)arg;
-	csp_conn_t * c = csp_connect(CSP_PRIO_NORM, shim_rdp_dst, shim_rdp_dport, 0, CSP_SO_RDPREQ);
+	csp_conn_t * c = csp_connect(CSP_PRIO_NORM, shim_rdp_dst, shim_rdp_dport, 0, shim_rdp_opts);
 	shim_rdp_conn = c;
 	shim_rdp_result = (c != NULL) ? 1 : 0;
 	return NULL;
@@ -1710,6 +1771,15 @@ static void * shim_rdp_connect_thread(void * arg) {
  * Begin a real `csp_connect(..., CSP_SO_RDPREQ)` and return how many frames it put on the
  * wire -- one SYN, which the caller feeds to the peer. Negative on failure to start.
  */
+/* As `shim_rdp_connect_start`, with the connection opened under `opts` (RDP is added if
+   missing). The plain start resets to RDP only. */
+int shim_rdp_connect_start_opts(uint16_t dst, uint8_t dport, uint32_t opts) {
+	shim_rdp_opts = opts | CSP_SO_RDPREQ;
+	int r = shim_rdp_connect_start(dst, dport);
+	shim_rdp_opts = CSP_SO_RDPREQ;
+	return r;
+}
+
 int shim_rdp_connect_start(uint16_t dst, uint8_t dport) {
 	if (shim_rdp_running) { return -2; }
 	shim_rdp_dst = dst;
