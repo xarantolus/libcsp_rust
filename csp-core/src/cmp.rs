@@ -473,10 +473,6 @@ impl<'a> Peek<'a> {
     /// request that turns the padding into a read of someone else's packet, on the one
     /// service whose job is reading memory.
     ///
-    /// An earlier version of this comment asserted the leak unconditionally. That was
-    /// right about the mechanism and wrong to state without the condition: in the default
-    /// configuration it simply does not happen.
-    ///
     /// The port emits the same wire length so a C peer sees the size it expects, and
     /// **zeroes** the tail in every configuration.
     pub const TAIL_LEN: usize = 3;
@@ -559,7 +555,7 @@ impl<'a> PeekV2<'a> {
 
     /// The three padding bytes `CMP_PEEK_V2_SIZE` puts after the data.
     ///
-    /// The same rule as [`Peek::TAIL_LEN`], for the same reason, and it was missing here:
+    /// The same rule as [`Peek::TAIL_LEN`], for the same reason:
     /// `CMP_VARIABLE_SIZE` rounds the payload up to a multiple of four, and the v2 struct's
     /// payload is nine bytes (8-byte address + length), so the tail is three — the same
     /// width as v1's, arrived at from a different number.
@@ -679,11 +675,10 @@ pub enum Query<'a> {
 /// request legitimately carries no body while declaring how much to read.
 ///
 /// The distinction lives here rather than in [`Peek::decode`] for exactly that reason: the
-/// decoder is shared between the two and cannot tell them apart. Its own "must carry all of
-/// it" check was skipped when the body was *empty*, which is the one case that matters —
-/// so a `POKE` for 64 bytes carrying none used to become a silent zero-byte write, answered
-/// as success. On a memory-write service, reporting a write that did not happen is worse
-/// than refusing.
+/// decoder is shared between the two and cannot tell them apart, and it accepts an *empty*
+/// body — the one case that matters. Without this check a `POKE` for 64 bytes carrying none
+/// would be a silent zero-byte write answered as success; on a memory-write service,
+/// reporting a write that did not happen is worse than refusing.
 fn poke_carries_its_data(declared: u8, present: usize) -> Result<()> {
     if present != declared as usize {
         return Err(Error::Truncated);
