@@ -4916,3 +4916,23 @@ fifth packet, asserted in the same test. The tx capture is now mutex-locked, sin
 application thread inside `csp_send` writes it while the main thread reads. The pattern
 serves any blocking libcsp call (`csp_read` with a timeout, `csp_connect`) that a sans-io
 peer needs to see from the outside.
+
+### Two more blocking calls seen from a thread: `csp_read`'s raise and `csp_connect`'s give-up
+
+*2026-08-29.* With the C's application on a pthread (`shim_read_start/join`,
+`shim_rdp_set_opt`), two calls the single-threaded harness could only read about:
+
+- **`csp_read` on an RDP connection raises a short timeout to `conn_timeout`**
+  (`csp_io.c:55`). Measured (`difftest/tests/node_read_blocking.rs`): on a plain connection a
+  100 ms read returns NULL at ~100 ms and returns a packet early when the router delivers
+  one; on an RDP connection with a negotiated `conn_timeout` of 400 ms the same 100 ms read
+  is still blocked at 200 ms and returns NULL at ~400 ms, and still returns early on
+  delivery. The port's `Node::read` is a poll — the application's loop is what waits — so the
+  raise is the application's to apply; recorded, not reproduced.
+- **`csp_connect` against silence sends one SYN and gives up after one `conn_timeout`**
+  (`difftest/tests/node_connect_giveup.rs`). I had read the `retry` at `csp_rdp.c:799-845` as
+  a second attempt after a timeout, and wrote the test to expect two SYNs. The C sent one:
+  a semaphore timeout goes straight to `error`, and the retry is only for a semaphore that
+  was released with the state still SYN-SENT. The port's SYN-SENT connection is closed by
+  `tick` after `conn_timeout`, having sent one SYN — the same shape. The fifth time this
+  sweep's reading of the C was corrected by running it.
