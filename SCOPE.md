@@ -4862,3 +4862,16 @@ packet gets there. So the 2026-08-26 entry's "answers everything with `ACK|RST`"
 wide: everything *except a reset*. The port already did the same on both counts
 (`Connection::on_packet`, CLOSE-WAIT arm of the reset branch; `Closed` arm), which this
 pins. A pin-only probe, the second of the composite series.
+
+### The flight topology: a protected session in transit through the port as router
+
+*2026-08-29.* Ground station → CDH → bus peer is the path every command takes. Here the
+ground station is a port node with the key, the C is the bus peer with the key, and between
+them the port runs as the router with two interfaces and **no key**
+(`difftest/tests/node_rdp_transit.rs`): an RDP session with HMAC and CRC32 crosses it in
+both directions, the bus leg loses one CAN frame and swaps two, the ground's timer repairs
+them through the router, the C's replies come back through it, and the close completes. The
+router forwards every packet — nothing delivered to it, nothing dropped, nothing verified —
+and holds no buffer afterwards. A pin: `csp_route_work` checks security only for packets
+it delivers to itself, and `Router::forward` leaves a transit packet's trailers alone the
+same way. Third composite probe; one real defect (the fragment header) in three.

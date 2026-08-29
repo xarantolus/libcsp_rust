@@ -205,6 +205,7 @@ unsafe extern "C" {
     fn shim_node_add_alias(addr: u16, iface: c_int) -> c_int;
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
+    fn shim_can_route(address: u16, netmask: u16, via: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
     fn shim_can_get(i: c_int, id: *mut u32, data: *mut u8) -> c_int;
@@ -1283,6 +1284,12 @@ pub fn c_client_reboot(dst: u16, shutdown_instead: bool) -> Vec<Vec<u8>> {
 pub fn c_can_init(address: u16, netmask: u16) -> bool {
     // SAFETY: idempotent; the shim owns the interface and its data block for the process.
     unsafe { shim_can_init(address, netmask) == 0 }
+}
+
+/// Route `address/netmask` out of the C's CAN interface through `via`.
+pub fn c_can_route(address: u16, netmask: u16, via: u16) -> bool {
+    // SAFETY: plain integers; the shim checks the interface exists. Callers hold `LOCK`.
+    unsafe { shim_can_route(address, netmask, via) == 0 }
 }
 
 /// One CAN frame: the 29-bit identifier and up to 8 data bytes.
