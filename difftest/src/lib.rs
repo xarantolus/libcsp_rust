@@ -205,6 +205,9 @@ unsafe extern "C" {
     fn shim_node_add_alias(addr: u16, iface: c_int) -> c_int;
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
+    fn shim_burst_start(port: u8, count: c_int, len: c_int) -> c_int;
+    fn shim_burst_sent() -> c_int;
+    fn shim_burst_join(max_block_ms: *mut u32) -> c_int;
     fn shim_can_route(address: u16, netmask: u16, via: u16) -> c_int;
     fn shim_can_clear();
     fn shim_can_count() -> c_int;
@@ -1299,6 +1302,37 @@ pub fn c_node_serve_pending(port: u8) -> u32 {
         }
     }
     n
+}
+
+/// Start an application thread on the C that sends `count` datagrams of `len` bytes on the
+/// connection held for `port` with `csp_send`; the thread blocks inside `csp_rdp_send`
+/// whenever the window is full, and only the main thread's router (`c_node_exchange`) can
+/// release it. Fails if nothing is held.
+pub fn c_burst_start(port: u8, count: usize, len: usize) -> bool {
+    // SAFETY: the shim owns the thread; the caller keeps the connection held until join.
+    unsafe { shim_burst_start(port, count as c_int, len as c_int) == 0 }
+}
+
+/// How many of the burst's sends have returned so far.
+pub fn c_burst_sent() -> usize {
+    // SAFETY: a plain counter read.
+    unsafe { shim_burst_sent().max(0) as usize }
+}
+
+/// Join the burst thread: (sends completed, longest single `csp_send` in wall-clock ms).
+pub fn c_burst_join() -> (usize, u32) {
+    let mut ms = 0u32;
+    // SAFETY: joins the thread started by `c_burst_start`.
+    let n = unsafe { shim_burst_join(&mut ms) };
+    (n.max(0) as usize, ms)
+}
+
+/// Take every captured frame and clear the capture.
+pub fn c_node_tx_take() -> Vec<Vec<u8>> {
+    let frames = captured_frames();
+    // SAFETY: clears the locked capture.
+    unsafe { shim_node_clear_tx() };
+    frames
 }
 
 /// Route `address/netmask` out of the C's CAN interface through `via`.
