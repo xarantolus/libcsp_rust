@@ -4818,3 +4818,27 @@ releasing a broken transfer and expiring a quiet one to the driver, exactly as
 on the third damaged packet; and RDP delivers in order, so the packet that arrives behind
 a gap is readable only once the retransmission fills the gap — the KISS test first asked
 for it early. Both are the C's rules, and both now hold in the port by measurement.
+
+### A file transfer inside the session: the retransmitted fragment lost its `FRAG`
+
+*2026-08-29.* The session pinned above carried datagrams. A flight node carries files:
+SFP fragments inside RDP, under HMAC and CRC32, over CAN, in both directions
+(`difftest/tests/node_sfp_over_can.rs`). The port uploads a three-fragment stream with a
+CAN frame lost from the second fragment and two swapped in the third; its timer repairs
+them; the C's `csp_sfp_recv_fp` reassembles. Then the C streams back over the same
+connection with a frame lost, its own timer repairs that, and the port's `Delivery`
+reassembles.
+
+The C refused the upload with `CSP_ERR_SFP`. `send_fragment` stamps `FRAG` on that one
+packet's header, deliberately not on the connection (the C's `CSP_FFRAG` leak is deviation
+3), and the copy held for retransmission was stored with that header. But the
+retransmission was queued under the *connection's* header, so the re-sent fragment went out
+without `FRAG`: correct sequence number, fresh acknowledgement, valid HMAC and CRC — and to
+the C's stream reader a plain datagram in the middle of a file, which ends the transfer.
+The C retransmits `packet->id` exactly as stored (`csp_rdp.c:418`). The retransmission now
+uses the held copy's own header. One mutation, noticed by the transfer. The download
+direction, the C's retransmission through the port's reassembly, matched without change.
+
+The two retransmission defects — the trailer (cycle 15) and now the header — were both
+invisible to every per-feature test because both only exist in a packet that is re-sent,
+and only a lossy composite link re-sends one. That is what the composite scenarios are for.
