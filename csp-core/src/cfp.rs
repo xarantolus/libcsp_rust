@@ -513,6 +513,7 @@ impl<R: Default + Copy, const N: usize> Pbufs<R, N> {
 /// Rejects a `MORE` frame that arrives without a preceding `BEGIN`, and refuses a
 /// declared length that will not fit the caller's buffer — the C copies first and checks
 /// afterwards.
+#[derive(Clone, Copy)]
 pub struct V1Reassembler {
     ident: Option<u16>,
     header: [u8; V1_HEADER_SIZE],

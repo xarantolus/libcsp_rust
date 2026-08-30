@@ -4963,3 +4963,22 @@ session never fills. Confirmed by control: reintroducing the `into_index()` fail
 23 of 24 buffers. One mutation, noticed by the test. `node_rdp_lost_packet_leak.rs` adds the
 single-connection floor (a lost-then-retransmitted packet leaves no buffer) so the two
 scenarios bracket the path.
+
+### A shared test harness: the CAN driver written once, v1 and v2 on it
+
+*2026-08-30.* The `c_*` functions abstract the C boundary well, but the *port* side of a node
+scenario was copy-pasted: `inject` byte-for-byte in seven files, the CAN driver
+(`fragment`/`from_c`) in five, and the v1 CAN composite could not reuse the v2 one at all —
+which is why it was parked. `difftest/src/harness.rs` now holds that plumbing: `inject`,
+`work_until_idle`, `drain_respond`, and `CanLink<K: CfpKind>` — a CAN driver that fragments a
+port packet on the way out and reassembles the peer's frames on the way in, with the pool
+duties a real driver has (release a broken transfer, expire a quiet one). `CfpKind` has one
+`impl` per wire version (`V1`, `V2`), so the two differ only by the framing.
+
+Proof it is faithful and not speculative: `node_rdp_over_can.rs` (both v2 tests) was migrated
+onto `CanLink<V2>` and still passes byte-for-byte, 42 lines shorter. Proof it generalises:
+`node_rdp_over_can_v1.rs` — the parked v1 session — is the identical scenario on `CanLink<V1>`
+and now passes. The v1 handshake had never completed because C=9 and R=20 sit in different /3
+subnets (v1's 5-bit addresses), so the C could not route its `SYN|ACK` back; the fix was an
+address in the C's subnet, not anything in the framing. One shipped-crate change: a `Copy`
+derive on `V1Reassembler` (`V2Reassembler` already had it) so the pool can hold it.
