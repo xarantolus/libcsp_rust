@@ -20,6 +20,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod harness;
+
 use core::ffi::{c_int, c_uint};
 
 unsafe extern "C" {
