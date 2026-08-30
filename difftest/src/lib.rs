@@ -208,6 +208,8 @@ unsafe extern "C" {
     fn shim_node_is_alias(addr: u16) -> c_int;
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_burst_start(port: u8, count: c_int, len: c_int) -> c_int;
+    fn shim_rdp_seq_before(seq: u16, cmp: u16) -> c_int;
+    fn shim_rdp_seq_between(seq: u16, start: u16, end: u16) -> c_int;
     fn shim_read_start(port: u8, timeout_ms: u32) -> c_int;
     fn shim_read_peek() -> c_int;
     fn shim_read_join(elapsed_ms: *mut u32) -> c_int;
@@ -1339,6 +1341,19 @@ pub fn c_node_tx_take() -> Vec<Vec<u8>> {
     // SAFETY: clears the locked capture.
     unsafe { shim_node_clear_tx() };
     frames
+}
+
+/// The C's `csp_rdp_seq_before` (`csp_rdp.c:104`), transcribed in the shim and compiled by
+/// the C compiler.
+pub fn c_rdp_seq_before(seq: u16, cmp: u16) -> bool {
+    // SAFETY: a pure integer function.
+    unsafe { shim_rdp_seq_before(seq, cmp) != 0 }
+}
+
+/// The C's `csp_rdp_seq_between` (`csp_rdp.c:99`).
+pub fn c_rdp_seq_between(seq: u16, start: u16, end: u16) -> bool {
+    // SAFETY: a pure integer function.
+    unsafe { shim_rdp_seq_between(seq, start, end) != 0 }
 }
 
 /// Start an application thread on the C blocked in `csp_read(held(port), timeout_ms)`.

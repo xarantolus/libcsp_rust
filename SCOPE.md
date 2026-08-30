@@ -4982,3 +4982,21 @@ and now passes. The v1 handshake had never completed because C=9 and R=20 sit in
 subnets (v1's 5-bit addresses), so the C could not route its `SYN|ACK` back; the fix was an
 address in the C's subnet, not anything in the framing. One shipped-crate change: a `Copy`
 derive on `V1Reassembler` (`V2Reassembler` already had it) so the pool can hold it.
+
+### The RDP `seq_before` primitive disagreed with the C at the antipode — fixed
+
+*2026-08-30.* Answering "are we sure the logic is ported exactly", `seq_before` was checked
+against the C across the whole 2^16×2^16 grid (`difftest/tests/node_rdp_seq.rs`, with the C's
+`static inline` `csp_rdp_seq_before` transcribed into the shim and compiled by the C
+compiler). The port's `(b - a) != 0 && (b - a) < 0x8000` agreed with the C's
+`(int16_t)(a - b) < 0` at every point **except the antipode** `a - b == 0x8000` — 65536 pairs,
+one diagonal of the space — where the C's signed comparison returns "before" in both
+directions and the port returned "not". `seq_between` matched everywhere.
+
+Reachability: the RDP window and ack-range checks all gate on `seq_between` (which matched)
+before `seq_before` is consulted, and they reject anything ~32768 away, so no ordinary or
+even adversarial sequence number reaches the diagonal in a bounded window. Practically
+unreachable — but a ported primitive should match the C regardless of its callers, and this
+one silently did not. Now `(a.wrapping_sub(b) as i16) < 0`, the exact C expression. The unit
+test gained the two antipode assertions; the differential test pins the whole space. Control:
+the old form fails the differential test at `0x0000/0x8000`.
