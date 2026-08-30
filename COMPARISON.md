@@ -27,8 +27,8 @@ numbers three times. The `hand port` column is `csp-core/src` + `csp/src` on `po
 | Rust LOC (implementation) | 16 954 (**1.45× the C**) | 16 954 | **11 739 (1.00×)** |
 | Rust LOC (tests) | 0 | 0 | 15 554 |
 | Toolchain | nightly-2023-04-15 | same | **stable** |
-| Tests passing | 0 | 0 | **617** |
-| Differential tests vs the C | 0 | 0 | **141** |
+| Tests passing | 0 | 0 | **620** |
+| Differential tests vs the C | 0 | 0 | **144** |
 | Two nodes in one process | no | no | **yes** |
 
 The implementation figure has roughly doubled since the first "the port is complete", and

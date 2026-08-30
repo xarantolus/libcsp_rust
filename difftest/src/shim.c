@@ -15,6 +15,8 @@
 #include <csp/csp.h>
 #include <csp/csp_id.h>
 #include <csp/csp_crc32.h>
+#include "csp_rdp.h"          /* CSP_RDP_MIN/MAX_* bounds */
+#include <csp/autoconfig.h>      /* CSP_RDP_MAX_WINDOW */
 #include <csp/crypto/csp_sha1.h>
 #include <csp/crypto/csp_hmac.h>
 #include <csp/csp_sfp.h>
@@ -1755,6 +1757,33 @@ int shim_node_sfp_send_on(uint8_t port, const uint8_t *body, int len, uint32_t m
 	if (ret != CSP_ERR_NONE) { return -100 + ret; }
 	return shim_tx_n;
 }
+
+/* --- RDP SYN-option clamping ------------------------------------------------
+ *
+ * The C bounds every field a peer proposes in its SYN before adopting it
+ * (`csp_rdp.c:568-576`). This transcribes that exact sequence, using the real
+ * `CSP_RDP_*` macros, so both the clamp arithmetic and the bound *values* are the C's --
+ * a drifted constant fails `node_rdp_options.rs`. `out` receives the six adopted values.
+ */
+static uint32_t rdp_clamp(uint32_t v, uint32_t lo, uint32_t hi) {
+	if (v < lo) return lo;
+	if (v > hi) return hi;
+	return v;
+}
+
+void shim_rdp_decode_options(const uint32_t in[6], uint32_t max_window, uint32_t out[6]) {
+	uint32_t window = rdp_clamp(in[0], 1, max_window);
+	uint32_t conn_to = rdp_clamp(in[1], CSP_RDP_MIN_CONN_TIMEOUT, CSP_RDP_MAX_CONN_TIMEOUT);
+	uint32_t pkt_to = rdp_clamp(in[2], CSP_RDP_MIN_PACKET_TIMEOUT, CSP_RDP_MAX_PACKET_TIMEOUT);
+	uint32_t delayed = (in[3] != 0);
+	uint32_t ack_to = rdp_clamp(in[4], CSP_RDP_MIN_ACK_TIMEOUT, conn_to);
+	uint32_t ack_cnt = rdp_clamp(in[5], 1, window);
+	out[0] = window; out[1] = conn_to; out[2] = pkt_to;
+	out[3] = delayed; out[4] = ack_to; out[5] = ack_cnt;
+}
+
+/* The compiled-in max window, so the port can assert its own constant matches. */
+uint32_t shim_rdp_max_window(void) { return CSP_RDP_MAX_WINDOW; }
 
 /* --- RDP sequence primitives -----------------------------------------------
  *

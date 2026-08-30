@@ -5000,3 +5000,24 @@ unreachable — but a ported primitive should match the C regardless of its call
 one silently did not. Now `(a.wrapping_sub(b) as i16) < 0`, the exact C expression. The unit
 test gained the two antipode assertions; the differential test pins the whole space. Control:
 the old form fails the differential test at `0x0000/0x8000`.
+
+### The RDP SYN-option clamp, and the "no mutation could move" audit
+
+*2026-08-30.* Two loose ends from the faithfulness review.
+
+`decode_clamped` bounds all six options a peer proposes in its SYN before they reach the
+connection (`csp_rdp.c:568-576`); a wrong bound would let a hostile peer set a 1 ms packet
+timeout or a zero window. `node_rdp_options.rs` runs the C's exact clamp sequence in the shim
+— using the real `CSP_RDP_*` macros, so a drifted constant is caught — and compares
+`decode_clamped` against it across every boundary of every field (>500 combinations), plus
+asserts the port's five bound constants and `MAX_WINDOW` equal the C's. All match.
+
+The 14 corpus records the mutation tool reports as "no mutation could move" were audited and
+are **not coverage gaps**. Three benign classes: negative/guard records (a malformed input is
+refused — a reject stays a reject, so no code mutation moves it, correctly); documented
+deliberate divergences (`security::prohibiting_reliability_does_not_refuse_it` — the port does
+not honour `*_PROHIB`, per the security entry); and positive behaviours that are pinned by a
+mutation *and* a difftest elsewhere, not by that corpus record (fan-out: "route: fan-out to
+every match" + `node_bridge.rs`; retransmit/give-up: its mutations + ten `node_rdp_*` tests).
+The tool already encodes this distinction — a targeted mutation per record that could be
+vacuous — so the residual is the expected benign remainder.
