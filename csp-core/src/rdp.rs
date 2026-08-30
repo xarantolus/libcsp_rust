@@ -598,9 +598,15 @@ impl<const N: usize> RxQueue<N> {
 }
 
 /// Is `a` strictly before `b` in wrapping 16-bit sequence space?
+///
+/// Exactly `csp_rdp_seq_before` (`csp_rdp.c:104`): `(int16_t)(a - b) < 0`. The earlier
+/// `(b - a) != 0 && (b - a) < 0x8000` agreed everywhere except the antipode `a - b == 0x8000`,
+/// where the C's signed comparison returns true and that form returned false — a single
+/// diagonal of the sequence space, unreachable behind the window's `seq_between` range checks
+/// but a divergence in the primitive itself. Matched here so the primitive is faithful
+/// regardless of its callers; `node_rdp_seq.rs` pins it against the C across the whole space.
 pub const fn seq_before(a: u16, b: u16) -> bool {
-    // Half the space is "before"; this is the standard wrapping comparison.
-    (b.wrapping_sub(a)) != 0 && (b.wrapping_sub(a)) < 0x8000
+    (a.wrapping_sub(b) as i16) < 0
 }
 
 /// One end of an RDP connection.
@@ -1877,6 +1883,13 @@ mod tests {
         assert!(!seq_before(5, 5), "not strictly before itself");
         assert!(seq_before(0xFFFF, 0), "across the wrap");
         assert!(!seq_before(0, 0xFFFF));
+        // The antipode: exactly half the space apart. The C's signed comparison calls this
+        // "before" in both directions; the port matches it (`csp_rdp.c:104`).
+        assert!(
+            seq_before(0, 0x8000),
+            "half a space ahead is before, like the C"
+        );
+        assert!(seq_before(0x8000, 0), "and so is half a space behind");
     }
 
     #[test]
