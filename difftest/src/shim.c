@@ -1756,6 +1756,21 @@ int shim_node_sfp_send_on(uint8_t port, const uint8_t *body, int len, uint32_t m
 	return shim_tx_n;
 }
 
+/* --- RDP sequence primitives -----------------------------------------------
+ *
+ * `csp_rdp_seq_before`/`csp_rdp_seq_between` are `static inline` in `csp_rdp.c`, so they
+ * cannot be linked from here. These transcribe the exact expressions (`csp_rdp.c:99-107`)
+ * and are compiled by the C compiler, so the `int16_t` cast semantics are the C's, not a
+ * Rust re-derivation. `node_rdp_seq.rs` compares the port against them across the space.
+ */
+int shim_rdp_seq_before(uint16_t seq, uint16_t cmp) {
+	return (int16_t)(seq - cmp) < 0;
+}
+
+int shim_rdp_seq_between(uint16_t seq, uint16_t start, uint16_t end) {
+	return (uint16_t)(end - start) >= (uint16_t)(seq - start);
+}
+
 /* --- an application thread sending a burst on a held connection ------------- */
 
 /*
