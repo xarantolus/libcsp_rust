@@ -5021,3 +5021,15 @@ mutation *and* a difftest elsewhere, not by that corpus record (fan-out: "route:
 every match" + `node_bridge.rs`; retransmit/give-up: its mutations + ten `node_rdp_*` tests).
 The tool already encodes this distinction — a targeted mutation per record that could be
 vacuous — so the residual is the expected benign remainder.
+
+### The v1 composite family, completed on the shared harness
+
+*2026-08-30.* With `harness::CanLink<V1>` in place, the flight wire format (CSP v1) now has the
+same composite coverage v2 had: the loss-and-repair RDP session (`node_rdp_over_can_v1.rs`),
+the SFP file transfer (`node_sfp_over_can_v1.rs`), the protected session in transit through the
+port as a keyless router (`node_rdp_transit_v1.rs`), and ping+IDENT through that router
+(`node_service_transit_v1.rs`). Each is its v2 sibling with the framing swapped to `<V1>` and
+addresses moved into v1's 5-bit space (netmask /2: the CAN subnet `01` = {C 9, CDH 10}, the
+KISS subnet `10` = {CDH 17, ground 18}); the transit and service versions passed on the first
+run, which is the payoff the harness was built for. No v1-specific port defect surfaced — the
+version-agnostic router and RDP layers behave identically under both framings, as intended.
