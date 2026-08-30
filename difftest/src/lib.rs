@@ -209,6 +209,8 @@ unsafe extern "C" {
     fn shim_can_init(address: u16, netmask: u16) -> c_int;
     fn shim_burst_start(port: u8, count: c_int, len: c_int) -> c_int;
     fn shim_rdp_seq_before(seq: u16, cmp: u16) -> c_int;
+    fn shim_rdp_decode_options(inp: *const u32, max_window: u32, out: *mut u32);
+    fn shim_rdp_max_window() -> u32;
     fn shim_rdp_seq_between(seq: u16, start: u16, end: u16) -> c_int;
     fn shim_read_start(port: u8, timeout_ms: u32) -> c_int;
     fn shim_read_peek() -> c_int;
@@ -1341,6 +1343,22 @@ pub fn c_node_tx_take() -> Vec<Vec<u8>> {
     // SAFETY: clears the locked capture.
     unsafe { shim_node_clear_tx() };
     frames
+}
+
+/// The six RDP options the C's SYN handler adopts from a peer's block, clamped exactly as
+/// `csp_rdp.c:568-576` (window, conn_timeout, packet_timeout, delayed_acks, ack_timeout,
+/// ack_delay_count). Uses the real `CSP_RDP_*` macros, so a drifted bound is caught.
+pub fn c_rdp_decode_options(input: [u32; 6], max_window: u32) -> [u32; 6] {
+    let mut out = [0u32; 6];
+    // SAFETY: fixed six-element buffers on both sides.
+    unsafe { shim_rdp_decode_options(input.as_ptr(), max_window, out.as_mut_ptr()) };
+    out
+}
+
+/// The C's compiled-in `CSP_RDP_MAX_WINDOW`.
+pub fn c_rdp_max_window() -> u32 {
+    // SAFETY: returns a compile-time constant.
+    unsafe { shim_rdp_max_window() }
 }
 
 /// The C's `csp_rdp_seq_before` (`csp_rdp.c:104`), transcribed in the shim and compiled by
