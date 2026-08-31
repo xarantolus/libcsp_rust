@@ -147,6 +147,11 @@ pub fn digest(data: &[u8]) -> [u8; DIGEST_LEN] {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_matches_new() {
+        assert_eq!(Sha1::default().finalize(), Sha1::new().finalize());
+    }
+
     fn hex(d: &[u8]) -> heapless_hex::Hex {
         heapless_hex::Hex::new(d)
     }

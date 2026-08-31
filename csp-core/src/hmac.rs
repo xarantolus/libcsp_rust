@@ -219,6 +219,43 @@ mod tests {
     }
 
     #[test]
+    fn mac_over_agrees_with_mac_and_mac_full_including_a_long_key() {
+        // The three functions each carry their own copy of the key-reduction and HMAC
+        // computation; this pins them together so a change to one that drifts from the
+        // others fails here -- and it exercises mac_over's empty-key and >block-length key
+        // branches, which the packet paths (short keys) never reach.
+        assert_eq!(
+            mac_over(b"", b"", b"x", Coverage::PayloadOnly),
+            Err(Error::EmptyKey)
+        );
+        for key in [
+            b"k".as_slice(),
+            b"a 16-byte secret",
+            &[b'K'; 63],
+            &[b'K'; 64],
+            &[b'K'; 65],
+            &[b'Z'; 100],
+        ] {
+            for payload in [
+                b"".as_slice(),
+                b"abc",
+                b"a longer payload than one block of sha1 input here",
+            ] {
+                let full = mac_full(key, payload).unwrap();
+                let short = mac(key, payload).unwrap();
+                let over = mac_over(key, &[], payload, Coverage::PayloadOnly).unwrap();
+                assert_eq!(
+                    &full[..MAC_LEN],
+                    &short[..],
+                    "mac vs mac_full, key {}",
+                    key.len()
+                );
+                assert_eq!(short, over, "mac vs mac_over, key {}", key.len());
+            }
+        }
+    }
+
+    #[test]
     fn truncation_is_the_prefix_of_the_full_mac() {
         let full = mac_full(b"secret", b"abc").unwrap();
         let short = mac(b"secret", b"abc").unwrap();
