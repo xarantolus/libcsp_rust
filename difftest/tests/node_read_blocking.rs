@@ -1,13 +1,7 @@
-//! `csp_read` with a timeout, with the reader on a thread of its own.
-//!
-//! Two things only a blocked thread can show. First, the plain case: `csp_read(conn, t)`
-//! returns NULL after `t` when nothing arrives, and returns the packet early when the
-//! router delivers one meanwhile. Second, the RDP raise: on an RDP connection a non-zero
-//! timeout shorter than `conn_timeout` is silently raised to `conn_timeout`
-//! (`csp_io.c:55`), so an application asking for 100 ms waits the connection timeout.
-//!
-//! The port's `Node::read` never blocks — it is the application's loop that waits — so the
-//! raise has no counterpart there; that is recorded rather than reproduced.
+//! `csp_read` with a timeout, on its own thread — the only way to observe a blocking call.
+//! Plain: NULL after the timeout, early on delivery. RDP: a timeout below `conn_timeout` is
+//! silently raised to it (`csp_io.c:55`). The port's `read` never blocks, so the raise is
+//! recorded, not reproduced.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

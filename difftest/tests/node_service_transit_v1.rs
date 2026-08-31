@@ -1,12 +1,6 @@
-//! Service requests along the flight path under **CSP v1** (the flown wire format): the
-//! ground station asks the C peer on the bus for a ping and its identity, through the port
-//! as router, with CRC32 on the request. The v1 counterpart of `node_service_transit.rs`, on
-//! the shared `harness::CanLink<V1>`.
-//!
-//! `node_rdp_transit.rs` carries a connection through the router; this carries the two
-//! requests every ground pass starts with. The reply is served by the C's own
-//! `csp_service_handler` and comes back through the router to the ground node's client
-//! helpers, which check it the way `csp_ping` / `csp_cmp_ident` would.
+//! Ping and IDENT along the CSP v1 flight path: ground -> port router -> C bus peer, CRC32
+//! on the request, served by the C's `csp_service_handler`. The v1 counterpart of
+//! `node_service_transit.rs` on `harness::CanLink<V1>`.
 
 use csp::node::Outbound;
 use csp::{client, Config, CspStorage, Node, Routed};

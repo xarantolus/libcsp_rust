@@ -1,8 +1,7 @@
-//! An SFP file transfer over RDP, over CAN, under **CSP version 1** — the flight wire
-//! format — with a CAN frame lost and repaired. The v1 counterpart of `node_sfp_over_can.rs`
-//! (upload direction): the two-trailer fragment (`[body][sfp][rdp]`, each re-protected on
-//! retransmission) inside v1's 4-byte-header CFP-1 framing. Rides the shared
-//! `harness::CanLink<V1>`, so only the framing differs from the v2 test.
+//! An SFP file transfer over RDP over CAN under CSP v1, a frame lost and repaired. The v1
+//! counterpart of `node_sfp_over_can.rs` (upload direction): the two trailers
+//! (`[body][sfp][rdp]`, re-protected on retransmit) inside v1 CFP-1 framing, on
+//! `harness::CanLink<V1>`.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

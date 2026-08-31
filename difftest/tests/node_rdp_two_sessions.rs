@@ -1,16 +1,7 @@
-//! Two RDP connections from the port to the same C node, interleaved — and the case that
-//! found a buffer leak: several unacknowledged packets on one connection retransmitted in
-//! a single sweep.
-//!
-//! A flight node holds several RDP connections at once (a file transfer and a telemetry
-//! stream, say); the C keeps them apart by `(src, dst, sport, dport)`. Here both send turn
-//! and turn about, B's second packet is never delivered, and B is left with **four**
-//! unacknowledged packets (the opening datagram and three more) when its retransmission
-//! timer fires — more than the router's fan-out queue (`MAX_FANOUT`) holds at once. The
-//! copies past that bound had their pool slot taken by `into_index()` before the capacity
-//! check and were then dropped on the floor: one leaked buffer per overflow, and the pool
-//! never got it back. `push_pending_owned` now hands the whole packet over and drops it —
-//! freeing the slot — when the queue is full, and the retransmission retries next sweep.
+//! Two RDP connections to the same C node, interleaved, and the case that found a buffer
+//! leak: one connection retransmits four unacked packets in a single sweep, overflowing the
+//! router's fan-out queue (`MAX_FANOUT`). The overflow copies were dropped without freeing
+//! their pool slot — one leaked buffer each; `push_pending_owned` frees them now.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

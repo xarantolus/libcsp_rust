@@ -599,12 +599,9 @@ impl<const N: usize> RxQueue<N> {
 
 /// Is `a` strictly before `b` in wrapping 16-bit sequence space?
 ///
-/// Exactly `csp_rdp_seq_before` (`csp_rdp.c:104`): `(int16_t)(a - b) < 0`. The earlier
-/// `(b - a) != 0 && (b - a) < 0x8000` agreed everywhere except the antipode `a - b == 0x8000`,
-/// where the C's signed comparison returns true and that form returned false — a single
-/// diagonal of the sequence space, unreachable behind the window's `seq_between` range checks
-/// but a divergence in the primitive itself. Matched here so the primitive is faithful
-/// regardless of its callers; `node_rdp_seq.rs` pins it against the C across the whole space.
+/// `csp_rdp_seq_before` (`csp_rdp.c:104`): `(int16_t)(a - b) < 0`, so half the space is
+/// "before", the antipode `a - b == 0x8000` included. `node_rdp_seq.rs` pins it against the
+/// C across the whole space.
 pub const fn seq_before(a: u16, b: u16) -> bool {
     (a.wrapping_sub(b) as i16) < 0
 }
