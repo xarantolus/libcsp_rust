@@ -5033,3 +5033,16 @@ addresses moved into v1's 5-bit space (netmask /2: the CAN subnet `01` = {C 9, C
 KISS subnet `10` = {CDH 17, ground 18}); the transit and service versions passed on the first
 run, which is the payoff the harness was built for. No v1-specific port defect surfaced — the
 version-agnostic router and RDP layers behave identically under both framings, as intended.
+
+### Coverage-directed hardening: the security-trailer buffer-overflow refusal
+
+*2026-08-31.* Ran `cargo llvm-cov` over the shipped crates (96.3% region / 96.0% line). The
+lowest line coverage in flight code was `egress.rs` at 74.5% — the untested lines were the
+`BufferTooSmall` branches of `protect`, where the CRC32 or HMAC trailer will not fit the
+buffer. That is the append on *every* protected packet a node originates; if it were wrong a
+too-small buffer could truncate silently instead of refusing. `egress::tests` now drives both
+(a payload filling the buffer, then CRC / HMAC) and asserts the safety property that a refused
+`protect` leaves the payload **untouched** — no partial write. egress line coverage 74.5% →
+85.7%; the residue is the test's own panic arms and the `mac_over` error path, unreachable
+with a valid key. The rest of the tree's misses are diffuse error/counter branches; `cargo
+llvm-cov` (now installed) is the tool to keep pointing at them.
