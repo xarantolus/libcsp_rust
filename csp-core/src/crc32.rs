@@ -143,6 +143,7 @@ pub fn append(
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
 
     #[test]
@@ -155,6 +156,53 @@ mod tests {
         assert_eq!(TABLE[3], 0x1350_F3F4);
         assert_eq!(TABLE[8], 0x8AD9_58CF);
         assert_eq!(TABLE[16], 0x105E_C76F);
+    }
+
+    /// A first-principles CRC-32C: reflected, bit-at-a-time, no table. Verifies the
+    /// table-driven `checksum` (and thus the const `build_table`) against an independent
+    /// implementation, which a wrong polynomial or reflection in either would break.
+    fn bitwise(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ POLY
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn the_table_driven_checksum_matches_a_bitwise_reference() {
+        for input in [
+            b"".as_slice(),
+            b"a",
+            b"abc",
+            b"123456789",
+            b"the quick brown fox",
+            &[0u8; 64],
+            &[0xFFu8; 65],
+        ] {
+            assert_eq!(checksum(input), bitwise(input), "input len {}", input.len());
+        }
+        // A dense byte sweep so every table row is reachable from the reference too.
+        let seq: alloc::vec::Vec<u8> = (0..=255u8).collect();
+        assert_eq!(checksum(&seq), bitwise(&seq));
+    }
+
+    #[test]
+    fn default_is_new_and_append_refuses_a_short_buffer() {
+        assert_eq!(Crc32::default(), Crc32::new());
+        // append needs payload.len() + 4; one byte short is refused with the real need.
+        let mut out = [0u8; 6];
+        match append(&[], b"1234567", Coverage::PayloadOnly, &mut out) {
+            Err(crate::Error::BufferTooSmall { needed }) => assert_eq!(needed, 7 + CRC32_LEN),
+            other => panic!("a short buffer must be refused: {other:?}"),
+        }
     }
 
     #[test]

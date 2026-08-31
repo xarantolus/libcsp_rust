@@ -5046,3 +5046,26 @@ too-small buffer could truncate silently instead of refusing. `egress::tests` no
 85.7%; the residue is the test's own panic arms and the `mac_over` error path, unreachable
 with a valid key. The rest of the tree's misses are diffuse error/counter branches; `cargo
 llvm-cov` (now installed) is the tool to keep pointing at them.
+
+### Closing the resolvable coverage residue
+
+*2026-08-31.* Continuing the coverage pass rather than leaving the residue as a note. The
+lines worth resolving were the ones hiding real behaviour or a real risk, and they are now
+tested:
+
+- **HMAC drift.** `mac_full`, `mac`, and `mac_over` each carry their own copy of the
+  key-reduction and HMAC computation; only `mac_full`/`mac` were exercised over a
+  >block-length key. `mac_over_agrees_with_mac_and_mac_full_including_a_long_key` pins all
+  three together across key lengths 1..100 (straddling the 64-byte block) and payloads,
+  covering `mac_over`'s empty-key and long-key branches and failing if any copy drifts.
+- **The CRC-32C table.** `build_table` is a `const fn` (compile-time, so never "covered" at
+  runtime); `the_table_driven_checksum_matches_a_bitwise_reference` verifies the table-driven
+  `checksum` against a from-scratch bit-at-a-time CRC over a byte sweep — independent
+  confirmation the polynomial and reflection are right, not just a coverage line.
+- **Small real branches:** `crc32::append` short-buffer refusal, `Crc32`/`Sha1` `Default`.
+
+What remains uncovered is the genuine floor, verified by inspection: `const fn` bodies
+(compile-time), `#[cfg(test)]` panic arms (coverage noise), and defensive error/counter
+branches — `malformed += 1` after an internal encode failure, a slot release on an
+out-of-buffer retransmit copy. Forcing those needs injected failures, which would be tests
+that cannot fail honestly; they are left as the floor, not papered over.
