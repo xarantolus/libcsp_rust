@@ -164,12 +164,10 @@ pub trait Hooks<const B: usize, const SZ: usize> {
     /// Returns the new length, or `None` if it cannot be encrypted — in which case the
     /// caller must **not** transmit it.
     ///
-    /// Defaults to `None`, like every other hook here that can fail. It used to default to
-    /// `Some(len)` with the payload untouched, which reports "encrypted" for plaintext: a
-    /// node that switched on a tunnel without supplying crypto would have transmitted in
-    /// the clear while every layer above it believed otherwise. The C's `__weak`
-    /// `csp_crypto_encrypt` returns `-1` (`csp_if_tun.c:16`), so this was also the one
-    /// default that disagreed with the C about which way to fail.
+    /// Defaults to `None`, like every other hook here that can fail: a node that switches
+    /// on a tunnel without supplying crypto refuses to transmit rather than sending
+    /// plaintext that every layer above believes is encrypted. Matches the C's `__weak`
+    /// `csp_crypto_encrypt`, which returns `-1` (`csp_if_tun.c:16`).
     fn encrypt(&mut self, _data: &mut [u8], _len: usize) -> Option<usize> {
         None
     }

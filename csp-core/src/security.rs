@@ -134,10 +134,9 @@ pub fn check<'a>(
     // and `CSP_SO_HMACPROHIB` / `CSP_SO_RDPPROHIB` are read nowhere in libcsp at all.
     // `csp_route_security_check` never looks at any of them.
     //
-    // This used to refuse such packets with `Refusal::Prohibited`, and the corpus caught
-    // it: a peer sending a correctly authenticated packet to a node whose socket happened
-    // to carry `HMACPROHIB` was dropped here and accepted by every real libcsp node.
-    // Refusing traffic that carries *more* protection than was asked for is the wrong
+    // A correctly authenticated packet is accepted even where the socket carries
+    // `HMACPROHIB`: every real libcsp node accepts it, and refusing traffic that carries
+    // *more* protection than was asked for is the wrong
     // direction to err in — a command wrongly refused in orbit cannot be retried by
     // anyone who can see why.
 
@@ -413,9 +412,8 @@ mod tests {
     /// (`csp_conn.c:279`); `HMACPROHIB` and `RDPPROHIB` are read nowhere in libcsp.
     /// `csp_route_security_check` looks at none of them.
     ///
-    /// This test previously asserted the opposite, and the corpus caught it: a peer sending
-    /// a correctly authenticated packet to a node whose socket carried `HMACPROHIB` was
-    /// refused here and accepted by every real libcsp node.
+    /// A correctly authenticated packet reaches a node whose socket carries `HMACPROHIB`,
+    /// matching every real libcsp node.
     #[cfg(feature = "hmac")]
     #[test]
     fn a_prohibition_does_not_refuse_a_packet_that_carries_the_protection() {
@@ -487,10 +485,8 @@ mod tests {
         // (`csp_io.c:250-271`), so the wire is `[payload][MAC][CRC32]` and a receiver
         // unwraps outermost-first: checksum, then MAC.
         //
-        // This test previously built the packet the other way round — checksum inner, MAC
-        // outer — and asserted it verified, which is how the receive order came to be
-        // backwards and stayed that way through an audit. It was named as if it proved the
-        // layering while assembling the packet from the same misreading as the code.
+        // The packet is built MAC-inner, checksum-outer, so the receiver must unwrap
+        // checksum first, then MAC.
         // `ctest/suite_security.c` builds the same case with the real libcsp.
         let id = id_with(flags::CRC32 | flags::HMAC);
         let mut inner = [0u8; 64];
