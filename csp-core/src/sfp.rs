@@ -1,6 +1,6 @@
 //! SFP — the Small Fragmentation Protocol, which carries payloads larger than one packet.
 //!
-//! An SFP fragment is an ordinary CSP packet whose header has [`flags::FRAG`] set and
+//! An SFP fragment is an ordinary CSP packet whose header has [`flags::FRAG`](crate::flags::FRAG) set and
 //! whose payload is followed by an 8-byte trailer:
 //!
 //! ```text

@@ -150,6 +150,13 @@ check: canonical
     # unseen: `forward` was gated on `rtable` and refused every packet, where the C
     # compiles out only its middle stage.
     cargo test -p csp-core -p csp --no-default-features
+    # Public API docs must have no broken intra-doc links.
+    RUSTDOCFLAGS="-D warnings" cargo doc -p csp-core -p csp --no-deps --all-features
+
+# The complete verification: the pre-commit gate plus mutation testing. `mutants` mutates
+# the tree in place, so it runs last and never alongside `check` -- see the mutants recipe.
+gate: check
+    just mutants
 
 fmt:
     cargo fmt --all

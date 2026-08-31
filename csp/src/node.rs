@@ -1,6 +1,6 @@
 //! The application-facing API: connect, send, accept, read.
 //!
-//! [`Router`](crate::Router) moves packets between the wire and connection queues.
+//! [`Router`] moves packets between the wire and connection queues.
 //! [`Node`] is what an application actually calls.
 //!
 //! # Sending returns what to do, rather than doing it
@@ -289,7 +289,7 @@ impl<
     /// Bind the catch-all, so every port with no bind of its own is delivered too.
     ///
     /// This is `csp_bind(socket, CSP_ANY)`, which is how both surveyed firmware consumers
-    /// use libcsp: one catch-all, then dispatch on [`Delivered::dport`](crate::Delivered).
+    /// use libcsp: one catch-all, then dispatch on the delivered packet's destination port.
     /// An explicit [`bind`](Self::bind) still takes precedence, and a port at or above
     /// `PORTS` is dropped either way — both measured against a real node in
     /// `difftest/tests/node_bind_any.rs`.
@@ -347,7 +347,7 @@ impl<
     }
 
     /// Reclaim a packet that [`Router::work`] reported as
-    /// [`Routed::Forwarded`](crate::Routed::Forwarded).
+    /// [`Routed::Forwarded`].
     ///
     /// The router hands back a pool slot index rather than the packet, because `Routed`
     /// carries no lifetime. Call this with that index to get the packet and send it on the
