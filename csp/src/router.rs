@@ -61,7 +61,7 @@ pub enum Routed {
         /// Which connection it went to.
         conn: Handle,
     },
-    /// The packet went to the connection-less queue, for [`Node::recvfrom`].
+    /// The packet went to the connection-less queue, for [`Node::recvfrom`](crate::Node::recvfrom).
     ///
     /// No connection was created and none was consulted — that is the whole difference
     /// between a `CSP_SO_CONN_LESS` port and an ordinary one, and it is why a
@@ -74,7 +74,7 @@ pub enum Routed {
     /// The packet was addressed elsewhere and must go out on an interface.
     ///
     /// **The caller must send it.** `packet` is a pool slot index; turn it back into a
-    /// [`Packet`] with [`Pool::from_index`] (or [`Node::take_forwarded`]) and hand it to
+    /// [`Packet`] with [`Pool::from_index`] (or [`Node::take_forwarded`](crate::Node::take_forwarded)) and hand it to
     /// the interface. Dropping the index without doing so leaks the buffer.
     ///
     /// This carries the packet index rather than the packet because [`Routed`] has no
@@ -87,7 +87,7 @@ pub enum Routed {
     Forwarded {
         /// Interface index.
         iface: u8,
-        /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
+        /// Next hop, or [`route_policy::NO_VIA`](crate::route_policy::NO_VIA) for a direct delivery.
         via: u16,
         /// Pool slot holding the packet. The caller owns it.
         packet: u16,
@@ -103,7 +103,7 @@ pub enum Routed {
     Respond {
         /// Interface index.
         iface: u8,
-        /// Next hop, or [`rtable::NO_VIA`] for a direct delivery.
+        /// Next hop, or [`route_policy::NO_VIA`](crate::route_policy::NO_VIA) for a direct delivery.
         via: u16,
         /// Pool slot holding the packet. The caller owns it.
         packet: u16,
