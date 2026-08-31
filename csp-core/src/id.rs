@@ -271,6 +271,34 @@ const fn mask64(bits: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_refuses_a_short_buffer_and_an_out_of_range_field() {
+        let id = Id {
+            pri: 0,
+            flags: 0,
+            src: 1,
+            dst: 2,
+            dport: 3,
+            sport: 4,
+        };
+        assert!(matches!(
+            id.encode(Version::V2, &mut [0u8; 5]),
+            Err(Error::FieldOutOfRange { .. }) | Err(Error::BufferTooSmall { .. })
+        ));
+        let mut bad = id;
+        bad.src = Version::V2.max_node_id() + 1;
+        assert!(matches!(
+            bad.encode(Version::V2, &mut [0u8; 6]),
+            Err(Error::FieldOutOfRange { .. })
+        ));
+        let mut bad2 = id;
+        bad2.dst = Version::V2.max_node_id() + 1;
+        assert!(matches!(
+            bad2.encode(Version::V2, &mut [0u8; 6]),
+            Err(Error::FieldOutOfRange { .. })
+        ));
+    }
     use crate::flags;
 
     const BOTH: [Version; 2] = [Version::V1, Version::V2];

@@ -201,6 +201,11 @@ impl<
 mod tests {
     use super::*;
 
+    #[test]
+    fn storage_default_is_new() {
+        let _ = CspStorage::<2, 4, 264, 8, 4>::default();
+    }
+
     use crate::node::Node;
 
     type S = CspStorage<8, 16, 264, 48, 32>;

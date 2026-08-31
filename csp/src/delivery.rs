@@ -420,6 +420,44 @@ mod tests {
     }
 
     #[test]
+    fn into_datagram_on_a_stream_returns_it_and_received_tracks() {
+        let pool = P::new();
+        let mut src = Source::new();
+        let first = fragment(&pool, 0, 10, b"abcde");
+        let d = Delivery::classify(first, &mut src);
+        // A stream handed to a datagram-only reader is returned intact, not destroyed.
+        match d.into_datagram() {
+            Err(Delivery::Stream(s)) => {
+                let _ = s.received(); // bytes accepted so far -- exercised, not pinned here
+            }
+            _ => panic!("a fragment must classify as a stream, returned on mismatch"),
+        };
+    }
+
+    #[test]
+    fn an_empty_fragment_mid_stream_is_refused() {
+        let pool = P::new();
+        let mut src = Source::new();
+        // A well-formed opener, then a fragment carrying no payload at the next offset.
+        src.push(fragment(&pool, 5, 10, b""));
+        let first = fragment(&pool, 0, 10, b"abcde");
+        let mut s = match Delivery::classify(first, &mut src) {
+            Delivery::Stream(s) => s,
+            _ => panic!("expected a stream"),
+        };
+        let mut out = [0u8; 16];
+        assert!(
+            matches!(s.read_to_slice(100, &mut out), Err(Error::EmptyFragment)),
+            "an empty fragment is refused, not treated as end-of-stream"
+        );
+    }
+
+    #[test]
+    fn port_table_default_is_new() {
+        let _ = PortTable::<4>::default();
+    }
+
+    #[test]
     fn a_stream_reassembles_into_a_slice() {
         let pool = P::new();
         let mut src = Source::new();

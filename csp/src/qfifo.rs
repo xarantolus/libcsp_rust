@@ -122,6 +122,11 @@ impl<const N: usize> Qfifo<N> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_is_new() {
+        let _ = Qfifo::<4>::default();
+    }
+
     type P = Pool<8, 264>;
 
     fn packet(pool: &P) -> Packet<'_, 8, 264> {

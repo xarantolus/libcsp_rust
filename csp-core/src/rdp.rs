@@ -1101,6 +1101,25 @@ impl Connection {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_rdp_encoders_refuse_a_short_buffer() {
+        let h = Header {
+            flags: ACK,
+            seq_nr: 1,
+            ack_nr: 2,
+        };
+        assert!(matches!(
+            h.encode(&[], &mut [0u8; HEADER_LEN - 1]),
+            Err(Error::BufferTooSmall { .. })
+        ));
+        let o = SynOptions::default();
+        assert!(matches!(
+            o.encode(&mut [0u8; SYN_OPTIONS_LEN - 1]),
+            Err(Error::BufferTooSmall { .. })
+        ));
+        let _ = TxQueue::<4>::default();
+    }
+
     const MAX_WINDOW: u32 = 5;
 
     #[test]

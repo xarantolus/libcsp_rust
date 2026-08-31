@@ -767,6 +767,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cmp_encoders_refuse_a_short_buffer_and_oversized_data() {
+        let h = Header {
+            kind: REQUEST,
+            code: code::PEEK,
+        };
+        let peek = Peek {
+            addr: 0x1000,
+            len: 4,
+            data: &[],
+        };
+        assert!(matches!(
+            peek.encode(h, &mut [0u8; 3]),
+            Err(Error::BufferTooSmall { .. })
+        ));
+        let big = [0u8; len::PEEK_MAX + 1];
+        let over = Peek {
+            addr: 0,
+            len: 0,
+            data: &big,
+        };
+        assert!(matches!(
+            over.encode(h, &mut [0u8; 512]),
+            Err(Error::LengthExceedsMaximum { .. })
+        ));
+    }
+
+    #[test]
     fn layout_sizes_match_the_packed_c_structs() {
         // Computed from the __attribute__((packed)) declarations in csp_cmp.h.
         assert_eq!(Header::LEN, 2);

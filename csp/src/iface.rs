@@ -238,6 +238,12 @@ impl<T> Interface<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_route_marks_the_interface() {
+        let iface = Interface::new("TEST", 1, 5, Recorder::new()).default_route();
+        assert!(iface.is_default, "the builder sets the default-route flag");
+    }
     use crate::pool::Pool;
     use csp_core::{Id, Version};
 
