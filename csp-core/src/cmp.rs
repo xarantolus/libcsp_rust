@@ -1270,10 +1270,9 @@ mod tests {
     fn every_message_type_dispatches_to_its_query() {
         let mut buf = [0u8; 128];
 
-        // An IDENT request has to be as long as the reply the node writes back into it.
-        // This test used to build the two-byte form and assert it dispatched, which is the
-        // one length a real node is guaranteed *not* to answer — see
-        // `ctest/suite_cmp.c`, which measures it.
+        // An IDENT request must be as long as the reply the node writes back into it --
+        // the two-byte form is the one length a real node will not answer (see
+        // `ctest/suite_cmp.c`).
         let n = req(code::IDENT, &[0; Ident::LEN - Header::LEN], &mut buf);
         assert_eq!(n, Ident::LEN);
         assert_eq!(parse_request(&buf[..n]).unwrap(), Query::Ident);

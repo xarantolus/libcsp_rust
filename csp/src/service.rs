@@ -517,8 +517,7 @@ mod tests {
         }
         // Measured at 1139 of 50 000: a random u8 port is a valid service port about 2 %
         // of the time. Without this assertion a stricter `Request::decode` could take it
-        // to zero and the test would still pass, having exercised nothing -- which is
-        // exactly how a KISS fuzz test here once ran against no input at all.
+        // to zero and the test would still pass, having exercised nothing.
         assert!(
             answered > 500,
             "only {answered} of 50000 random requests were answered -- the generator is \

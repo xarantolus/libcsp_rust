@@ -289,12 +289,10 @@ impl<'p, const N: usize, const SZ: usize> Packet<'p, N, SZ> {
     ///
     /// Both handles must be dropped before the slot returns to the pool.
     ///
-    /// `csp_buffer_refc_inc`'s counterpart. **Nothing in this crate calls it**, and the
-    /// doc here used to claim the promiscuous tap did — the tap `deep_copy`s, which is why
-    /// `promisc::read_transfers_ownership` can measure the tapped packet as a distinct
-    /// buffer. A reader who believed the old comment and built an aliasing tap would have
-    /// broken exactly that recorded property. The refcount therefore never exceeds 1 inside
-    /// the port; sharing a slot is something an application does, deliberately.
+    /// `csp_buffer_refc_inc`'s counterpart. **Nothing in this crate calls it**: the
+    /// promiscuous tap `deep_copy`s instead (which is why `promisc::read_transfers_ownership`
+    /// measures the tapped packet as a distinct buffer), so the refcount never exceeds 1
+    /// inside the port. Sharing a slot is something an application does, deliberately.
     pub fn add_ref(&self) -> Packet<'p, N, SZ> {
         self.pool.refcounts[self.idx as usize].fetch_add(1, Ordering::AcqRel);
         Packet {

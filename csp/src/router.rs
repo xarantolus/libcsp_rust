@@ -901,13 +901,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         // delayed acks off.
         //
         // Queued rather than returned, so it rides alongside whatever the action was; the
-        // caller sees it on the next `work` call, the same as a fan-out destination.
-        // **Deferred past the action, not taken here.** This used to run before the match
-        // below, so a packet the connection had no room for was acknowledged and *then*
-        // dropped: the peer was told data had arrived that the application would never see,
-        // and had already released its retransmission copy. Measured against a real C peer
-        // — it sent 12, the application could read 8, and 4 were acknowledged into nothing.
-        // An acknowledgement is a promise about a packet that was kept.
+        // caller sees it on the next `work` call, the same as a fan-out destination. The
+        // acknowledgement is deferred past the enqueue below, not taken here: acknowledging
+        // before the packet is known to be kept would promise the peer data the application
+        // will never see, and it would already have freed its retransmission copy.
         let mut pending_ack = true;
 
         let routed = match action {
@@ -1140,8 +1137,8 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
             }
         }
 
-        // Giving up no longer closes the slot here -- the peer is told first (see below) and
-        // the CLOSE_WAIT timeout in `tick_rdp` releases it -- so nothing is counted closed.
+        // Giving up does not close the slot here: the peer is told first (see below) and the
+        // CLOSE_WAIT timeout in `tick_rdp` releases it, so nothing is counted closed.
         let closed = 0;
         for handle in handles.iter().take(n_handles).flatten().copied() {
             // Sized by `RXQ`: the queue cannot hold more than the shared budget allows, and
@@ -1217,10 +1214,10 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
                     TxAction::GiveUp => {
                         // "No progress after N retransmissions, closing": the C calls
                         // `csp_conn_close`, which sends `ACK|RST` and waits in CLOSE_WAIT
-                        // (`csp_rdp.c:431`). Closing the slot silently left the peer a
-                        // connection it had never been told was gone; the reset is the
-                        // only thing that tells it. The slot goes when the peer answers or
-                        // CLOSE_WAIT expires, and the unacknowledged copies with it.
+                        // (`csp_rdp.c:431`). A silent close would leave the peer holding a
+                        // connection nothing told it was gone; the reset is what tells it.
+                        // The slot goes when the peer answers or CLOSE_WAIT expires, and the
+                        // unacknowledged copies with it.
                         if let Ok(Some((idout, hdr))) =
                             self.conns.rdp_close(handle, now_ms, RDP_MAX_WINDOW)
                         {
@@ -2041,10 +2038,9 @@ mod tests {
 
     /// An RDP handshake with a peer reachable only through the routing table.
     ///
-    /// The reply's destination used to be found by a private three-line lookup that tried
-    /// the subnet then the defaults and **never consulted the routing table**, while its
-    /// doc comment said it did. A peer no interface's subnet owns and no default reaches
-    /// got no `SYN|ACK` at all: the handshake stalled and the connection never opened.
+    /// A peer no interface's subnet owns and no default reaches is found only through the
+    /// routing table. This drives the reply back to such a peer and checks the `SYN|ACK`
+    /// takes the table route, so the handshake completes.
     #[cfg(feature = "rdp")]
     #[test]
     fn a_peer_reachable_only_by_a_route_still_gets_its_handshake() {
@@ -2269,7 +2265,7 @@ mod tests {
     fn a_reset_connection_returns_every_buffer_it_held() {
         use csp_core::rdp;
 
-        // RXQ of 12, deliberately more than the eight the RST path used to assume.
+        // RXQ of 12, deliberately more than a single window.
         type Deep = Router<4, 12, 48, 8>;
         let pool = Pool::<24, 264>::new();
         let mut r = Deep::new(ME, Version::V1);
@@ -2315,7 +2311,7 @@ mod tests {
         let iss = r.conns.rdp(h).unwrap().snd_iss;
         feed(&mut r, rdp::ACK, 1001, iss, &[]);
 
-        // Nine packets the application never reads -- one more than the old array held.
+        // Nine packets the application never reads -- more than one window.
         for i in 1..=9u16 {
             feed(&mut r, rdp::ACK, 1000 + i, iss, b"x");
         }
