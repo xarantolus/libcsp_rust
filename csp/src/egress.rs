@@ -87,3 +87,68 @@ pub(crate) fn protect<const B: usize, const SZ: usize>(
         (n, Ok(()))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pool::{Pool, PADDING};
+    use csp_core::flags;
+
+    /// A pool of one slot, sized so a full payload leaves no room for a trailer.
+    const SZ: usize = PADDING + 20;
+    const CAP: usize = SZ - PADDING;
+
+    fn full_packet(pool: &Pool<1, SZ>) -> Packet<'_, 1, SZ> {
+        let mut p = pool.acquire(0).expect("a slot");
+        p.set_payload(&[0xABu8; CAP]).expect("a full payload");
+        p
+    }
+
+    #[test]
+    fn a_crc32_trailer_that_will_not_fit_is_refused_cleanly() {
+        let pool = Pool::<1, SZ>::new();
+        let mut p = full_packet(&pool);
+        // The payload already fills the buffer; the four-byte CRC cannot be appended.
+        match protect(&mut p, flags::CRC32, None) {
+            Err(Error::BufferTooSmall { needed }) => {
+                assert_eq!(
+                    needed,
+                    CAP + csp_core::crc32::CRC32_LEN,
+                    "reports the real need"
+                );
+            }
+            other => panic!("a full buffer must refuse the CRC, got {other:?}"),
+        }
+        // The payload is untouched: a refused protect must not corrupt what it could not extend.
+        assert!(p.with_payload(|b| b == [0xAB; CAP]), "payload untouched");
+    }
+
+    #[cfg(feature = "hmac")]
+    #[test]
+    fn an_hmac_trailer_that_will_not_fit_is_refused_cleanly() {
+        let pool = Pool::<1, SZ>::new();
+        let mut p = full_packet(&pool);
+        let key = [0x11u8; 16];
+        match protect(&mut p, flags::HMAC, Some(&key)) {
+            Err(Error::BufferTooSmall { needed }) => {
+                assert!(
+                    needed > CAP,
+                    "the MAC pushes the need past the buffer: {needed}"
+                );
+            }
+            other => panic!("a full buffer must refuse the MAC, got {other:?}"),
+        }
+        assert!(p.with_payload(|b| b == [0xAB; CAP]), "payload untouched");
+    }
+
+    #[test]
+    fn no_protection_flags_is_a_no_op() {
+        let pool = Pool::<1, SZ>::new();
+        let mut p = full_packet(&pool);
+        assert!(
+            protect(&mut p, 0, None).is_ok(),
+            "nothing to append, nothing refused"
+        );
+        assert!(p.with_payload(|b| b.len() == CAP), "payload unchanged");
+    }
+}
