@@ -340,6 +340,22 @@ mod tests {
     type P = Pool<4, 264>;
 
     #[test]
+    fn default_and_accessors_and_oversized_frame() {
+        let pool = P::default();
+        assert_eq!(pool.payload_capacity(), 264 - PADDING);
+        let mut p = pool.acquire(0).expect("a slot");
+        assert!(p.is_empty(), "a fresh packet has no payload");
+        p.set_payload(&[1, 2, 3]).unwrap();
+        assert!(!p.is_empty());
+        // A frame whose payload cannot fit the slot is refused, not truncated.
+        let frame = [0u8; Version::V2 as usize + 6 + 300];
+        assert!(matches!(
+            p.set_frame(Version::V2, &frame),
+            Err(csp_core::Error::BufferTooSmall { .. })
+        ));
+    }
+
+    #[test]
     fn acquire_and_release_are_balanced() {
         let pool = P::new();
         assert_eq!(pool.available(), 4);

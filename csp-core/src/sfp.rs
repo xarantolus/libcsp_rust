@@ -255,6 +255,27 @@ impl Reassembler {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sfp_encode_refuses_a_short_buffer_and_is_last_and_default() {
+        assert!(matches!(
+            Fragment::encode(0, 100, b"data", &mut [0u8; HEADER_LEN + 3]),
+            Err(Error::BufferTooSmall { .. })
+        ));
+        let mid = Fragment {
+            offset: 0,
+            total: 100,
+            payload: b"x",
+        };
+        assert!(!mid.is_last());
+        let last = Fragment {
+            offset: 96,
+            total: 100,
+            payload: &[0u8; 4],
+        };
+        assert!(last.is_last());
+        let _ = Reassembler::default();
+    }
+
     use crate::security::opts;
 
     /// `max_mtu` charges four bytes for CRC32 and four for HMAC, so swapping the two

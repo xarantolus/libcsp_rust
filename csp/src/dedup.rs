@@ -136,6 +136,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_is_new() {
+        let _ = Dedup::default();
+    }
+
+    #[test]
     fn an_identical_frame_inside_the_window_is_a_duplicate() {
         let mut d = Dedup::new();
         assert!(!d.is_duplicate(b"packet", 1_000));

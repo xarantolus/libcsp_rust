@@ -459,6 +459,24 @@ impl<const N: usize> ArpTable<N> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn eth_encode_refuses_a_short_buffer_and_default() {
+        let h = Header {
+            dst_mac: [0; MAC_LEN],
+            src_mac: [0; MAC_LEN],
+            ethertype: ETHERTYPE_CSP,
+            packet_id: 1,
+            src_addr: 2,
+            seg_size: 0,
+            packet_length: 0,
+        };
+        assert!(matches!(
+            h.encode(&mut [0u8; HEADER_LEN - 1]),
+            Err(Error::BufferTooSmall { .. })
+        ));
+        let _ = Reassembler::default();
+    }
+
     const A: [u8; 6] = [0x02, 0, 0, 0, 0, 0x01];
     const B: [u8; 6] = [0x02, 0, 0, 0, 0, 0x02];
 
