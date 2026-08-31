@@ -1,10 +1,7 @@
-//! The RDP SYN-option clamp against the real C, field by field, across each bound.
-//!
-//! A peer's proposed options are unauthenticated; `decode_clamped` bounds all six before
-//! they reach the connection (`csp_rdp.c:568-576`). A wrong bound or a wrong clamp would let
-//! a hostile peer set, say, a 1 ms packet timeout (a retransmit storm) or a zero window. The
-//! shim runs the C's exact sequence with the real `CSP_RDP_*` macros, so this pins both the
-//! arithmetic and the constant values; the port's own constants are checked against the C's.
+//! The RDP SYN-option clamp vs the real C, every field across each bound. `decode_clamped`
+//! bounds all six unauthenticated options (`csp_rdp.c:568-576`); a wrong bound lets a peer
+//! set a 1 ms packet timeout or a zero window. The shim runs the C's clamp with the real
+//! `CSP_RDP_*` macros, pinning arithmetic and constants.
 
 use csp_core::rdp::{
     SynOptions, MAX_CONN_TIMEOUT, MAX_PACKET_TIMEOUT, MIN_ACK_TIMEOUT, MIN_CONN_TIMEOUT,

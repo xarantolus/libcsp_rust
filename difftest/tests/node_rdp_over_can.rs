@@ -1,12 +1,7 @@
-//! A whole session, the way a flight node runs one: RDP with CRC32, over CAN, against a
-//! real C peer — through the real `csp_can_rx` and `csp_can2_tx` on the C side and the
-//! port's CFP fragmenter and reassembly pool on the other, both directions, with one CAN
-//! frame lost and two swapped on the way.
-//!
-//! Every piece has its own comparison: the CFP framing, the RDP handshake, the CRC32
-//! trailer, retransmission, the close. None of them had run *together*. What this pins is
-//! the interaction: a trailer inside a fragment inside a retransmission inside a session
-//! that both ends then close cleanly.
+//! A whole flight session: RDP with CRC32 over CAN against a real C peer (through the real
+//! `csp_can_rx`/`csp_can2_tx`), both directions, with a CAN frame lost and two swapped. Each
+//! piece is pinned elsewhere; this pins the interaction — a trailer inside a fragment inside
+//! a retransmission — and a clean close on both ends.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

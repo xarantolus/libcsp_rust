@@ -1,10 +1,6 @@
-//! Both ends close the same RDP connection at once.
-//!
-//! Each side sends `ACK|RST` and enters CLOSE-WAIT before the other's reset arrives. What
-//! the C does then is `case RDP_CLOSE_WAIT`: answer *anything* with `ACK|RST` and stay. Two
-//! C nodes would therefore trade resets until a CLOSE-WAIT timer fires. Measured here: what
-//! the C answers in CLOSE-WAIT to a reset, how long the exchange goes on when the port is
-//! the peer, and what the port answers once its own slot is gone.
+//! Both ends close the same RDP connection at once. The C's `case RDP_CLOSE_WAIT` answers a
+//! reset with `ACK|RST`, so two closers look like they would trade resets forever; measured
+//! against the real C to see what actually happens (`csp_rdp.c`).
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

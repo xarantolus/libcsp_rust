@@ -1,16 +1,10 @@
-//! Shared test scaffolding for the node-level differential tests.
+//! Shared scaffolding for the node-level differential tests: the port-side plumbing every
+//! scenario repeats — inject a received frame, drain what the port sends, and a CAN driver
+//! ([`CanLink`]) that fragments outgoing packets and reassembles incoming ones. Generic over
+//! the `Node` const parameters so each test keeps its own sizing.
 //!
-//! The C boundary is abstracted by the `c_*` functions in the crate root; this module does
-//! the same for the *port* side of a scenario — the plumbing every node test repeats:
-//! injecting a received frame, draining what the port wants to send, and simulating a CAN
-//! driver (fragment on the way out, reassemble on the way in). Before it existed, `inject`
-//! was copied byte-for-byte into seven test files and the CAN driver into five, and the v1
-//! CAN composite could not reuse the v2 one at all. The helpers are generic over the
-//! `Node` const parameters, so a test keeps its own storage sizing.
-//!
-//! What is deliberately *not* here: `drain` variants that match specific `Routed` arms by
-//! test intent. Those differ on purpose; [`work_until_idle`] gives them a shared shell
-//! without flattening the differences.
+//! `drain` variants that match specific `Routed` arms stay in the tests; [`work_until_idle`]
+//! gives them a shared shell.
 
 use csp::router::Routed;
 use csp::Node;

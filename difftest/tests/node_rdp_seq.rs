@@ -1,11 +1,7 @@
-//! The RDP sequence-comparison primitives against the real C, across the whole space.
-//!
-//! `seq_before` and `seq_between` decide every window, ack, and duplicate check in RDP, so a
-//! one-point disagreement with the C is a latent divergence in all of them. `seq_before`
-//! once differed from the C at exactly the antipode (`a - b == 0x8000`), where the C's
-//! signed comparison says "before" and the port's `(b-a) < 0x8000` said "not" — 65536 points
-//! of the 2^32 grid, unreachable behind the window range checks but wrong in the primitive.
-//! This sweeps a dense grid plus every antipodal pair to keep them identical.
+//! `seq_before` and `seq_between` against the real C across the whole 2^16 x 2^16 space —
+//! they decide every RDP window, ack, and duplicate check, so a one-point disagreement is a
+//! latent divergence. Sweeps a dense grid plus every antipodal pair (`a - b == 0x8000`, the
+//! one point where a signed and an unsigned "before" can differ).
 
 use csp_core::rdp::{seq_before, seq_between};
 use difftest::*;

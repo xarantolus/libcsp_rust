@@ -1,12 +1,7 @@
-//! The flight topology under **CSP v1** (the flown wire format): a ground node, the port as
-//! the CDH router in the middle, and a real C peer on the CAN bus — an RDP session with HMAC
-//! and CRC32 *in transit* through the router, with CAN frames lost and swapped on the far
-//! leg. The v1 counterpart of `node_rdp_transit.rs`, on the shared `harness::CanLink<V1>`.
-//!
-//! The router holds no key and must not need one: a C router forwards a packet for another
-//! node untouched, trailers and all (`csp_route_work` checks security only for packets it
-//! delivers to itself). The two endpoints run the port's node code on one side and libcsp on
-//! the other; the packet passes through `Router::forward` between them.
+//! The flight topology under CSP v1: ground node -> port as keyless CDH router -> C peer on
+//! CAN, an RDP+HMAC+CRC32 session in transit with CAN frames lost and swapped. The v1
+//! counterpart of `node_rdp_transit.rs` on `harness::CanLink<V1>`; the router forwards
+//! transit packets untouched (`csp_route_work` verifies only what it delivers to itself).
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};
