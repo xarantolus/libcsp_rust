@@ -619,11 +619,9 @@ mod tests {
         }
     }
 
-    /// `csp_eth_rx` copies to `frame_begin + rx_count`, so segments are assembled in the
-    /// order they arrive and the wire carries no offset to say otherwise. This used to
-    /// assert that reordered segments still reassembled correctly -- it passed only because
-    /// `push` took an offset the *sender* had computed, which no receiver has. Delivered in
-    /// arrival order is what the C does, so it is what the port does.
+    /// `csp_eth_rx` copies to `frame_begin + rx_count`, so segments assemble in arrival
+    /// order and the wire carries no offset to say otherwise -- delivered in arrival order,
+    /// as the C does.
     #[test]
     fn segments_are_assembled_in_arrival_order() {
         let payload: [u8; 3000] = core::array::from_fn(|i| (i & 0xff) as u8);
@@ -722,8 +720,7 @@ mod tests {
     }
 
     /// Both guards, in the order `csp_eth_rx` applies them: the segment size first, then
-    /// the packet length. This test used to set both to zero and expect `ZeroTotal`, which
-    /// only passed because the segment-size guard did not exist.
+    /// the packet length.
     #[test]
     fn a_zero_length_packet_is_refused() {
         let mut out = [0u8; 64];

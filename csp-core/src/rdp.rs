@@ -1028,11 +1028,9 @@ impl Connection {
             State::Open => {
                 // `csp_rdp_new_packet`'s two range checks (`csp_rdp.c:653`, `:661`), in its
                 // order, both against **twice the negotiated window**. A sequence number
-                // outside `[rcv_cur+1, rcv_cur+2w]` is discarded in silence -- the port
-                // used to re-acknowledge it, which the C never does -- and so is an
-                // acknowledgement number outside `[snd_una-1-2w, snd_nxt-1]`, which the
-                // port used to accept and act on. Measured against a real node in
-                // `difftest/tests/node_rdp_edges.rs`.
+                // outside `[rcv_cur+1, rcv_cur+2w]`, and an acknowledgement number outside
+                // `[snd_una-1-2w, snd_nxt-1]`, are both discarded in silence, as the C does
+                // (measured in `difftest/tests/node_rdp_edges.rs`).
                 let _ = max_window;
                 // `uint32_t` arithmetic in the C, wrapping; the `u16` narrowing is the C's too.
                 let span = self.opts.window_size.wrapping_mul(2) as u16;
@@ -1395,11 +1393,10 @@ mod tests {
 
     #[test]
     fn a_duplicate_is_discarded_in_silence() {
-        // Measured against a real node in difftest/tests/node_rdp_edges.rs: a packet the
-        // C has already acknowledged falls below `rcv_cur + 1` and is discarded without a
-        // reply (csp_rdp.c:653). This used to re-acknowledge it, reasoning that silence
-        // makes the peer retransmit "forever" -- it does not; the peer gives up after
-        // MAX_RETRANSMITS, which is the C's answer to a lost acknowledgement too.
+        // A packet the C has already acknowledged falls below `rcv_cur + 1` and is
+        // discarded without a reply (csp_rdp.c:653; measured in node_rdp_edges.rs). Silence
+        // is right: the peer gives up after MAX_RETRANSMITS, the C's answer to a lost
+        // acknowledgement too.
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         c.rcv_cur = 10;
@@ -1423,8 +1420,8 @@ mod tests {
 
     #[test]
     fn an_out_of_window_packet_is_discarded_in_silence() {
-        // csp_rdp.c:653: outside [rcv_cur+1, rcv_cur+2w] the C discards and says nothing.
-        // Measured in difftest/tests/node_rdp_edges.rs; this used to re-acknowledge.
+        // csp_rdp.c:653: outside [rcv_cur+1, rcv_cur+2w] the C discards and says nothing
+        // (measured in difftest/tests/node_rdp_edges.rs).
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         c.rcv_cur = 10;
@@ -1449,7 +1446,7 @@ mod tests {
     #[test]
     fn an_out_of_range_acknowledgement_is_discarded() {
         // csp_rdp.c:661: ack_nr outside [snd_una-1-2w, snd_nxt-1] discards the packet,
-        // data and all. This used to deliver it and move snd_una to the bogus number.
+        // data and all -- it is not delivered and snd_una is not moved.
         let mut c = Connection::new(1, SynOptions::default());
         c.state = State::Open;
         c.rcv_cur = 10;
@@ -1988,9 +1985,8 @@ mod tests {
 
     /// An acknowledgement resets the give-up counter, through the path that carries it.
     ///
-    /// This used to call `note_progress()` directly — a method with no caller anywhere,
-    /// proving the reset worked while nothing performed it. Driving the release instead is
-    /// what makes the assertion about the port rather than about the helper.
+    /// Drives the real release rather than calling `note_progress()` directly, so the
+    /// assertion is about the port's behaviour, not a helper with no caller.
     #[test]
     fn progress_resets_the_give_up_counter() {
         let mut q: TxQueue<4> = TxQueue::new();

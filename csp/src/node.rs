@@ -170,11 +170,8 @@ pub struct Node<
     pub ifaces: crate::iflist::IfList<8, 8>,
     version: Version,
     address: u16,
-    /// What this node calls itself, for CMP `IDENT`.
-    ///
-    /// `Config` has always accepted these and `Node::new` used to drop them, so a node
-    /// configured with a hostname had no way to report it and `IDENT` could not be
-    /// answered with anything the caller had set.
+    /// What this node calls itself, for CMP `IDENT`. Copied from `Config` so a configured
+    /// hostname reaches the `IDENT` reply.
     hostname: &'a str,
     model: &'a str,
     revision: &'a str,
@@ -1170,14 +1167,9 @@ mod tests {
         Node::new(s, Config::new(Version::V1).address(ME))
     }
 
-    /// The whole path from the public builder to the bytes a peer receives.
-    ///
-    /// `Node::new` used to read only `version` and `address` off the `Config` and drop
-    /// the other three, so `Config::hostname(..)` was a setter with no effect on the only
-    /// type that can route -- and a CMP `IDENT` could not be answered with the identity
-    /// the application had configured. Nothing noticed, because nothing joined the two
-    /// ends up: the builder had tests, the encoder had tests, and no test went from one
-    /// to the other.
+    /// The whole path from the public builder to the bytes a peer receives: `Node::new`
+    /// carries `hostname`/`model`/`revision` off the `Config` through to the CMP `IDENT`
+    /// reply, so what the application configured is what a peer reads back.
     /// An application closing a connection with unread packets gets its buffers back.
     ///
     /// `Table::close` refuses rather than partially draining, and `Node::close` passed a
@@ -2027,11 +2019,9 @@ mod tests {
     /// Three properties, all of them about what a peer sees:
     ///
     /// 1. **Nothing dropped is ever acknowledged.** An acknowledgement is a promise that a
-    ///    packet was kept; the peer discards its only copy on the strength of it. This
-    ///    node used to acknowledge *before* attempting the enqueue, so a packet it had no
-    ///    room for was promised and then thrown away. Measured against a real C peer before
-    ///    the fix: it sent 12, the application could read 8, and 4 were acknowledged into
-    ///    nothing.
+    ///    packet was kept; the peer discards its only copy on the strength of it. The
+    ///    acknowledgement is therefore withheld until the enqueue succeeds, so a packet the
+    ///    node has no room for is never promised (measured against a real C peer).
     /// 2. **Acknowledgement stops before the queue overflows.** `csp_rdp_check_ack` keeps a
     ///    window of headroom for exactly this reason, so the peer stalls rather than
     ///    overflowing a node whose application has stopped reading.
@@ -2402,10 +2392,9 @@ mod tests {
         // per SCOPE.md 3, parses it as one, fails, and FREES it. The sender causes the
         // condition and the receiver destroys the packet.
         //
-        // This used to set `FRAG` on the packet `send` had already returned and then check
-        // the next one did not have it -- which is true of any two packets and says nothing
-        // about the connection. It read as coverage because the port had no way to send a
-        // fragment at all; `send_fragment` is what makes the question askable.
+        // Sends a real fragment with `send_fragment` and checks the next plain `send` on
+        // the same connection does not carry `FRAG` -- the connection's stored flags are
+        // untouched, unlike the C's `CSP_FFRAG` leak.
         let s = S::new();
         let mut n = node(&s);
         n.route_default(3).unwrap();

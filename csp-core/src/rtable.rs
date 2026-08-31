@@ -645,10 +645,8 @@ mod tests {
     /// A host route drops its netmask, and which masks are "host" depends on the version.
     ///
     /// Every expectation here is what `csp_rtable_save` actually wrote for the same route,
-    /// measured at both versions. This test previously asserted `"8/5 CAN"` at v1 — the C
-    /// writes `"8 CAN"`, because 5 *is* v1's host width. It was written from a reading of
-    /// the formatter rather than of the C, and it is the fourth unit test here that had to
-    /// be corrected alongside the code it was guarding.
+    /// measured at both versions -- e.g. `"8 CAN"` at v1, where 5 is v1's host width and so
+    /// is not printed.
     #[test]
     fn a_route_renders_in_the_format_the_parser_accepts() {
         let mut out = [0u8; 64];

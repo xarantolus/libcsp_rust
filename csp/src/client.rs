@@ -364,10 +364,9 @@ mod tests {
         assert_eq!(h.code, cmp::code::IDENT);
     }
 
-    /// A request has to be big enough to hold the reply the node will write back into it,
-    /// or a real node discards it without answering. This test previously asserted
-    /// `n == 2` for an `IDENT` request — the length libcsp is guaranteed *not* to answer.
-    /// Measured in `ctest/suite_cmp.c`.
+    /// A request must be big enough to hold the reply the node writes back into it, or a
+    /// real node discards it without answering (the full `IDENT` length, not two bytes;
+    /// measured in `ctest/suite_cmp.c`).
     #[cfg(feature = "cmp")]
     #[test]
     fn a_cmp_request_is_padded_to_what_the_node_will_answer() {
