@@ -2,7 +2,7 @@
 //!
 //! Almost all of `csp_if_i2c.c` is what every interface does — loopback when the destination
 //! is our own address, `csp_id_prepend` on the way out, `csp_id_strip` on the way in — and
-//! [`Interface`](crate::super) already does those. Two things are specific to I2C, and
+//! `Interface` (in the `csp` crate) already does those. Two things are specific to I2C, and
 //! neither existed here until they were compared against the C:
 //!
 //! - **The physical address is seven bits.** `csp_if_i2c.c:22` masks it: a CSP address of 200
