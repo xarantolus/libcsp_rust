@@ -1,10 +1,6 @@
-//! `csp_connect` giving up, with the initiator on a thread of its own.
-//!
-//! `csp_rdp_connect` sends a SYN and waits `conn_timeout` on `tx_wait`. The `retry` in
-//! `csp_rdp.c:799` reads like a second attempt after a timeout; measured, it is not: a
-//! timeout goes straight to `error`, and the retry is only for a semaphore released with
-//! the state still SYN-SENT. Silence gets one SYN and one connection timeout. The port's
-//! `connect` cannot wait, so its counterpart is the SYN-SENT timeout in `tick`.
+//! `csp_connect` giving up, initiator on its own thread. The `retry` at `csp_rdp.c:799`
+//! reads like a second attempt after a timeout but is not: silence gets one SYN and one
+//! `conn_timeout`. The port's counterpart is the SYN-SENT timeout in `tick`.
 
 use csp::{Config, CspStorage, Node, Routed};
 use csp_core::rdp::SynOptions;

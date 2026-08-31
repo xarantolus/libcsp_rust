@@ -1,15 +1,7 @@
-//! The C's send window, with the sender on a thread of its own.
-//!
-//! `csp_rdp_send` blocks in `csp_bin_sem_wait(&conn->rdp.tx_wait, conn_timeout)` while a
-//! full window is unacknowledged (`csp_rdp.c:868-876`), and only the router task's
-//! processing of an acknowledgement posts that semaphore. A single-threaded harness cannot
-//! observe this — the call does not return — which is why "window-full blocking" was the
-//! one RDP rule the sweep had left unmeasured. Here the C's application is a real thread,
-//! the main thread is its router and the port peer, and the observation is a counter of
-//! completed sends: it stops at the window and moves again on the port's acknowledgement.
-//!
-//! The port cannot block — it is sans-io — so the same condition surfaces as
-//! `Error::SendWindowFull` from `Node::send`, asserted at the end for the mirror image.
+//! The C's send window, sender on its own thread. `csp_rdp_send` blocks on `tx_wait` while a
+//! full window is unacknowledged (`csp_rdp.c:868`) — invisible to a single-threaded harness.
+//! Here the sends run on a thread; the counter stops at the window and moves again on the
+//! port's ack. The port is sans-io, so the same rule surfaces as `Error::SendWindowFull`.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

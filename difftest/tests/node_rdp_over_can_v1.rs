@@ -1,9 +1,6 @@
-//! `node_rdp_over_can.rs` under **CSP version 1** — the wire format MOVE-IIIa flies
-//! (`csp_conf.version = 1`). Same session, same damage, every protection, but v1's 4-byte
-//! header, 5-bit addresses, and CFP 1 framing. The point of the exercise is that only the
-//! framing changes: the driver is `harness::CanLink<harness::V1>` in place of `<V2>`, and
-//! the rest of the scenario is identical to the v2 one — which is exactly what a good
-//! abstraction should buy.
+//! `node_rdp_over_can.rs` under CSP v1, the wire format MOVE-IIIa flies. Same session, same
+//! damage, every protection — only the framing changes, `harness::CanLink<V1>` in place of
+//! `<V2>`. The payoff of the shared harness.
 
 use csp::node::Outbound;
 use csp::{Config, CspStorage, Node, Routed};

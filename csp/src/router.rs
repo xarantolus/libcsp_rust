@@ -1638,11 +1638,9 @@ impl<const CONNS: usize, const RXQ: usize, const PORTS: usize, const QF: usize>
         self.finish_forward(&hops[..n], packet)
     }
 
-    /// Queue a packet the node produced, taking ownership. When the fan-out queue is full
-    /// the packet is **dropped here**, which frees its pool slot — the raw-index path below
-    /// cannot, so a slot handed to it while the queue was full leaked one buffer. A
-    /// retransmission dropped this way is not lost: its `tx_unacked` entry stays and the
-    /// next sweep re-sends it.
+    /// Queue a packet the node produced, taking ownership. A full fan-out queue drops the
+    /// packet here so RAII frees its slot — the raw-index path below cannot. A retransmission
+    /// dropped this way is not lost: its `tx_unacked` entry re-sends it on the next sweep.
     fn push_pending_owned<'p, const B: usize, const SZ: usize>(
         &mut self,
         iface: u8,
