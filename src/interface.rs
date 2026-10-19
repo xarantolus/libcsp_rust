@@ -121,6 +121,28 @@ impl InterfaceHandle {
         }
     }
 
+    /// Set this interface's host address and netmask.
+    ///
+    /// libcsp stamps the outgoing interface's address as the source of every
+    /// packet sent from this node through it (and treats packets to that
+    /// address as local). A freshly registered interface has address 0, so
+    /// set it before any traffic flows.
+    pub fn set_address(&self, addr: u16, netmask: u16) {
+        // Safety: `c_iface` is `'static`; libcsp reads these fields only while
+        // routing, which callers do not start before the address is set.
+        unsafe {
+            let iface = self.state.c_iface.get();
+            (*iface).addr = addr;
+            (*iface).netmask = netmask;
+        }
+    }
+
+    /// This interface's host address.
+    pub fn address(&self) -> u16 {
+        // Safety: as above; a plain read of a `u16`.
+        unsafe { (*self.state.c_iface.get()).addr }
+    }
+
     /// Get the raw C interface pointer (for use with `sys::csp_rtable_set` etc).
     pub fn c_iface_ptr(&self) -> *mut sys::csp_iface_t {
         self.state.c_iface.get()
