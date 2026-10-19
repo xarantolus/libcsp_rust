@@ -65,9 +65,19 @@ unsafe impl Sync for InterfaceState {}
 /// libcsp's "register once, run forever" lifecycle. Returns an
 /// [`InterfaceHandle`] that can be cloned freely; dropping it does **not**
 /// unregister the interface.
+///
+/// # Panics
+/// If the interface name contains a NUL byte; use [`try_register`] to get an
+/// error instead.
 pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
+    try_register(interface).expect("interface name must not contain NUL")
+}
+
+/// Like [`register`], but returns [`CspError::InvalidArgument`] instead of
+/// panicking if the interface name contains a NUL byte.
+pub fn try_register<I: CspInterface + 'static>(interface: I) -> crate::Result<InterfaceHandle> {
     let name = interface.name().to_string();
-    let c_name = CString::new(name).unwrap();
+    let c_name = CString::new(name).map_err(|_| crate::CspError::InvalidArgument)?;
 
     // Build the state on the heap so we can grab a stable address, then leak
     // it so the address is `'static` — libcsp keeps a pointer to `c_iface`
@@ -89,7 +99,7 @@ pub fn register<I: CspInterface + 'static>(interface: I) -> InterfaceHandle {
         sys::csp_iflist_add(iface_ptr);
     }
 
-    InterfaceHandle { state }
+    Ok(InterfaceHandle { state })
 }
 
 impl InterfaceHandle {

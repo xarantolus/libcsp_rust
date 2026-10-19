@@ -664,6 +664,12 @@ version 2.1 of the License, or (at your option) any later version.
         )
         .header(
             include_dir
+                .join("csp/csp_crc32.h")
+                .to_str()
+                .expect("include path is not valid UTF-8"),
+        )
+        .header(
+            include_dir
                 .join("csp/csp_debug.h")
                 .to_str()
                 .expect("include path is not valid UTF-8"),

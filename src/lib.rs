@@ -106,6 +106,7 @@ pub mod arch;
 pub mod can;
 mod connection;
 pub mod consts;
+pub mod crc32;
 mod error;
 mod ffi_util;
 pub mod iflist;

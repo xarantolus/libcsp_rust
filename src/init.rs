@@ -28,6 +28,12 @@ use crate::{Connection, Packet, Priority, Result};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
+/// Whether [`CspConfig::init`] has been called. The buffer pool and the wire
+/// version used by [`Packet`] frame conversions only exist after it.
+pub fn is_initialized() -> bool {
+    INITIALIZED.load(Ordering::SeqCst)
+}
+
 /// Cached node address. `csp_conf_t` does not store it in v2.x; each interface
 /// owns its own address via `csp_iface_t::addr`. This mirror exists only so
 /// [`CspNode::address`] remains cheap and does not require walking the iflist.

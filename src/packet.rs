@@ -12,7 +12,7 @@ version 2.1 of the License, or (at your option) any later version.
 //! RAII wrapper for `csp_packet_t`.
 
 use crate::sys;
-use crate::Priority;
+use crate::{CspError, Priority};
 use core::ffi::c_void;
 use core::fmt;
 use core::slice;
@@ -40,8 +40,12 @@ impl Packet {
     ///
     /// `data_size` is ignored by libcsp (packets have a fixed size); it is
     /// retained as a parameter for callers used to the classic API.
-    /// Returns `None` if the pool is exhausted.
+    /// Returns `None` if the pool is exhausted or the stack is not
+    /// initialised yet (the pool only exists after [`crate::CspConfig::init`]).
     pub fn get(_data_size: usize) -> Option<Self> {
+        if !crate::init::is_initialized() {
+            return None;
+        }
         let ptr = unsafe { sys::csp_buffer_get(0) };
         if ptr.is_null() {
             None
@@ -210,6 +214,72 @@ impl Packet {
         self.data_buf_mut()[..bytes.len()].copy_from_slice(bytes);
         self.set_length(bytes.len() as u16);
         Ok(())
+    }
+
+    /// Parse a received frame (CSP header followed by payload, as it travels
+    /// on a link) into a packet, using the configured wire version (v1 or v2).
+    ///
+    /// The header is decoded by libcsp (`csp_id_setup_rx` + `csp_id_strip`);
+    /// the result can be inspected with the id accessors and handed to an
+    /// interface with [`crate::InterfaceHandle::rx`]. Trailers such as a CRC32
+    /// stay part of the payload.
+    ///
+    /// # Errors
+    /// [`CspError::NoBuffers`] if the stack is not initialised or the pool is
+    /// empty, [`CspError::InvalidArgument`] if the frame is shorter than a
+    /// header or longer than a header plus [`BUFFER_SIZE`].
+    pub fn from_frame(frame: &[u8]) -> Result<Self, CspError> {
+        let packet = Self::get(0).ok_or(CspError::NoBuffers)?;
+        let header = unsafe { sys::csp_id_setup_rx(packet.inner) } as usize;
+        if frame.len() < header || frame.len() > header + BUFFER_SIZE {
+            return Err(CspError::InvalidArgument);
+        }
+        unsafe {
+            let p = packet.inner;
+            core::ptr::copy_nonoverlapping(frame.as_ptr(), (*p).frame_begin, frame.len());
+            (*p).frame_length = frame.len() as u16;
+            if sys::csp_id_strip(p) < 0 {
+                return Err(CspError::InvalidArgument);
+            }
+        }
+        Ok(packet)
+    }
+
+    /// The frame as it travels on a link: the CSP header encoded by libcsp
+    /// (`csp_id_prepend`, configured wire version) followed by the payload.
+    ///
+    /// Returns `None` before the stack is initialised (the wire version is not
+    /// known yet).
+    pub fn to_frame(&mut self) -> Option<&[u8]> {
+        if !crate::init::is_initialized() {
+            return None;
+        }
+        unsafe {
+            sys::csp_id_prepend(self.inner);
+            let p = self.inner;
+            Some(slice::from_raw_parts(
+                (*p).frame_begin,
+                (*p).frame_length as usize,
+            ))
+        }
+    }
+
+    /// Append a CRC32 as used with the `CRC32` packet flag. As built here
+    /// (`CSP_21` unset) it covers the payload only, the CSP 1 convention.
+    ///
+    /// # Errors
+    /// [`CspError::NoMemory`] if the payload has no room for four more bytes.
+    pub fn crc32_append(&mut self) -> Result<(), CspError> {
+        crate::error::csp_result(unsafe { sys::csp_crc32_append(self.inner) })
+    }
+
+    /// Check and remove a trailing CRC32 (over header and payload, or over the
+    /// payload only as older senders do).
+    ///
+    /// # Errors
+    /// [`CspError::Crc32Failed`] if neither matches.
+    pub fn crc32_verify(&mut self) -> Result<(), CspError> {
+        crate::error::csp_result(unsafe { sys::csp_crc32_verify(self.inner) })
     }
 
     /// Consume this `Packet` and return the raw pointer **without freeing it**.
