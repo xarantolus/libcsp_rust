@@ -262,6 +262,8 @@ impl Connection {
         use alloc::vec::Vec;
         struct VecCtx<F> {
             buf: Vec<u8>,
+            /// Bytes written so far (in order).
+            received: usize,
             progress: F,
         }
         unsafe extern "C" fn write_cb<F: FnMut(u32, u32, &[u8]) -> bool>(
@@ -289,6 +291,7 @@ impl Connection {
                     size as usize,
                 );
             }
+            ctx.received = end;
             if !(ctx.progress)(end as u32, totalsz, &ctx.buf[..end]) {
                 return crate::error::CSP_ERR_ABORTED;
             }
@@ -296,6 +299,7 @@ impl Connection {
         }
         let mut ctx = VecCtx {
             buf: Vec::new(),
+            received: 0,
             progress: on_progress,
         };
         let user = sys::csp_sfp_recv_t {
@@ -304,8 +308,11 @@ impl Connection {
         };
         let ret =
             unsafe { sys::csp_sfp_recv_fp(self.inner, &user, timeout, core::ptr::null_mut()) };
-        if ret == (sys::CSP_ERR_NONE as i32) {
+        // Only a transfer that delivered every byte is complete.
+        if ret == (sys::CSP_ERR_NONE as i32) && ctx.received == ctx.buf.len() {
             Ok(ctx.buf)
+        } else if ret == (sys::CSP_ERR_NONE as i32) {
+            Err(CspError::TimedOut)
         } else {
             Err(CspError::from(ret))
         }
