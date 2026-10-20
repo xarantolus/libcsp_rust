@@ -109,6 +109,8 @@ pub mod consts;
 pub mod crc32;
 mod error;
 mod ffi_util;
+#[cfg(feature = "hmac")]
+pub mod hmac;
 pub mod iflist;
 pub mod init;
 pub mod interface;
