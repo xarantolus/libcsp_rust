@@ -37,21 +37,40 @@ pub struct IfStats {
 
 impl crate::CspNode {
     pub fn ident(&self, node: u16, timeout: u32) -> Result<Ident> {
+        self.ident_with_opts(node, timeout, 0)
+    }
+
+    /// Like [`ident`](Self::ident), with connection options (e.g.
+    /// [`conn_opts::HMAC`](crate::conn_opts::HMAC)) added to the CRC32 that
+    /// `csp_cmp` always uses.
+    pub fn ident_with_opts(&self, node: u16, timeout: u32, opts: u32) -> Result<Ident> {
         // Safety: Creating a zeroed struct is safe as it's passed to C.
         let mut msg: sys::csp_cmp_message = unsafe { core::mem::zeroed() };
         // CMP_SIZE(ident) = 2 (type+code) + sizeof(ident struct)
         // Safety: Union access is safe here because we're just calculating size.
         let size = 2 + core::mem::size_of_val(unsafe { &msg.__bindgen_anon_1.ident });
+        msg.type_ = sys::csp_cmp_type_t_CSP_CMP_REQUEST as u8;
+        msg.code = sys::csp_cmp_code_t_CSP_CMP_IDENT as u8;
 
-        // Safety: CSP_CMP_IDENT is 1, size fits in i32. `msg` is valid.
-        let ret = unsafe {
-            sys::csp_cmp(
+        // The request as csp_cmp sends it, with the caller's options.
+        let ptr = (&mut msg as *mut sys::csp_cmp_message).cast::<core::ffi::c_void>();
+        let status = unsafe {
+            sys::csp_transaction_w_opts(
+                sys::csp_prio_t_CSP_PRIO_NORM as u8,
                 node,
+                sys::csp_service_port_t_CSP_CMP as u8,
                 timeout,
-                sys::csp_cmp_code_t_CSP_CMP_IDENT as u8,
+                ptr,
                 size as i32,
-                (&mut msg as *mut sys::csp_cmp_message).cast(),
+                ptr,
+                size as i32,
+                sys::CSP_O_CRC32 | opts,
             )
+        };
+        let ret = if status == 0 {
+            sys::CSP_ERR_TIMEDOUT
+        } else {
+            0
         };
         if ret == 0 {
             // Safety: The command succeeded, so the ident union field is valid.
